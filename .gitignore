@@ -21,6 +21,7 @@ android/keystores/
 # React Native - iOS
 ios/build/
 ios/Pods/
+ios/.xcode.env.local
 DerivedData/
 
 # Xcode
@@ -57,4 +58,7 @@ coverage/
 
 # Bun
 bun.lockb
+
+# EAS
+.npm-cache/
 
