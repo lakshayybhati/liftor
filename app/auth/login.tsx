@@ -1,38 +1,45 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Image } from 'react-native';
 import { Link, Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { Eye, EyeOff, LogIn } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Image } from 'react-native';
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { signIn, isAuthLoading, resendConfirmationEmail, googleSignIn, sendPasswordReset } = useAuth();
+  const auth = useAuth();
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  const isAuthReady = !!auth;
+  const {
+    signIn = async () => ({ success: false, error: 'Auth not ready' }),
+    resendConfirmationEmail = async () => ({ success: false, error: 'Auth not ready' }),
+    requestOtp = async () => ({ success: false, error: 'Auth not ready' }),
+    isAuthLoading = !isAuthReady,
+    googleSignIn = async () => ({ success: false, error: 'Auth not ready' }),
+  } = auth ?? {};
 
   const canSubmit = useMemo(() => email.trim().length > 3 && password.length >= 6, [email, password]);
 
   const onSubmit = useCallback(async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || isSubmitting) return;
     setError(null);
+    setIsSubmitting(true);
     const res = await signIn(email.trim(), password);
     if (!res.success) {
-      const msg = (res.error || '').toLowerCase();
-      if (msg.includes('email') && msg.includes('confirm')) {
-        setError('Email not confirmed. Please check your inbox for the verification link.');
-      } else {
-        setError(res.error ?? 'Login failed. Try again.');
-      }
+      setError(res.error ?? 'Login failed. Try again.');
+      setIsSubmitting(false);
       return;
     }
     router.replace('/home');
-  }, [canSubmit, email, password, signIn, router]);
+    setIsSubmitting(false);
+  }, [canSubmit, email, password, signIn, router, isSubmitting]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -48,6 +55,12 @@ export default function LoginScreen() {
         <Text style={styles.title}>Welcome back</Text>
         <Text style={styles.subtitle}>Sign in to continue</Text>
 
+        {!isAuthReady && (
+          <View style={{ gap: 8 }}>
+            <Text style={styles.loadingText}>Loading authentication…</Text>
+          </View>
+        )}
+
         {error && (
           <View style={{ gap: 8 }}>
             <Text style={styles.errorText}>{error}</Text>
@@ -56,7 +69,12 @@ export default function LoginScreen() {
                 style={styles.resendBtn}
                 onPress={async () => {
                   const r = await resendConfirmationEmail(email.trim());
-                  setError(r.success ? 'Confirmation email sent. Check your inbox.' : r.error ?? 'Failed to send email.');
+                  // reuse error text area to show confirmation
+                  if (!(r.success)) {
+                    setError(r.error ?? 'Failed to send email.');
+                  } else {
+                    setError('Confirmation email sent. Check your inbox.');
+                  }
                 }}
               >
                 <Text style={styles.resendText}>Resend confirmation email</Text>
@@ -87,10 +105,10 @@ export default function LoginScreen() {
               style={[styles.input, styles.passwordInput]}
               placeholder="••••••••"
               placeholderTextColor={theme.color.muted}
-                textContentType="none"
-                autoComplete="off"
-                autoCorrect={false}
-                autoCapitalize="none"
+              textContentType="none"
+              autoComplete="off"
+              autoCorrect={false}
+              autoCapitalize="none"
               secureTextEntry={!showPassword}
               value={password}
               onChangeText={setPassword}
@@ -104,28 +122,36 @@ export default function LoginScreen() {
               {showPassword ? <EyeOff color={theme.color.ink} size={20} /> : <Eye color={theme.color.ink} size={20} />}
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            onPress={async () => {
-              const res = await sendPasswordReset(email.trim());
-              if (!res.success) {
-                setError(res.error ?? 'Failed to send reset email.');
-              } else {
-                setError('Password reset email sent if the address exists.');
-              }
-            }}
-            style={styles.forgotBtn}
-            accessibilityRole="button"
-          >
-            <Text style={styles.forgotText}>Forgot password?</Text>
-          </TouchableOpacity>
         </View>
 
+        <TouchableOpacity
+          onPress={async () => {
+            if (email.trim().length < 3) {
+              setError('Enter your email first.');
+              return;
+            }
+            setError(null);
+            const r = await requestOtp({ identifier: email.trim(), method: 'email', mode: 'reset' });
+            if (!r.success) {
+              setError(r.error ?? 'Failed to send code.');
+              return;
+            }
+            router.replace({ pathname: '/auth/verify-otp', params: { identifier: email.trim(), mode: 'reset' } });
+          }}
+          style={styles.forgotBtn}
+          accessibilityRole="button"
+        >
+          <Text style={styles.forgotText}>Forgot password?</Text>
+        </TouchableOpacity>
+
         <Button
-          title={isAuthLoading ? 'Signing in…' : 'Sign in'}
+          title={isSubmitting ? 'Signing in…' : 'Sign in'}
           onPress={onSubmit}
-          disabled={!canSubmit || isAuthLoading}
+          disabled={!isAuthReady || !canSubmit || isSubmitting || isAuthLoading}
           icon={<LogIn color="#fff" size={18} />}
         />
+
+        {/* Keep Google sign-in as before */}
 
         <TouchableOpacity
           onPress={async () => { await googleSignIn(); }}
@@ -160,8 +186,6 @@ const styles = StyleSheet.create({
   passwordInput: { flex: 1 },
   eyeBtn: { paddingHorizontal: 10, height: 48, justifyContent: 'center' },
   errorText: { color: '#e5484d', marginBottom: 4 },
-  resendBtn: { alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: theme.color.accent.primary + '10' },
-  resendText: { color: theme.color.accent.primary, fontWeight: '600' },
   forgotBtn: { alignSelf: 'flex-end', marginTop: 6, paddingVertical: 4, paddingHorizontal: 6 },
   forgotText: { color: theme.color.accent.primary, fontWeight: '600' },
   bottomRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },
