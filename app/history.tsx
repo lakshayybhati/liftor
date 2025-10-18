@@ -318,23 +318,27 @@ export default function HistoryScreen() {
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
           >
-            {/* Draw connecting line */}
-            <Polyline
-              points={recentWeightData.map((point, index) => {
-                const x = (index / (recentWeightData.length - 1)) * 100;
-                const y = 100 - ((point.weight - minWeight) / weightRange) * 100;
-                return `${x},${y}`;
-              }).join(' ')}
-              fill="none"
-              stroke="#FF4444"
-              strokeWidth="0.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+            {/* Draw connecting line only if we have at least 2 points */}
+            {recentWeightData.length > 1 && (
+              <Polyline
+                points={recentWeightData.map((point, index) => {
+                  const denom = Math.max(1, recentWeightData.length - 1);
+                  const x = (index / denom) * 100;
+                  const y = 100 - ((point.weight - minWeight) / weightRange) * 100;
+                  return `${x},${y}`;
+                }).join(' ')}
+                fill="none"
+                stroke="#FF4444"
+                strokeWidth="0.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
             
             {/* Draw points */}
             {recentWeightData.map((point, index) => {
-              const x = (index / (recentWeightData.length - 1)) * 100;
+              const denom = Math.max(1, recentWeightData.length - 1);
+              const x = (index / denom) * 100;
               const y = 100 - ((point.weight - minWeight) / weightRange) * 100;
               return (
                 <Circle

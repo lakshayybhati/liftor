@@ -147,7 +147,7 @@ export default function LoginScreen() {
         <Button
           title={isSubmitting ? 'Signing in…' : 'Sign in'}
           onPress={onSubmit}
-          disabled={!isAuthReady || !canSubmit || isSubmitting || isAuthLoading}
+          disabled={!canSubmit || isSubmitting}
           icon={<LogIn color="#fff" size={18} />}
         />
 
@@ -194,4 +194,7 @@ const styles = StyleSheet.create({
   linkText: { color: theme.color.accent.primary, fontWeight: '600' },
   oauthBtn: { marginTop: 12, height: 48, borderRadius: 12, borderWidth: 1, borderColor: theme.color.line, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.card },
   oauthText: { color: theme.color.ink, fontWeight: '600' },
+  loadingText: { color: theme.color.muted, textAlign: 'center' },
+  resendBtn: { alignSelf: 'center', marginTop: 4 },
+  resendText: { color: theme.color.accent.primary, fontWeight: '600', fontSize: 14 },
 });

@@ -7,13 +7,24 @@ import { Button } from '@/components/ui/Button';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import * as ImagePicker from 'expo-image-picker';
-import { Camera, Save, UserCog, ChevronRight } from 'lucide-react-native';
+import { Camera, Image as ImageIcon, Save, UserCog, ChevronRight, ArrowLeft } from 'lucide-react-native';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const { data: profile, isLoading, updateProfile, uploadAvatar, updateAvatarUrl } = useProfile();
-  const { session, supabase } = useAuth();
+  const auth = useAuth();
   const insets = useSafeAreaInsets();
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.color.bg }}>
+        <ActivityIndicator size="large" color={theme.color.accent.primary} />
+      </View>
+    );
+  }
+
+  const { session, supabase } = auth;
   // Derive a sensible default display name from profile, auth metadata, or email
   const derivedName = useMemo(() => {
     const metaName = (session?.user?.user_metadata as any)?.name as string | undefined;
@@ -29,6 +40,7 @@ export default function ProfileScreen() {
   const [newPassword, setNewPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [saving, setSaving] = useState<boolean>(false);
+  // Holds a newly selected image URI for upload. Existing avatar (if any) comes from session metadata.
   const [avatar, setAvatar] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -49,7 +61,27 @@ export default function ProfileScreen() {
     return nameChanged || emailChanged || pwValid || !!avatar;
   }, [name, email, newPassword, confirmPassword, session?.user?.email, avatar, derivedName]);
 
-  const pickImage = useCallback(async () => {
+  const openCamera = useCallback(async () => {
+    try {
+      if (Platform.OS !== 'web') {
+        const { status } = await ImagePicker.requestCameraPermissionsAsync();
+        if (status !== 'granted') {
+          alert('Camera permission is required');
+          return;
+        }
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+      });
+      if (!result.canceled) {
+        setAvatar(result.assets[0]?.uri ?? null);
+      }
+    } catch (e) {
+      console.error('camera error', e);
+    }
+  }, []);
+
+  const openGallery = useCallback(async () => {
     try {
       if (Platform.OS !== 'web') {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -66,9 +98,27 @@ export default function ProfileScreen() {
         setAvatar(result.assets[0]?.uri ?? null);
       }
     } catch (e) {
-      console.error('pick image error', e);
+      console.error('gallery error', e);
     }
   }, []);
+
+  const pickImage = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      // Web: gallery only
+      await openGallery();
+      return;
+    }
+    Alert.alert(
+      'Change Photo',
+      'Choose a source',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Take Photo', onPress: openCamera },
+        { text: 'Choose from Library', onPress: openGallery },
+      ],
+      { cancelable: true }
+    );
+  }, [openCamera, openGallery]);
 
   const onSave = useCallback(async () => {
     if (!canSave) return;
@@ -89,17 +139,22 @@ export default function ProfileScreen() {
       }
       if (avatar) {
         const publicUrl = await uploadAvatar(avatar);
+        // Immediately reflect uploaded avatar in UI
+        setAvatar(publicUrl);
         await updateAvatarUrl(publicUrl);
       }
-      // 2) Email change: require verification; gracefully handle OAuth providers
+      // 2) Email change: require in-app OTP verification; gracefully handle OAuth providers
       if ((session?.user?.email ?? '') !== trimmedEmail) {
         if (provider && provider !== 'email') {
           // For OAuth users, changing email is managed by the identity provider
           setSuccess('Name saved. Email changes for Google/SSO accounts must be done with your provider.');
         } else {
-          const { error: emailErr } = await supabase.auth.updateUser({ email: trimmedEmail });
-          if (emailErr) throw emailErr;
-          setSuccess('Email update requested. Check your inbox to confirm the change.');
+          // Send OTP for profile change verification
+          const { error: otpErr } = await supabase.auth.signInWithOtp({ email: trimmedEmail, options: { shouldCreateUser: false } });
+          if (otpErr) throw otpErr;
+          // Navigate to OTP verify screen; after verify with mode=profile we celebrate
+          router.replace({ pathname: '/auth/verify-otp', params: { identifier: trimmedEmail, mode: 'profile' } });
+          return;
         }
       }
       // 3) Password change: ensure confirmation matches and refresh session before updating
@@ -108,8 +163,14 @@ export default function ProfileScreen() {
         try {
           await supabase.auth.refreshSession();
         } catch {}
-        const { error: pwErr } = await supabase.auth.updateUser({ password: newPassword });
-        if (pwErr) throw pwErr;
+        // For password change, require OTP before update to add protection
+        const emailForOtp = (session?.user?.email ?? '').trim();
+        if (emailForOtp) {
+          const { error: otpErr } = await supabase.auth.signInWithOtp({ email: emailForOtp, options: { shouldCreateUser: false } });
+          if (otpErr) throw otpErr;
+          router.replace({ pathname: '/auth/verify-otp', params: { identifier: emailForOtp, mode: 'reset' } });
+          return;
+        }
       }
       Alert.alert('Profile updated', 'Your changes have been saved.');
       router.back();
@@ -123,7 +184,19 @@ export default function ProfileScreen() {
 
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
-      <Stack.Screen options={{ title: 'Edit Profile' }} />
+      <Stack.Screen options={{ headerShown: false }} />
+      <View style={[styles.header, { paddingTop: insets.top }]}>
+        <TouchableOpacity 
+          style={styles.backButton}
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
+          <ArrowLeft color={theme.color.ink} size={24} />
+        </TouchableOpacity>
+        <Text style={styles.title}>Edit Profile</Text>
+        <View style={styles.placeholder} />
+      </View>
       {isLoading ? (
         <Text style={styles.loading}>Loading…</Text>
       ) : (
@@ -131,13 +204,18 @@ export default function ProfileScreen() {
           {!!error && <Text style={styles.errorText}>{error}</Text>}
           {!!success && <Text style={styles.successText}>{success}</Text>}
           <TouchableOpacity style={styles.avatarBtn} onPress={pickImage} testID="pick-avatar">
-            {avatar ? (
-              <Image source={{ uri: avatar }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <Camera color={theme.color.muted} size={20} />
-              </View>
-            )}
+            {(() => {
+              const existing = (session?.user?.user_metadata as any)?.avatar_url as string | undefined;
+              const displayUri = avatar || existing || null;
+              if (displayUri) {
+                return <Image source={{ uri: displayUri }} style={styles.avatar} />;
+              }
+              return (
+                <View style={styles.avatarPlaceholder}>
+                  <ImageIcon color={theme.color.muted} size={20} />
+                </View>
+              );
+            })()}
             <Text style={styles.avatarText}>Change Photo</Text>
           </TouchableOpacity>
 
@@ -223,6 +301,26 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.color.bg, padding: 16 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.color.line,
+    marginHorizontal: -16,
+    marginTop: -16,
+  },
+  backButton: {
+    padding: 6,
+  },
+  title: {
+    fontSize: theme.size.h2,
+    fontWeight: '700',
+    color: theme.color.ink,
+  },
+  placeholder: { width: 32 },
   loading: { color: theme.color.muted },
   form: { gap: 16 },
   errorText: { color: '#e5484d' },

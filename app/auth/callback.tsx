@@ -5,7 +5,20 @@ import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 
 export default function AuthCallbackScreen() {
-  const { session, isAuthLoading } = useAuth();
+  const auth = useAuth();
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <View style={styles.container}>
+        <Stack.Screen options={{ title: 'Loading...', headerShown: false }} />
+        <ActivityIndicator color={theme.color.accent.primary} />
+        <Text style={styles.text}>Loading...</Text>
+      </View>
+    );
+  }
+
+  const { session, isAuthLoading } = auth;
 
   useEffect(() => {
     if (session && !isAuthLoading) {

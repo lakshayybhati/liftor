@@ -1,18 +1,14 @@
 import { validateWeeklyPlan, validateDailyPlan, repairPlanData } from '@/utils/plan-schemas';
 import { productionMonitor } from '@/utils/production-monitor';
 import type { User, CheckinData, WeeklyBasePlan, DailyPlan } from '@/types/user';
-
-// AI Provider Configuration
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
-const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-const FALLBACK_ENDPOINT = 'https://toolkit.rork.com/text/llm/';
+import { generateAICompletion, type Message } from '@/utils/ai-client';
 
 // Production-ready configuration
 const PRODUCTION_CONFIG = {
   MAX_TOKENS_PER_REQUEST: 1024, // Smaller for reliability
   MAX_RETRIES: 3,
   RETRY_DELAY: 1000,
-  REQUEST_TIMEOUT: 30000,
+  REQUEST_TIMEOUT: 120000,
   RATE_LIMIT_DELAY: 800, // Prevent rate limiting
 };
 
@@ -29,7 +25,7 @@ async function makeProductionAIRequest(
 ): Promise<string> {
   
   // Optimize prompt using hierarchical context
-  const optimizedPrompt = optimizePrompt(prompt, context);
+  const optimizedPrompt = optimizePrompt(prompt, context).slice(-6000); // hard cap prompt length
   console.log(`🚀 Production AI request (${optimizedPrompt.length} chars, max tokens: ${maxTokens})`);
   
   let lastError: Error | null = null;
@@ -58,7 +54,7 @@ async function makeProductionAIRequest(
       console.warn(`⚠️ Attempt ${attempt} failed:`, error);
       
       if (attempt < PRODUCTION_CONFIG.MAX_RETRIES) {
-        const delay = PRODUCTION_CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1);
+        const delay = Math.min(1500, PRODUCTION_CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1));
         console.log(`⏱️ Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -103,83 +99,27 @@ function optimizePrompt(prompt: string, context: string): string {
 }
 
 /**
- * Make AI request with timeout handling
+ * Make AI request using the central AI client with DeepSeek → Gemini → Rork fallback
  */
 async function makeAIRequestWithTimeout(prompt: string, maxTokens: number): Promise<string> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), PRODUCTION_CONFIG.REQUEST_TIMEOUT);
-  
   try {
-    // Try Gemini first
-    if (GEMINI_API_KEY) {
-      const response = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: maxTokens,
-            candidateCount: 1,
-          },
-          safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-          ],
-        }),
-        signal: controller.signal,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        
-        // Check for safety blocks or errors
-        if (data.promptFeedback?.blockReason) {
-          throw new Error(`Blocked: ${data.promptFeedback.blockReason}`);
-        }
-        
-        if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
-          throw new Error('No text in response');
-        }
-        
-        const text = data.candidates[0].content.parts[0].text;
-        console.log('✅ Gemini success');
-        return text;
-      } else {
-        const errorText = await response.text();
-        throw new Error(`Gemini error: ${response.status} - ${errorText}`);
-      }
+    const messages: Message[] = [
+      { role: 'user', content: prompt }
+    ];
+    
+    // Use the central AI client which handles DeepSeek → Gemini → Rork fallback chain
+    const response = await generateAICompletion(messages);
+    
+    if (!response.completion) {
+      throw new Error('No completion in AI response');
     }
     
-    // Fallback to toolkit API
-    console.log('🔄 Using fallback provider');
-    const response = await fetch(FALLBACK_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Fallback error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    if (!data?.completion) {
-      throw new Error('No completion in fallback');
-    }
-
-    console.log('✅ Fallback success');
-    return data.completion;
+    console.log('✅ AI response received');
+    return response.completion;
     
-  } finally {
-    clearTimeout(timeoutId);
+  } catch (error) {
+    console.error('❌ AI request failed:', error);
+    throw error;
   }
 }
 

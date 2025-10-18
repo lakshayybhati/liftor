@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform } from 'react-native';
+import React, { useEffect, useMemo, useCallback, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 
@@ -12,18 +12,56 @@ import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
+import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription-helpers';
 
 export default function HomeScreen() {
   const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress } = useUserStore();
-  const { session } = useAuth();
+  const auth = useAuth();
   const { data: profile } = useProfile();
+  const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
   const insets = useSafeAreaInsets();
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={theme.color.accent.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  const session = auth?.session ?? null;
 
   // Always call hooks before any conditional returns
   const todayCheckin = getTodayCheckin();
   const todayPlan = getTodayPlan();
   const streak = getStreak();
   const recentCheckins = getRecentCheckins(7);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const tier = await getSubscriptionTier();
+        setSubscriptionBadge(tier.tier === 'trial' ? 'Trial' : tier.tier === 'elite' ? 'Elite' : null);
+      } catch {
+        setSubscriptionBadge(null);
+      }
+    })();
+  }, []);
+
+  // Enforce paywall on Home if user is not entitled
+  useEffect(() => {
+    (async () => {
+      try {
+        const entitled = await hasActiveSubscription();
+        if (!entitled) {
+          router.replace({ pathname: '/paywall', params: { next: '/(tabs)/home' } as any });
+        }
+      } catch {}
+    })();
+  }, []);
 
   // Compute workout caption from today's plan
   const workoutCaption = useMemo(() => {
@@ -150,7 +188,14 @@ export default function HomeScreen() {
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
             <Text style={styles.greeting}>{getGreeting()},</Text>
-            <Text style={styles.userName} testID="home-greeting-name">{(profile?.name ?? session?.user?.user_metadata?.name ?? user?.name ?? session?.user?.email ?? '—')}! 👋</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={styles.userName} testID="home-greeting-name">{(profile?.name ?? session?.user?.user_metadata?.name ?? user?.name ?? session?.user?.email ?? '—').split(' ')[0]}! 👋</Text>
+              {subscriptionBadge && (
+                <View style={[styles.badge, subscriptionBadge === 'Elite' ? styles.eliteBadge : styles.trialBadge]}>
+                  <Text style={[styles.badgeText, subscriptionBadge === 'Elite' ? styles.eliteText : styles.trialText]}>{subscriptionBadge}</Text>
+                </View>
+              )}
+            </View>
             
             {streak > 0 && (
               <View style={styles.streakBadge}>
@@ -326,6 +371,30 @@ const styles = StyleSheet.create({
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.accent.primary + '40',
+  },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  eliteBadge: {
+    backgroundColor: '#FFD700',
+  },
+  trialBadge: {
+    backgroundColor: theme.color.accent.blue + '20',
+    borderWidth: 1,
+    borderColor: theme.color.accent.blue,
+  },
+  badgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  eliteText: {
+    color: '#000',
+  },
+  trialText: {
+    color: theme.color.accent.blue,
   },
   streakText: {
     color: theme.color.accent.primary,

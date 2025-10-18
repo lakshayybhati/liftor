@@ -1,10 +1,12 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, Animated } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Alert } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { DailyPlan } from '@/types/user';
 import { generateDailyPlan } from '@/services/documented-ai-service';
+import { logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
+import { getProductionConfig } from '@/utils/production-config';
 
 const LOADING_MESSAGES = [
   "📚 Gathering research specific to your goals and preferences…",
@@ -12,6 +14,15 @@ const LOADING_MESSAGES = [
   "🧭 Cross‑checking trusted sources for training, nutrition, and recovery…",
   "🛠️ Customizing recommendations to match your equipment and routine…",
   "✅ Finalizing today’s plan with precise adjustments…",
+];
+
+const SLOW_PROMPTS = [
+  'Your data’s one of a kind we’re tailoring this plan just right',
+  'This one’s special. Give us a moment to fine-tune everything',
+  'Your plan’s being crafted with extra care. give us a moment',
+  'this isn’t just any plan… it’s yours. Hold tight',
+  'We’re refining every detail to make this match you perfectly',
+  'Unique input calls for a custom touch just a few seconds more',
 ];
 
 export default function GeneratingPlanScreen() {
@@ -30,6 +41,18 @@ export default function GeneratingPlanScreen() {
         return;
       }
 
+      // Validate configuration
+      const config = getProductionConfig();
+      const isDev = __DEV__;
+      
+      console.log('[GenerateDailyPlan] Starting daily plan generation...');
+      console.log('[GenerateDailyPlan] Environment:', isDev ? 'development' : 'production');
+      console.log('[GenerateDailyPlan] Config valid:', config.isValid);
+      
+      if (!config.isValid && !isDev) {
+        console.warn('[GenerateDailyPlan] ⚠️ Configuration issues:', config.errors);
+      }
+
       const todayCheckin = getTodayCheckin();
       const recentCheckins = getRecentCheckins(15);
 
@@ -45,7 +68,22 @@ export default function GeneratingPlanScreen() {
       }
 
       // Use the new AI service for daily plan generation
+      const startTime = Date.now();
+      // Show a friendly message if generation exceeds 45 seconds
+      const slowTimer = setTimeout(() => {
+        const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
+        Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
+      }, 45000);
       const planData = await generateDailyPlan(user, todayCheckin, recentCheckins, basePlan);
+      const generationTime = Date.now() - startTime;
+      clearTimeout(slowTimer);
+      
+      // Log successful generation
+      await logPlanGenerationAttempt('daily', true, null, {
+        generationTime,
+        checkinEnergy: todayCheckin.energy,
+        checkinStress: todayCheckin.stress
+      });
       
       // Add the plan to store
       await addPlan(planData);
@@ -56,17 +94,58 @@ export default function GeneratingPlanScreen() {
       }, 1000);
 
     } catch (error) {
+      // Ensure slowTimer is cleared on error
+      try { /* no-op if not set */ } catch {}
       console.error('Error generating plan:', error);
       
-      // Create an emergency fallback plan
+      // Log the failure
       const todayCheckinData = getTodayCheckin();
+      await logPlanGenerationAttempt('daily', false, error, {
+        userDataPresent: !!user,
+        checkinPresent: !!todayCheckinData,
+        basePlanPresent: !!getCurrentBasePlan(),
+        errorMessage: String(error),
+        errorType: error instanceof Error ? error.name : 'Unknown'
+      });
+      
+      // Determine error type for user message
+      const errorMessage = String(error);
+      const isNetworkError = errorMessage.includes('network') || 
+                            errorMessage.includes('fetch') || 
+                            errorMessage.includes('timeout');
+      const isConfigError = errorMessage.includes('API key') || 
+                           errorMessage.includes('configuration');
+      
+      // Create an emergency fallback plan
       const basePlan = getCurrentBasePlan();
       
       if (!user || !todayCheckinData) {
         // If critical data is missing, redirect to home
         console.error('Critical data missing for plan generation');
-        router.replace('/(tabs)/home');
+        Alert.alert(
+          'Data Missing',
+          'Please complete your daily check-in first.',
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }]
+        );
         return;
+      }
+      
+      // Show user-friendly error
+      if (isNetworkError) {
+        Alert.alert(
+          'Connection Issue',
+          'Unable to reach AI services. Using your base plan with today\'s adjustments.',
+          [{ text: 'OK' }]
+        );
+      } else if (isConfigError) {
+        Alert.alert(
+          'Service Issue',
+          'Using your base plan adapted for today\'s check-in.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        // Don't show alert for successful fallback
+        console.log('📋 Using fallback plan based on check-in data');
       }
       
       const fallbackPlan = createEmergencyFallbackPlan(todayCheckinData);

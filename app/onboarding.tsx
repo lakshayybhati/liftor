@@ -8,14 +8,15 @@ import {
   TouchableOpacity, 
   TextInput,
   useWindowDimensions,
-  Animated
+  Animated,
+  Alert,
+  ActivityIndicator
 } from 'react-native';
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Chip } from '@/components/ui/Chip';
-import RevenueCatUI, { PAYWALL_RESULT } from 'react-native-purchases-ui';
 import Constants from 'expo-constants';
 
 import { useUserStore } from '@/hooks/useUserStore';
@@ -37,9 +38,11 @@ import {
   ALCOHOL_FREQUENCY,
   WORKOUT_SPLITS
 } from '@/constants/fitness';
-import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel } from '@/types/user';
+import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel, WorkoutIntensity } from '@/types/user';
 import { theme } from '@/constants/colors';
 import { useProfile } from '@/hooks/useProfile';
+import { useAuth } from '@/hooks/useAuth';
+import { Power } from 'lucide-react-native';
 
 
 
@@ -63,11 +66,25 @@ const calculateTDEE = (bmr: number, activityLevel: ActivityLevel): number => {
 
 export default function OnboardingScreen() {
   const { updateUser } = useUserStore();
+  const auth = useAuth();
   const { width: screenWidth } = useWindowDimensions();
   const isSmallScreen = screenWidth < 380;
   const [step, setStep] = useState(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const { updateProfile } = useProfile();
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={theme.color.accent.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const { signOut } = auth;
   
   // Form state
   const [name] = useState('');
@@ -105,6 +122,7 @@ export default function OnboardingScreen() {
   const [preferredWorkoutSplit, setPreferredWorkoutSplit] = useState('');
   const [specialRequests, setSpecialRequests] = useState('');
   const [goalWeight, setGoalWeight] = useState('');
+  const [workoutIntensity, setWorkoutIntensity] = useState<WorkoutIntensity>('Optimal');
   
   // Removed VMN transcription per requirements
 
@@ -239,7 +257,8 @@ export default function OnboardingScreen() {
         // All fields in this step are optional
         break;
         
-      case 6: // Specifics (all optional)
+      case 6: // Specifics
+        if (!goalWeight || !goalWeight.trim()) missingFields.push('Goal Weight');
         break;
         
       default:
@@ -296,6 +315,7 @@ export default function OnboardingScreen() {
       preferredWorkoutSplit: preferredWorkoutSplit || undefined,
       specialRequests: specialRequests || undefined,
       goalWeight: goalWeight ? parseFloat(goalWeight) : undefined,
+      workoutIntensity: workoutIntensity || undefined,
     };
 
     try {
@@ -336,6 +356,7 @@ export default function OnboardingScreen() {
         preferred_workout_split: preferredWorkoutSplit || null,
         special_requests: specialRequests || null,
         goal_weight: goalWeight ? parseFloat(goalWeight) : null,
+        workout_intensity: workoutIntensity || null,
       });
       console.log('[Onboarding] Profile synced to Supabase');
     } catch (e) {
@@ -345,17 +366,33 @@ export default function OnboardingScreen() {
     try {
       const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
       const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
-      const result = await RevenueCatUI.presentPaywallIfNeeded({
-        requiredEntitlementIdentifier: requiredEntitlement,
-      });
-      if (result === PAYWALL_RESULT.PURCHASED || result === PAYWALL_RESULT.RESTORED || result === PAYWALL_RESULT.NOT_PRESENTED) {
-        router.replace('/generating-base-plan');
-      } else {
-        router.replace('/(tabs)/home');
-      }
+      // Navigate to custom paywall; it will handle purchase/restore and then continue
+      router.replace({ pathname: '/paywall', params: { next: '/generating-base-plan' } as any });
     } catch (e) {
       router.replace('/(tabs)/home');
     }
+  };
+
+  const handleSignOutPress = () => {
+    Alert.alert(
+      'Sign out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign out',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await signOut();
+            } finally {
+              router.replace('/auth/login');
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
   };
 
   const steps = [
@@ -736,9 +773,9 @@ export default function OnboardingScreen() {
 
           <View style={styles.inputRow}>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Goal weight (kg)</Text>
+              <Text style={styles.inputLabel}>Goal weight (kg) *</Text>
               <TextInput
-                style={styles.numberInput}
+                style={[styles.numberInput, !goalWeight.trim() && styles.requiredField]}
                 value={goalWeight}
                 onChangeText={setGoalWeight}
                 placeholder={weight ? (parseFloat(weight) - 5).toString() : "65"}
@@ -801,7 +838,18 @@ export default function OnboardingScreen() {
             />
           </View>
 
-          
+          <Text style={styles.sectionLabel}>Workout Intensity Preference</Text>
+          <View style={styles.chipsContainer}>
+            {(['Optimal', 'Ego lifts', 'Recovery focused'] as WorkoutIntensity[]).map((intensity) => (
+              <Chip
+                key={intensity}
+                label={intensity}
+                selected={workoutIntensity === intensity}
+                onPress={() => setWorkoutIntensity(intensity)}
+                color={theme.color.accent.primary}
+              />
+            ))}
+          </View>
 
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>Special requests (optional)</Text>
@@ -830,6 +878,11 @@ export default function OnboardingScreen() {
       />
       
       <SafeAreaView style={styles.safeArea}>
+        <View style={styles.topBar}>
+          <TouchableOpacity onPress={handleSignOutPress} accessibilityLabel="Sign out" accessibilityRole="button" style={styles.powerButton}>
+            <Power color={theme.color.ink} size={20} />
+          </TouchableOpacity>
+        </View>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
             <Text style={styles.welcomeText}>Welcome to</Text>
@@ -910,6 +963,17 @@ const styles = StyleSheet.create({
   },
   safeArea: {
     flex: 1,
+  },
+  topBar: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingHorizontal: theme.space.sm,
+    paddingBottom: theme.space.xs,
+  },
+  powerButton: {
+    padding: 10,
+    borderRadius: 12,
   },
   scrollContent: {
     flexGrow: 1,

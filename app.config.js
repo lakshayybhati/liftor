@@ -10,6 +10,13 @@ module.exports = ({ config }) => {
       EXPO_PUBLIC_SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL,
       EXPO_PUBLIC_SUPABASE_ANON_KEY: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
       EXPO_PUBLIC_GEMINI_API_KEY: process.env.EXPO_PUBLIC_GEMINI_API_KEY,
+      // Generic AI config (so TestFlight has everything it needs)
+      EXPO_PUBLIC_AI_PROVIDER: process.env.EXPO_PUBLIC_AI_PROVIDER,
+      // Do NOT fallback to Gemini key for the generic AI key; ensures DeepSeek primary
+      EXPO_PUBLIC_AI_API_KEY: process.env.EXPO_PUBLIC_AI_API_KEY,
+      EXPO_PUBLIC_AI_MODEL: process.env.EXPO_PUBLIC_AI_MODEL,
+      EXPO_PUBLIC_AI_TIMEOUT_MS: process.env.EXPO_PUBLIC_AI_TIMEOUT_MS || '120000',
+      EXPO_PUBLIC_ENABLE_FALLBACK: process.env.EXPO_PUBLIC_ENABLE_FALLBACK,
       EXPO_PUBLIC_REVENUECAT_IOS_API_KEY:
         process.env.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY ||
         process.env.EXPO_PUBLIC_REVENUECAT_KEY ||

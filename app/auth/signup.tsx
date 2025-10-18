@@ -10,97 +10,41 @@ import { Image } from 'react-native';
 
 export default function SignupScreen() {
   const router = useRouter();
-  const { signUp, isAuthLoading, googleSignIn } = useAuth();
+  const auth = useAuth();
   const [name, setName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [confirm, setConfirm] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  const passwordEval = useMemo(() => {
-    const value = password || '';
-    const trimmedName = (name || '').trim().toLowerCase();
-    const trimmedEmail = (email || '').trim().toLowerCase();
-    const emailLocal = trimmedEmail.split('@')[0] || '';
-
-    const hasLower = /[a-z]/.test(value);
-    const hasUpper = /[A-Z]/.test(value);
-    const hasNumber = /\d/.test(value);
-    const hasSymbol = /[^A-Za-z0-9]/.test(value);
-    const lengthScore = value.length >= 12 ? 2 : value.length >= 8 ? 1 : 0;
-    const varietyCount = [hasLower, hasUpper, hasNumber, hasSymbol].filter(Boolean).length;
-
-    let score = 0;
-    if (value.length >= 6) score = 1;
-    if (value.length >= 8 && varietyCount >= 2) score = 2;
-    if (value.length >= 10 && varietyCount >= 3) score = 3;
-    if (value.length >= 12 && varietyCount === 4) score = 4;
-
-    const containsPersonal = !!value && (
-      (trimmedName && value.toLowerCase().includes(trimmedName)) ||
-      (emailLocal && value.toLowerCase().includes(emailLocal))
-    );
-    if (containsPersonal && score > 1) score -= 1;
-
-    const colors = [
-      theme.color.accent.primary,
-      theme.color.accent.yellow,
-      theme.color.accent.yellow,
-      theme.color.accent.blue,
-      theme.color.accent.green,
-    ];
-    const labels = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong'];
-
-    const suggestions: string[] = [];
-    if (value.length < 8) suggestions.push('Use at least 8 characters');
-    if (!hasUpper) suggestions.push('Add an uppercase letter');
-    if (!hasLower) suggestions.push('Add a lowercase letter');
-    if (!hasNumber) suggestions.push('Add a number');
-    if (!hasSymbol) suggestions.push('Add a symbol');
-    if (containsPersonal) suggestions.push('Avoid using your name or email');
-
-    const clamped = Math.max(0, Math.min(4, score));
-    const activeBars = clamped === 0 && value.length > 0 ? 1 : clamped;
-
-    return {
-      score: clamped,
-      color: colors[clamped],
-      label: labels[clamped],
-      suggestions,
-      activeBars,
-      hasInput: value.length > 0,
-    };
-  }, [password, name, email]);
-
-  const canSubmit = useMemo(() => {
-    return name.trim().length > 0 && email.trim().length > 3 && password.length >= 6 && password === confirm;
-  }, [name, email, password, confirm]);
+  const isAuthReady = !!auth;
+  const {
+    signUp = async () => ({ success: false, error: 'Auth not ready' }),
+    isAuthLoading = !isAuthReady,
+    googleSignIn = async () => ({ success: false, error: 'Auth not ready' }),
+  } = auth ?? {};
+  const canSubmit = useMemo(() => name.trim().length > 0 && email.trim().length > 3 && password.length >= 6 && password === confirm, [name, email, password, confirm]);
 
   const onSubmit = useCallback(async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || isSubmitting) return;
     setError(null);
+    setIsSubmitting(true);
     const res = await signUp(email.trim(), password, name.trim());
     if (!res.success) {
       setError(res.error ?? 'Sign up failed. Try again.');
+      setIsSubmitting(false);
       return;
     }
     if (res.needsEmailConfirmation) {
-      Alert.alert(
-        'Confirm your email',
-        'We sent a verification link to your email. Please verify to continue.',
-        [
-          {
-            text: 'OK',
-            onPress: () => router.replace('/auth/login'),
-          },
-        ],
-        { cancelable: false }
-      );
+      router.replace({ pathname: '/auth/verify-otp', params: { identifier: email.trim(), mode: 'signup', name: name.trim(), auto: '1' } });
+      setIsSubmitting(false);
       return;
     }
     router.replace('/home');
-  }, [canSubmit, email, password, name, signUp, router]);
+    setIsSubmitting(false);
+  }, [canSubmit, email, password, name, signUp, router, isSubmitting]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -114,10 +58,8 @@ export default function SignupScreen() {
           accessibilityLabel="Liftor logo"
         />
         <Text style={styles.title}>Create account</Text>
-        <Text style={styles.subtitle}>We’ll send a confirmation email</Text>
-
+        <Text style={styles.subtitle}>We’ll send a confirmation if needed</Text>
         {error && <Text style={styles.errorText}>{error}</Text>}
-
         <View style={styles.field}>
           <Text style={styles.label}>Name</Text>
           <TextInput
@@ -129,7 +71,6 @@ export default function SignupScreen() {
             onChangeText={setName}
           />
         </View>
-
         <View style={styles.field}>
           <Text style={styles.label}>Email</Text>
           <TextInput
@@ -143,7 +84,6 @@ export default function SignupScreen() {
             onChangeText={setEmail}
           />
         </View>
-
         <View style={styles.field}>
           <Text style={styles.label}>Password</Text>
           <View style={styles.passwordRow}>
@@ -171,30 +111,6 @@ export default function SignupScreen() {
           </View>
         </View>
 
-        {passwordEval.hasInput && (
-          <View style={styles.strengthContainer}>
-            <View style={styles.strengthBars}>
-              {[0, 1, 2, 3].map(i => (
-                <View
-                  key={i}
-                  style={[
-                    styles.strengthBar,
-                    { backgroundColor: i < passwordEval.activeBars ? passwordEval.color : theme.color.line },
-                  ]}
-                />
-              ))}
-            </View>
-            <Text style={[styles.strengthLabel, { color: passwordEval.color }]} testID="password-strength-label">
-              {passwordEval.label}
-            </Text>
-            {passwordEval.suggestions.length > 0 && (
-              <Text style={styles.suggestionText} testID="password-suggestion">
-                {passwordEval.suggestions[0]}
-              </Text>
-            )}
-          </View>
-        )}
-
         <View style={styles.field}>
           <Text style={styles.label}>Confirm password</Text>
           <TextInput
@@ -212,13 +128,9 @@ export default function SignupScreen() {
           />
         </View>
 
-        <Button
-          title={isAuthLoading ? 'Creating…' : 'Create account'}
-          onPress={onSubmit}
-          disabled={!canSubmit || isAuthLoading}
-          icon={<UserPlus color="#fff" size={18} />}
-        />
+        <Button title={isSubmitting ? 'Creating…' : 'Create account'} onPress={onSubmit} disabled={!canSubmit || isSubmitting} icon={<UserPlus color="#fff" size={18} />} />
 
+        {/* Keep Google sign-up as before */}
         <TouchableOpacity
           onPress={async () => { await googleSignIn(); }}
           style={styles.oauthBtn}
@@ -227,7 +139,6 @@ export default function SignupScreen() {
         >
           <Text style={styles.oauthText}>Continue with Google</Text>
         </TouchableOpacity>
-
         <View style={styles.bottomRow}>
           <Text style={styles.bottomText}>Have an account?</Text>
           <Link href={{ pathname: '/auth/login' }} testID="go-login" style={styles.link}>
@@ -256,11 +167,6 @@ const styles = StyleSheet.create({
   bottomText: { color: theme.color.muted },
   link: { },
   linkText: { color: theme.color.accent.primary, fontWeight: '600' },
-  strengthContainer: { marginTop: 8, gap: 6 },
-  strengthBars: { flexDirection: 'row', gap: 6 },
-  strengthBar: { flex: 1, height: 6, borderRadius: 4, backgroundColor: theme.color.line },
-  strengthLabel: { marginTop: 2, fontSize: 12, color: theme.color.muted },
-  suggestionText: { marginTop: 2, fontSize: 12, color: theme.color.muted },
   oauthBtn: { marginTop: 12, height: 48, borderRadius: 12, borderWidth: 1, borderColor: theme.color.line, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.card },
   oauthText: { color: theme.color.ink, fontWeight: '600' },
 });

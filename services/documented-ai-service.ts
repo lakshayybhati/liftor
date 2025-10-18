@@ -4,9 +4,9 @@
  */
 
 import type { User, WeeklyBasePlan, DailyPlan, CheckinData } from '@/types/user';
+import { generateAICompletion, type Message } from '@/utils/ai-client';
 
-// API Configuration
-const LLM_ENDPOINT = 'https://toolkit.rork.com/text/llm/';
+// API Configuration (migrated to ai-client; endpoint now configured per provider)
 
 /**
  * TIER 1: BASE PLAN GENERATION
@@ -30,10 +30,20 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
     const parsedPlan = processAndValidateBasePlan(response);
     
     // Step 5: Create WeeklyBasePlan Object
+    // Normalize nutrition metrics across all days to ensure targets are enforced
+    const days = parsedPlan.days;
+    const requiredDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    for (const day of requiredDays) {
+      if (days[day]?.nutrition) {
+        days[day].nutrition.total_kcal = calculateTDEE(user);
+        days[day].nutrition.protein_g = calculateProteinTarget(user);
+      }
+    }
+
     const basePlan: WeeklyBasePlan = {
       id: Date.now().toString(),
       createdAt: new Date().toISOString(),
-      days: parsedPlan.days,
+      days,
       isLocked: false,
     };
 
@@ -42,9 +52,16 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
 
   } catch (error) {
     console.error('❌ Base plan generation failed:', error);
-    
-    // Fallback System: Generate adaptive plan based on user preferences
-    console.log('🔄 Using adaptive fallback system...');
+
+    // Enhanced error handling - if JSON parsing fails, still try adaptive fallback
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('JSON') || errorMessage.includes('parsing') || errorMessage.includes('validation')) {
+      console.log('🔄 AI response parsing failed, using adaptive fallback system...');
+      return generateAdaptiveBasePlan(user);
+    }
+
+    // For other errors, also use adaptive fallback
+    console.log('🔄 Using adaptive fallback system for other errors...');
     return generateAdaptiveBasePlan(user);
   }
 }
@@ -102,9 +119,16 @@ export async function generateDailyPlan(
 
   } catch (error) {
     console.error('❌ Daily adjustment failed:', error);
-    
-    // Fallback System: Apply rule-based adjustments
-    console.log('🔄 Using rule-based adjustment fallback...');
+
+    // Enhanced error handling - if JSON parsing fails, still try rule-based fallback
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('JSON') || errorMessage.includes('parsing')) {
+      console.log('🔄 AI response parsing failed, using rule-based adjustment fallback...');
+      return applyRuleBasedAdjustments(user, todayCheckin, basePlan);
+    }
+
+    // For other errors, also use fallback
+    console.log('🔄 Using rule-based adjustment fallback for other errors...');
     return applyRuleBasedAdjustments(user, todayCheckin, basePlan);
   }
 }
@@ -161,8 +185,8 @@ function constructBasePlanPrompts(user: User, userProfile: string) {
   const targetCalories = user.dailyCalorieTarget || calculateTDEE(user);
   const proteinTarget = calculateProteinTarget(user);
 
-  const systemPrompt = `You are a world-class Personal Trainer & Nutrition Specialist. 
-Create a 7-Day Base Plan that EXACTLY matches the user's specific requirements. DO NOT use generic templates.
+  const systemPrompt = `You are a precise Personal Trainer & Nutrition Specialist.
+Create a 7-Day Base Plan that EXACTLY matches the user's requirements. Keep language concise.
 
 === USER'S EXACT REQUIREMENTS ===
 ${userProfile}
@@ -205,12 +229,9 @@ Return ONLY valid JSON with this exact structure:`;
               {"exercise": "Exercise name", "sets": 3, "reps": "10-15", "RIR": 2}
             ]
           },
-          {
-            "name": "Cool-down",
-            "items": [{"exercise": "Static stretching", "sets": 1, "reps": "5-10 min", "RIR": 0}]
-          }
+          {"name": "Cool-down","items": [{"exercise": "Static stretching", "sets": 1, "reps": "5-10 min", "RIR": 0}]}
         ],
-        "notes": "Specific training notes"
+        "notes": "Specific training notes (short)"
       },
       "nutrition": {
         "total_kcal": ${targetCalories},
@@ -299,7 +320,7 @@ Return ONLY the adjusted plan in this exact JSON structure:`;
         "items": [{"exercise": "Exercise", "sets": 3, "reps": "8-12", "RIR": 2}]
       }
     ],
-    "notes": "Adjustment notes"
+    "notes": "Adjustment notes (single sentence)"
   },
   "nutrition": {
     "total_kcal": ${todayBasePlan.nutrition.total_kcal},
@@ -326,115 +347,339 @@ Return ONLY the adjusted plan in this exact JSON structure:`;
 async function makeLLMRequest(systemPrompt: string, userRequest: string): Promise<string> {
   console.log('🤖 Making LLM request...');
   
-  const requestBody = {
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userRequest }
-    ]
-  };
+  const messages: Message[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userRequest }
+  ];
 
-  const response = await fetch(LLM_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
+  // Use provider-aware AI client (Gemini primary, Rork fallback)
+  const { completion } = await generateAICompletion(messages);
 
-  if (!response.ok) {
-    throw new Error(`LLM API error: ${response.status} - ${response.statusText}`);
+  if (!completion) {
+    throw new Error('No completion in AI response');
   }
 
-  const data = await response.json();
-  
-  if (!data.completion) {
-    throw new Error('No completion in LLM response');
-  }
-
-  console.log('✅ LLM response received:', data.completion.substring(0, 100) + '...');
-  return data.completion;
+  console.log('✅ LLM response received:', completion.substring(0, 100) + '...');
+  return completion;
 }
 
 /**
  * Step 4: JSON Processing & Validation for Base Plan
+ * Improved to handle incomplete AI responses gracefully
  */
 function processAndValidateBasePlan(rawResponse: string): any {
   console.log('🔍 Processing base plan JSON...');
-  
+  console.log('📝 Raw response length:', rawResponse.length);
+
   // Multi-layer JSON cleaning and validation
   let cleanedResponse = rawResponse.trim();
-  
-  // Remove markdown code blocks
-  cleanedResponse = cleanedResponse.replace(/```json\s*\n?|```\s*\n?/g, '');
-  
-  // Remove any text before first { and after last }
-  cleanedResponse = cleanedResponse.replace(/^[^{]*/, '').replace(/[^}]*$/, '');
-  
-  // Find matching braces for complete JSON extraction
-  const jsonStart = cleanedResponse.indexOf('{');
-  if (jsonStart === -1) {
-    throw new Error('No JSON object found in response');
+
+  // Enhanced markdown code block removal - handle all backtick variations
+  cleanedResponse = cleanedResponse
+    .replace(/^```+json\s*\n?/gi, '')  // Remove ```json at start
+    .replace(/^```+\s*\n?/g, '')       // Remove ``` at start
+    .replace(/\n?```+\s*$/g, '')       // Remove ``` at end
+    .replace(/^`+json\s*/gi, '')       // Remove `json prefix
+    .replace(/^`+/g, '')               // Remove leading backticks
+    .replace(/`+$/g, '');              // Remove trailing backticks
+
+  // Try to extract JSON using multiple strategies
+  let jsonString = extractBestJSON(cleanedResponse);
+
+  if (!jsonString) {
+    console.error('❌ No valid JSON found in response');
+    console.error('Raw response preview:', rawResponse.substring(0, 300));
+    console.error('Cleaned response preview:', cleanedResponse.substring(0, 300));
+    throw new Error('No valid JSON found in AI response');
   }
-  
+
+  console.log('✅ Extracted JSON length:', jsonString.length);
+  console.log('📝 JSON preview:', jsonString.substring(0, 150) + '...');
+
+  try {
+    const parsedPlan = JSON.parse(jsonString);
+
+    // Validate structure with more lenient checking
+    if (!parsedPlan || typeof parsedPlan !== 'object') {
+      throw new Error('Parsed response is not a valid object');
+    }
+
+    // Try to validate structure, but don't fail completely if some parts are missing
+    const validation = validatePlanStructure(parsedPlan);
+
+    if (!validation.isValid) {
+      console.warn('⚠️ Plan structure validation issues:', validation.errors);
+
+      // Try to repair the plan if possible
+      const repairedPlan = repairPlanStructure(parsedPlan);
+      if (repairedPlan) {
+        console.log('✅ Plan structure repaired');
+        return repairedPlan;
+      }
+
+      // If repair fails, throw error to use fallback
+      throw new Error(`Plan structure validation failed: ${validation.errors.join(', ')}`);
+    }
+
+    console.log('✅ Base plan validation passed');
+    return parsedPlan;
+
+  } catch (error) {
+    console.error('❌ JSON parsing failed:', error);
+    console.error('Problematic JSON preview:', jsonString.substring(0, 500));
+    throw new Error(`JSON parsing failed: ${error}`);
+  }
+}
+
+/**
+ * Extract the best possible JSON from an AI response
+ */
+function extractBestJSON(response: string): string | null {
+  // Additional cleaning: remove backticks and common AI response prefixes
+  let cleaned = response
+    .replace(/^`+/g, '')  // Remove leading backticks
+    .replace(/`+$/g, '')  // Remove trailing backticks
+    .replace(/^json\s*/i, '')  // Remove 'json' prefix
+    .trim();
+
+  // Strategy 1: Look for complete JSON object with balanced braces
+  const completeJSON = findCompleteJSON(cleaned);
+  if (completeJSON) return completeJSON;
+
+  // Strategy 2: Look for partial JSON that at least has the structure we need
+  const partialJSON = findPartialJSON(cleaned);
+  if (partialJSON) return partialJSON;
+
+  // Strategy 3: If all else fails, return null
+  return null;
+}
+
+/**
+ * Find a complete JSON object with balanced braces
+ */
+function findCompleteJSON(response: string): string | null {
+  // Find the first opening brace
+  const firstBrace = response.indexOf('{');
+  if (firstBrace === -1) return null;
+
+  // Track braces to find the matching closing brace
   let braceCount = 0;
-  let jsonEnd = -1;
-  
-  for (let i = jsonStart; i < cleanedResponse.length; i++) {
-    if (cleanedResponse[i] === '{') braceCount++;
-    if (cleanedResponse[i] === '}') {
+  let endIndex = -1;
+
+  for (let i = firstBrace; i < response.length; i++) {
+    if (response[i] === '{') braceCount++;
+    if (response[i] === '}') {
       braceCount--;
       if (braceCount === 0) {
-        jsonEnd = i + 1;
+        endIndex = i;
         break;
       }
     }
   }
-  
-  if (jsonEnd === -1) {
-    throw new Error('Incomplete JSON object in response');
-  }
-  
-  const jsonString = cleanedResponse.substring(jsonStart, jsonEnd);
-  console.log('📝 Extracted JSON length:', jsonString.length);
-  
-  try {
-    const parsedPlan = JSON.parse(jsonString);
+
+  // If we found a complete JSON object
+  if (endIndex !== -1) {
+    const jsonString = response.substring(firstBrace, endIndex + 1);
     
-    // Validate structure
-    if (!parsedPlan.days) {
-      throw new Error('Missing "days" object in plan');
+    // Validate that it's parseable
+    try {
+      JSON.parse(jsonString);
+      return jsonString;
+    } catch {
+      return null;
     }
-    
-    const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-    for (const day of requiredDays) {
-      if (!parsedPlan.days[day]) {
-        throw new Error(`Missing ${day} in plan`);
-      }
-      
-      const dayPlan = parsedPlan.days[day];
-      if (!dayPlan.workout || !dayPlan.nutrition || !dayPlan.recovery) {
-        throw new Error(`Incomplete ${day} plan - missing workout, nutrition, or recovery`);
-      }
-      
-      // Validate workout structure
-      if (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks)) {
-        throw new Error(`Invalid workout blocks for ${day}`);
-      }
-      
-      // Validate nutrition structure
-      if (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals)) {
-        throw new Error(`Invalid nutrition meals for ${day}`);
+  }
+
+  return null;
+}
+
+/**
+ * Find partial JSON that contains at least the basic structure
+ */
+function findPartialJSON(response: string): string | null {
+  // Look for the "days" object which is the core of our plan
+  const daysMatch = response.match(/"days"\s*:\s*{[\s\S]*?}(?=\s*}?\s*$)/);
+  if (daysMatch) {
+    // Try to construct a minimal valid JSON around it
+    const minimalJSON = `{"days": {${daysMatch[0].substring(daysMatch[0].indexOf('{') + 1)}}}`;
+    try {
+      JSON.parse(minimalJSON);
+      return minimalJSON;
+    } catch {
+      // Not valid, continue searching
+    }
+  }
+
+  // Look for any JSON-like structure
+  const jsonMatch = response.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    const candidate = jsonMatch[0];
+    // Check if it at least has balanced braces
+    let braceCount = 0;
+    let isBalanced = true;
+
+    for (let i = 0; i < candidate.length; i++) {
+      if (candidate[i] === '{') braceCount++;
+      if (candidate[i] === '}') {
+        braceCount--;
+        if (braceCount < 0) {
+          isBalanced = false;
+          break;
+        }
       }
     }
-    
-    console.log('✅ Base plan validation passed');
-    return parsedPlan;
-    
-  } catch (error) {
-    console.error('❌ JSON parsing failed:', error);
-    console.error('Problematic JSON:', jsonString.substring(0, 500));
-    throw new Error(`JSON parsing failed: ${error}`);
+
+    if (isBalanced && braceCount === 0) {
+      return candidate;
+    }
   }
+
+  return null;
+}
+
+/**
+ * Validate plan structure with detailed error reporting
+ */
+function validatePlanStructure(plan: any): { isValid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!plan || typeof plan !== 'object') {
+    errors.push('Plan is not an object');
+    return { isValid: false, errors };
+  }
+
+  if (!plan.days) {
+    errors.push('Missing "days" object in plan');
+    return { isValid: false, errors };
+  }
+
+  const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  for (const day of requiredDays) {
+    if (!plan.days[day]) {
+      errors.push(`Missing ${day} in plan`);
+      continue;
+    }
+
+    const dayPlan = plan.days[day];
+    if (!dayPlan.workout) {
+      errors.push(`Missing workout for ${day}`);
+    }
+    if (!dayPlan.nutrition) {
+      errors.push(`Missing nutrition for ${day}`);
+    }
+    if (!dayPlan.recovery) {
+      errors.push(`Missing recovery for ${day}`);
+    }
+
+    // Check workout structure
+    if (dayPlan.workout && (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks))) {
+      errors.push(`Invalid workout blocks for ${day}`);
+    }
+
+    // Check nutrition structure
+    if (dayPlan.nutrition && (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals))) {
+      errors.push(`Invalid nutrition meals for ${day}`);
+    }
+  }
+
+  return { isValid: errors.length === 0, errors };
+}
+
+/**
+ * Repair plan structure by filling in missing parts with defaults
+ */
+function repairPlanStructure(plan: any): any {
+  if (!plan || !plan.days) {
+    return null;
+  }
+
+  const repairedPlan = { ...plan };
+  const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+  for (const day of requiredDays) {
+    if (!repairedPlan.days[day]) {
+      console.warn(`⚠️ Creating missing ${day} plan`);
+      repairedPlan.days[day] = createMinimalDayPlan(day);
+      continue;
+    }
+
+    const dayPlan = repairedPlan.days[day];
+
+    // Ensure workout structure
+    if (!dayPlan.workout) {
+      dayPlan.workout = createMinimalWorkout();
+    } else if (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks)) {
+      dayPlan.workout.blocks = [createMinimalWorkoutBlock()];
+    }
+
+    // Ensure nutrition structure
+    if (!dayPlan.nutrition) {
+      dayPlan.nutrition = createMinimalNutrition();
+    } else if (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals)) {
+      dayPlan.nutrition.meals = [createMinimalMeal()];
+    }
+
+    // Ensure recovery structure
+    if (!dayPlan.recovery) {
+      dayPlan.recovery = createMinimalRecovery();
+    }
+  }
+
+  return repairedPlan;
+}
+
+function createMinimalDayPlan(day: string) {
+  return {
+    workout: createMinimalWorkout(),
+    nutrition: createMinimalNutrition(),
+    recovery: createMinimalRecovery()
+  };
+}
+
+function createMinimalWorkout() {
+  return {
+    focus: ['General Fitness'],
+    blocks: [createMinimalWorkoutBlock()],
+    notes: 'Generated workout plan'
+  };
+}
+
+function createMinimalWorkoutBlock() {
+  return {
+    name: 'Main',
+    items: [{
+      exercise: 'Bodyweight Squats',
+      sets: 3,
+      reps: '10-12',
+      RIR: 2
+    }]
+  };
+}
+
+function createMinimalNutrition() {
+  return {
+    total_kcal: 2000,
+    protein_g: 150,
+    meals: [createMinimalMeal()],
+    hydration_l: 2.5
+  };
+}
+
+function createMinimalMeal() {
+  return {
+    name: 'Main Meal',
+    items: [{
+      food: 'Balanced meal',
+      qty: '1 serving'
+    }]
+  };
+}
+
+function createMinimalRecovery() {
+  return {
+    mobility: ['Stretching'],
+    sleep: ['7-8 hours']
+  };
 }
 
 /**
@@ -442,52 +687,141 @@ function processAndValidateBasePlan(rawResponse: string): any {
  */
 function processAndValidateDailyPlan(rawResponse: string): any {
   console.log('🔍 Processing daily plan JSON...');
-  
-  // Same cleaning process as base plan
+  console.log('📝 Raw daily response length:', rawResponse.length);
+
+  // Multi-layer JSON cleaning and validation
   let cleanedResponse = rawResponse.trim();
-  cleanedResponse = cleanedResponse.replace(/```json\s*\n?|```\s*\n?/g, '');
-  cleanedResponse = cleanedResponse.replace(/^[^{]*/, '').replace(/[^}]*$/, '');
-  
-  const jsonStart = cleanedResponse.indexOf('{');
-  if (jsonStart === -1) {
-    throw new Error('No JSON object found in daily plan response');
+
+  // Enhanced markdown code block removal - handle all backtick variations
+  cleanedResponse = cleanedResponse
+    .replace(/^```+json\s*\n?/gi, '')  // Remove ```json at start
+    .replace(/^```+\s*\n?/g, '')       // Remove ``` at start
+    .replace(/\n?```+\s*$/g, '')       // Remove ``` at end
+    .replace(/^`+json\s*/gi, '')       // Remove `json prefix
+    .replace(/^`+/g, '')               // Remove leading backticks
+    .replace(/`+$/g, '');              // Remove trailing backticks
+
+  // Use the same robust JSON extraction as base plan
+  const jsonString = extractBestJSON(cleanedResponse);
+
+  if (!jsonString) {
+    console.error('❌ No valid JSON found in daily plan response');
+    console.error('Raw daily response preview:', rawResponse.substring(0, 300));
+    throw new Error('No valid JSON found in daily plan AI response');
   }
-  
-  let braceCount = 0;
-  let jsonEnd = -1;
-  
-  for (let i = jsonStart; i < cleanedResponse.length; i++) {
-    if (cleanedResponse[i] === '{') braceCount++;
-    if (cleanedResponse[i] === '}') {
-      braceCount--;
-      if (braceCount === 0) {
-        jsonEnd = i + 1;
-        break;
-      }
-    }
-  }
-  
-  if (jsonEnd === -1) {
-    throw new Error('Incomplete JSON object in daily plan response');
-  }
-  
-  const jsonString = cleanedResponse.substring(jsonStart, jsonEnd);
-  
+
+  console.log('📝 Extracted daily JSON length:', jsonString.length);
+
   try {
     const adjustedPlan = JSON.parse(jsonString);
-    
-    // Validate daily plan structure
-    if (!adjustedPlan.workout || !adjustedPlan.nutrition || !adjustedPlan.recovery) {
-      throw new Error('Missing required sections in daily plan');
+
+    // Validate structure with more lenient checking
+    if (!adjustedPlan || typeof adjustedPlan !== 'object') {
+      throw new Error('Parsed daily plan response is not a valid object');
     }
-    
+
+    // Basic validation - don't fail completely if some parts are missing
+    const validation = validateDailyPlanStructure(adjustedPlan);
+
+    if (!validation.isValid) {
+      console.warn('⚠️ Daily plan structure validation issues:', validation.errors);
+
+      // Try to repair the daily plan if possible
+      const repairedPlan = repairDailyPlanStructure(adjustedPlan);
+      if (repairedPlan) {
+        console.log('✅ Daily plan structure repaired');
+        return repairedPlan;
+      }
+
+      throw new Error(`Daily plan structure validation failed: ${validation.errors.join(', ')}`);
+    }
+
     console.log('✅ Daily plan validation passed');
     return adjustedPlan;
-    
+
   } catch (error) {
     console.error('❌ Daily plan JSON parsing failed:', error);
-    throw new Error(`Daily plan parsing failed: ${error}`);
+    console.error('Problematic daily JSON preview:', jsonString.substring(0, 500));
+    throw new Error(`Daily plan JSON parsing failed: ${error}`);
   }
+}
+
+/**
+ * Validate daily plan structure with detailed error reporting
+ */
+function validateDailyPlanStructure(plan: any): { isValid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!plan || typeof plan !== 'object') {
+    errors.push('Daily plan is not an object');
+    return { isValid: false, errors };
+  }
+
+  if (!plan.workout) {
+    errors.push('Missing workout in daily plan');
+  }
+  if (!plan.nutrition) {
+    errors.push('Missing nutrition in daily plan');
+  }
+  if (!plan.recovery) {
+    errors.push('Missing recovery in daily plan');
+  }
+
+  return { isValid: errors.length === 0, errors };
+}
+
+/**
+ * Repair daily plan structure by filling in missing parts with defaults
+ */
+function repairDailyPlanStructure(plan: any): any {
+  if (!plan || typeof plan !== 'object') {
+    return null;
+  }
+
+  const repairedPlan = { ...plan };
+
+  // Ensure workout structure
+  if (!repairedPlan.workout) {
+    repairedPlan.workout = {
+      focus: ['General Fitness'],
+      blocks: [{
+        name: 'Main',
+        items: [{
+          exercise: 'Bodyweight Squats',
+          sets: 3,
+          reps: '10-12',
+          RIR: 2
+        }]
+      }],
+      notes: 'Repaired workout plan'
+    };
+  }
+
+  // Ensure nutrition structure
+  if (!repairedPlan.nutrition) {
+    repairedPlan.nutrition = {
+      total_kcal: 2000,
+      protein_g: 150,
+      meals: [{
+        name: 'Main Meal',
+        items: [{
+          food: 'Balanced meal',
+          qty: '1 serving'
+        }]
+      }],
+      hydration_l: 2.5
+    };
+  }
+
+  // Ensure recovery structure
+  if (!repairedPlan.recovery) {
+    repairedPlan.recovery = {
+      mobility: ['Stretching'],
+      sleep: ['7-8 hours']
+    };
+  }
+
+  return repairedPlan;
 }
 
 /**
@@ -614,38 +948,40 @@ function applyRuleBasedAdjustments(
  * Helper Functions
  */
 function calculateTDEE(user: User): number {
+  // Provide safe defaults when optional fields are missing
+  const weight = user.weight ?? 70; // kg
+  const height = user.height ?? 175; // cm
+  const age = user.age ?? 28; // years
+  const sex = user.sex ?? 'Male';
+
   // Mifflin-St Jeor Equation
-  let bmr: number;
-  if (user.sex === 'Male') {
-    bmr = 10 * user.weight + 6.25 * user.height - 5 * user.age + 5;
-  } else {
-    bmr = 10 * user.weight + 6.25 * user.height - 5 * user.age - 161;
-  }
-  
+  const bmr = sex === 'Male'
+    ? 10 * weight + 6.25 * height - 5 * age + 5
+    : 10 * weight + 6.25 * height - 5 * age - 161;
+
   // Activity multipliers
-  const activityMultipliers: { [key: string]: number } = {
+  const activityMultipliers: Record<string, number> = {
     'Sedentary': 1.2,
     'Lightly Active': 1.375,
     'Moderately Active': 1.55,
     'Very Active': 1.725,
-    'Extremely Active': 1.9
+    'Extra Active': 1.9
   };
-  
-  const tdee = bmr * (activityMultipliers[user.activityLevel] || 1.55);
-  
+
+  const activityLevelKey = user.activityLevel ?? 'Moderately Active';
+  const activityMultiplier = activityMultipliers[activityLevelKey] ?? 1.55;
+  const tdee = bmr * activityMultiplier;
+
   // Goal-based adjustments
-  if (user.goal === 'WEIGHT_LOSS') {
-    return Math.round(tdee * 0.85); // -15%
-  } else if (user.goal === 'MUSCLE_GAIN') {
-    return Math.round(tdee * 1.15); // +15%
-  }
-  
+  if (user.goal === 'WEIGHT_LOSS') return Math.round(tdee * 0.85);
+  if (user.goal === 'MUSCLE_GAIN') return Math.round(tdee * 1.15);
   return Math.round(tdee);
 }
 
 function calculateProteinTarget(user: User): number {
-  // 0.9g per lb of body weight (user.weight is in kg)
-  const weightInLbs = user.weight * 2.20462;
+  // 0.9g per lb of body weight; fall back to 150g if weight missing
+  const weight = user.weight ?? 75; // kg
+  const weightInLbs = weight * 2.20462;
   return Math.round(weightInLbs * 0.9);
 }
 

@@ -41,6 +41,7 @@ export default function CheckinScreen() {
     alcoholYN: false,
     motivation: 7,
     specialRequest: undefined,
+    workoutIntensity: 5,
   });
 
   const handleSorenessToggle = (area: string) => {
@@ -191,6 +192,16 @@ export default function CheckinScreen() {
         infoText="Stress impacts performance and recovery. Rate 1-10 based on your current stress."
         value={checkinData.stress || 3}
         onValueChange={(value) => setCheckinData(prev => ({ ...prev, stress: value }))}
+        minimumValue={1}
+        maximumValue={10}
+      />
+
+      <Slider
+        label="Workout Intensity"
+        required
+        infoText="How intense do you want today's workout? 1 = Recovery focused, 5 = Optimal, 10 = Ego lifts"
+        value={checkinData.workoutIntensity || 5}
+        onValueChange={(value) => setCheckinData(prev => ({ ...prev, workoutIntensity: value }))}
         minimumValue={1}
         maximumValue={10}
       />

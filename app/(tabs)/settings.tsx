@@ -1,5 +1,5 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Image, Modal, Switch, Platform } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Image, Modal, Switch, Platform, SafeAreaView, ActivityIndicator } from 'react-native';
 // Dynamic import of print/sharing to avoid build errors when modules are unavailable
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react-native';
@@ -10,16 +10,30 @@ import { router } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
+import { getSubscriptionTier } from '@/utils/subscription-helpers';
 
 export default function SettingsScreen() {
   const { user, checkins, plans, clearAllData, getRecentCheckins, getWeightData, getWeightProgress, syncLocalToBackend } = useUserStore();
-  const { signOut, session } = useAuth();
+  const auth = useAuth();
   const { data: profile, isLoading: isProfileLoading } = useProfile();
   const insets = useSafeAreaInsets();
   const [isClearing, setIsClearing] = useState(false);
   const [showWeeklyCallsModal, setShowWeeklyCallsModal] = useState(false);
   const [notifyWhenAvailable, setNotifyWhenAvailable] = useState(false);
   const [showFaqs, setShowFaqs] = useState(false);
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={theme.color.accent.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const { signOut, session } = auth;
 
   // FAQ Data
   const faqData = [
@@ -53,22 +67,19 @@ export default function SettingsScreen() {
     }
   ];
 
-  // Helper function to determine subscription status
-  const getSubscriptionStatus = () => {
-    // For now, this is a mock function. In a real app, this would check:
-    // - session?.user?.app_metadata?.subscription_status
-    // - profile?.subscription_status
-    // - or make an API call to check subscription
-    
-    // Mock logic: if user has more than 10 plans, they're "elite", otherwise "trial"
-    if (plans.length > 10) {
-      return { status: 'elite', label: 'Elite' };
-    } else {
-      return { status: 'trial', label: 'Trial' };
-    }
-  };
-
-  const subscriptionInfo = getSubscriptionStatus();
+  // Real subscription status via RevenueCat
+  const [subscriptionInfo, setSubscriptionInfo] = useState<{ status: 'trial' | 'elite' | 'none'; label: string }>({ status: 'trial', label: 'Trial' });
+  useEffect(() => {
+    (async () => {
+      try {
+        const tier = await getSubscriptionTier();
+        setSubscriptionInfo({ status: tier.tier, label: tier.label });
+      } catch (e) {
+        // Fallback to trial label if query fails
+        setSubscriptionInfo({ status: 'trial', label: 'Trial' });
+      }
+    })();
+  }, []);
 
   const handleExportData = async () => {
     try {
@@ -550,7 +561,7 @@ export default function SettingsScreen() {
             </View>
             
             <Text style={styles.modalDescription}>
-              Weekly 1:1 or group calls to review your check-ins and adjust your plan. Feature is coming soon.
+              Weekly 1:1 calls to review your check-ins and adjust your plan. Feature is coming soon.
             </Text>
             
             <View style={styles.notificationToggleContainer}>

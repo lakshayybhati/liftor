@@ -1,13 +1,14 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, Animated } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, Platform } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
 import { theme } from '@/constants/colors';
 import { generateWeeklyBasePlan } from '@/services/documented-ai-service';
+import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
+import { getProductionConfig } from '@/utils/production-config';
 import Purchases from 'react-native-purchases';
-import RevenueCatUI, { PAYWALL_RESULT } from 'react-native-purchases-ui';
 import Constants from 'expo-constants';
 
 const LOADING_MESSAGES = [
@@ -19,6 +20,15 @@ const LOADING_MESSAGES = [
   "🧭 this might take a moment please don't leave this screen"
 ];
 
+const SLOW_PROMPTS = [
+  'Your data’s one of a kind we’re tailoring this plan just right',
+  'This one’s special. Give us a moment to fine-tune everything',
+  'Your plan’s being crafted with extra care. give us a moment',
+  'this isn’t just any plan… it’s yours. Hold tight',
+  'We’re refining every detail to make this match you perfectly',
+  'Unique input calls for a custom touch just a few seconds more',
+];
+
 export default function GeneratingBasePlanScreen() {
   const { user, addBasePlan } = useUserStore();
   const [messageIndex, setMessageIndex] = useState(0);
@@ -28,23 +38,95 @@ export default function GeneratingBasePlanScreen() {
 
   const generatePlan = useCallback(async () => {
     try {
+      // Validate configuration before starting
+      const config = getProductionConfig();
+      const isDev = __DEV__;
+      
+      console.log('[GeneratePlan] Starting plan generation...');
+      console.log('[GeneratePlan] Environment:', isDev ? 'development' : 'production');
+      console.log('[GeneratePlan] Config valid:', config.isValid);
+      
+      // Check for critical missing configuration
+      if (!config.isValid && !isDev) {
+        console.error('[GeneratePlan] ⚠️ Configuration issues detected:', config.errors);
+        
+        // Show user-friendly message for missing AI config
+        if (config.errors.some(e => e.includes('AI'))) {
+          Alert.alert(
+            'Service Configuration',
+            'AI service is not fully configured. Using basic plan generation.',
+            [{ text: 'OK' }]
+          );
+        }
+      }
+      
       const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
       const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
-      try { await Purchases.getCustomerInfo(); } catch {}
-      const result = await RevenueCatUI.presentPaywallIfNeeded({
-        requiredEntitlementIdentifier: requiredEntitlement,
-      });
-      if (result !== PAYWALL_RESULT.PURCHASED && result !== PAYWALL_RESULT.RESTORED && result !== PAYWALL_RESULT.NOT_PRESENTED) {
-        router.replace('/(tabs)/home');
-        return;
+      
+      console.log('[GeneratePlan] Defense-in-depth: checking subscription again...');
+      console.log('[GeneratePlan] Required entitlement:', requiredEntitlement);
+      
+      // Run diagnostics in production/TestFlight
+      if (!isDev) {
+        console.log('🔍 Running plan generation diagnostics...');
+        const diagnostics = await runPlanGenerationDiagnostics();
+        if (diagnostics.errors.length > 0) {
+          console.error('❌ Diagnostic errors:', diagnostics.errors);
+        }
+        // Proceed if any primary or fallback endpoint is accessible (DeepSeek preferred)
+        if (!diagnostics.endpoints.deepseekAccessible && !diagnostics.endpoints.geminiAccessible && !diagnostics.endpoints.rorkAccessible) {
+          console.error('⚠️ WARNING: No API endpoints accessible!');
+          Alert.alert(
+            'Network Issue',
+            'Unable to reach AI services. Please check your internet connection.',
+            [{ text: 'Continue Anyway', onPress: () => {} }]
+          );
+        }
       }
+      
+      // Check customer info and log status
+      try { 
+        const customerInfo = await Purchases.getCustomerInfo();
+        console.log('[GeneratePlan] Active entitlements:', Object.keys(customerInfo.entitlements.active));
+        console.log('[GeneratePlan] Has required entitlement:', !!customerInfo.entitlements.active[requiredEntitlement]);
+      } catch (err) {
+        console.warn('[GeneratePlan] Could not refresh customer info:', err);
+      }
+      
+      console.log('[GeneratePlan] Checking subscription...');
+      try {
+        const info = await Purchases.getCustomerInfo();
+        const entitled = !!info.entitlements.active[requiredEntitlement];
+        if (!entitled) {
+          router.replace({ pathname: '/paywall', params: { next: '/generating-base-plan' } as any });
+          return;
+        }
+      } catch {}
+      
+      console.log('[GeneratePlan] ✅ Subscription verified, generating plan...');
 
       if (!user) {
         throw new Error('No user data available');
       }
 
       // Use the new AI service for plan generation
+      const startTime = Date.now();
+      // Show a friendly message if generation exceeds 45 seconds
+      const slowTimer = setTimeout(() => {
+        const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
+        Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
+      }, 45000);
+
       const basePlan = await generateWeeklyBasePlan(user);
+      const generationTime = Date.now() - startTime;
+      clearTimeout(slowTimer);
+      
+      // Log successful generation
+      await logPlanGenerationAttempt('base', true, null, {
+        generationTime,
+        planDays: Object.keys(basePlan.days || {}).length
+      });
+      
       await addBasePlan(basePlan);
       
       setTimeout(() => {
@@ -53,7 +135,44 @@ export default function GeneratingBasePlanScreen() {
       }, 1000);
 
     } catch (error) {
+      try { /* ensure timer cleared if set */ } catch {}
       console.error('❌ Error in plan generation screen:', error);
+      
+      // Log the failure
+      await logPlanGenerationAttempt('base', false, error, {
+        userDataPresent: !!user,
+        errorMessage: String(error),
+        errorType: error instanceof Error ? error.name : 'Unknown'
+      });
+      
+      // Determine if error is recoverable
+      const errorMessage = String(error);
+      const isNetworkError = errorMessage.includes('network') || 
+                            errorMessage.includes('fetch') || 
+                            errorMessage.includes('timeout');
+      const isConfigError = errorMessage.includes('API key') || 
+                           errorMessage.includes('configuration');
+      
+      // Show user-friendly error message
+      if (isNetworkError) {
+        Alert.alert(
+          'Connection Issue',
+          'Unable to connect to AI services. Using a basic plan template instead.',
+          [{ text: 'OK' }]
+        );
+      } else if (isConfigError) {
+        Alert.alert(
+          'Service Issue',
+          'AI service configuration issue. Using a personalized basic plan instead.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert(
+          'Plan Generation',
+          'Using a personalized basic plan. You can regenerate anytime from settings.',
+          [{ text: 'OK' }]
+        );
+      }
       
       // The AI service already handles fallback, but if that also fails:
       // Create a simple emergency fallback plan

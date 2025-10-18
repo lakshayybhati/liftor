@@ -7,10 +7,7 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "node": "22.11.0",
-      "npm": {
-        "cache": ".npm-cache"
-      },
+      "node": "20.18.0",
       "ios": {
         "simulator": true
       },
@@ -20,10 +17,7 @@
     },
     "preview": {
       "distribution": "internal",
-      "node": "22.11.0",
-      "npm": {
-        "cache": ".npm-cache"
-      },
+      "node": "20.18.0",
       "ios": {
         "simulator": false,
         "buildConfiguration": "Release"
@@ -34,10 +28,7 @@
     },
     "production": {
       "autoIncrement": true,
-      "node": "22.11.0",
-      "npm": {
-        "cache": ".npm-cache"
-      },
+      "node": "20.18.0",
       "ios": {
         "simulator": false,
         "buildConfiguration": "Release"
@@ -47,6 +38,15 @@
       },
       "env": {
         "EXPO_PUBLIC_ENVIRONMENT": "production"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "lakshayybhati06@gmail.com",
+        "appleTeamId": "7F3247BRAT",
+        "ascAppId": "6753648069"
       }
     }
   }

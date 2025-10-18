@@ -43,6 +43,7 @@ export interface Profile {
   preferred_workout_split: string | null;
   special_requests: string | null;
   vmn_transcription: string | null;
+  workout_intensity: 'Optimal' | 'Ego lifts' | 'Recovery focused' | null;
   base_plan: unknown | null;
   // RevenueCat subscription fields
   rc_app_user_id?: string | null;

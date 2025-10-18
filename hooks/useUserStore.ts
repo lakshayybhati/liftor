@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { User, CheckinData, DailyPlan, WeeklyBasePlan, WorkoutPlan, NutritionPlan, RecoveryPlan } from '@/types/user';
 import { useAuth } from '@/hooks/useAuth';
+import { logProductionMetric, getProductionConfig } from '@/utils/production-config';
 
 interface FoodEntry {
   id: string;
@@ -57,6 +58,41 @@ const COMPLETIONS_STORAGE_KEY = 'Liftor_plan_completions';
 // Helper to namespace keys per-authenticated user to avoid cross-account leakage
 const scopedKey = (base: string, userId: string | null | undefined) => `${base}:${userId ?? 'anon'}`;
 
+// Retry helper for Supabase operations
+async function retrySupabaseOperation<T>(
+  operation: () => Promise<{ data: T; error: any }>,
+  maxRetries: number = 3,
+  delayMs: number = 1000
+): Promise<T> {
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await operation();
+      if (result.error) throw result.error;
+      return result.data;
+    } catch (error) {
+      lastError = error;
+
+      // Don't retry on auth errors or permission errors
+      const errorMessage = (error && typeof error === 'object' && 'message' in error) ? (error as any).message : '';
+      const errorCode = (error && typeof error === 'object' && 'code' in error) ? (error as any).code : '';
+      if (errorMessage.includes('JWT') || errorMessage.includes('auth') ||
+          errorCode === 'PGRST301' || errorCode === 'PGRST116') {
+        throw error;
+      }
+
+      if (attempt < maxRetries) {
+        const delay = delayMs * Math.pow(2, attempt - 1);
+        console.log(`[UserStore] Retrying Supabase operation in ${delay}ms (attempt ${attempt}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 export const [UserProvider, useUserStore] = createContextHook(() => {
   const { session, supabase } = useAuth();
   const uid = session?.user?.id ?? null;
@@ -79,8 +115,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   const [isLoading, setIsLoading] = useState(true);
 
   const loadUserData = useCallback(async () => {
+    console.log('[UserStore] Starting data load for uid:', uid ? uid.substring(0, 8) + '...' : 'anon');
+    const loadStartTime = Date.now();
+    
     try {
-      // Migrate legacy keys if present
+      // Migrate legacy keys if present (do this in background after initial load)
       const legacy = {
         user: 'fitcoach_user',
         checkins: 'fitcoach_checkins',
@@ -90,37 +129,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         extras: 'fitcoach_extras',
       } as const;
 
-      // Move values from legacy FitCoach keys to old Liftor generic keys if new was empty (pre-namespace)
-      const [oldLiftorUser, legacyUser] = await Promise.all([
-        AsyncStorage.getItem(USER_STORAGE_KEY),
-        AsyncStorage.getItem(legacy.user),
-      ]);
-      if (!oldLiftorUser && legacyUser) {
-        await AsyncStorage.setItem(USER_STORAGE_KEY, legacyUser);
-      }
-
-      // Namespace migration: if generic Liftor_user belongs to this uid, migrate it to namespaced key
-      try {
-        const genericUser = await AsyncStorage.getItem(USER_STORAGE_KEY);
-        const scopedUser = await AsyncStorage.getItem(KEYS.USER);
-        if (!scopedUser && genericUser) {
-          const parsed = JSON.parse(genericUser);
-          if (parsed && typeof parsed === 'object' && parsed.id && parsed.id === uid) {
-            await AsyncStorage.setItem(KEYS.USER, genericUser);
-          }
-        }
-      } catch {}
-
-      // Optionally clean up old keys (non-destructive if migration succeeded)
-      await Promise.all([
-        AsyncStorage.removeItem(legacy.user),
-        AsyncStorage.removeItem(legacy.checkins),
-        AsyncStorage.removeItem(legacy.plans),
-        AsyncStorage.removeItem(legacy.basePlans),
-        AsyncStorage.removeItem(legacy.foodLog),
-        AsyncStorage.removeItem(legacy.extras),
-      ]).catch(() => {});
-
+      // Fast path: Load current user data first
       const [userData, checkinsData, plansData, basePlansData, foodLogsData, extrasData, completionsData] = await Promise.all([
         AsyncStorage.getItem(KEYS.USER),
         AsyncStorage.getItem(KEYS.CHECKINS),
@@ -130,6 +139,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         AsyncStorage.getItem(KEYS.EXTRAS),
         AsyncStorage.getItem(KEYS.COMPLETIONS),
       ]);
+
+      console.log('[UserStore] Local storage read in', Date.now() - loadStartTime, 'ms');
+
+      // Track whether we hydrated a valid local user
+      let hasLocalUser = false;
 
       if (userData && userData.trim().startsWith('{') && userData.trim().endsWith('}')) {
         try {
@@ -142,6 +156,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
               );
             }
             setUser(parsed);
+            hasLocalUser = true;
           }
         } catch (e) {
           console.error('Error parsing user data, clearing corrupted data:', e);
@@ -151,6 +166,42 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         console.warn('Invalid user data format, clearing:', userData.substring(0, 100));
         await AsyncStorage.removeItem(KEYS.USER);
       }
+      
+      // Do legacy migration in background (non-blocking)
+      Promise.all([
+        AsyncStorage.getItem(USER_STORAGE_KEY),
+        AsyncStorage.getItem(legacy.user),
+      ]).then(async ([oldLiftorUser, legacyUser]) => {
+        if (!oldLiftorUser && legacyUser) {
+          await AsyncStorage.setItem(USER_STORAGE_KEY, legacyUser);
+        }
+        
+        // Namespace migration
+        try {
+          const genericUser = await AsyncStorage.getItem(USER_STORAGE_KEY);
+          const scopedUser = await AsyncStorage.getItem(KEYS.USER);
+          if (!scopedUser && genericUser) {
+            const parsed = JSON.parse(genericUser);
+            if (parsed && typeof parsed === 'object' && parsed.id && parsed.id === uid) {
+              await AsyncStorage.setItem(KEYS.USER, genericUser);
+            }
+          }
+        } catch {}
+        
+        // Clean up old keys
+        await Promise.all([
+          AsyncStorage.removeItem(legacy.user),
+          AsyncStorage.removeItem(legacy.checkins),
+          AsyncStorage.removeItem(legacy.plans),
+          AsyncStorage.removeItem(legacy.basePlans),
+          AsyncStorage.removeItem(legacy.foodLog),
+          AsyncStorage.removeItem(legacy.extras),
+        ]).catch(() => {});
+        
+        console.log('[UserStore] Background migration completed');
+      }).catch(err => {
+        console.warn('[UserStore] Background migration failed:', err);
+      });
       if (checkinsData && checkinsData.trim().startsWith('[') && checkinsData.trim().endsWith(']')) {
         try {
           const parsed = JSON.parse(checkinsData);
@@ -165,6 +216,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         console.warn('Invalid checkins data format, clearing:', checkinsData.substring(0, 100));
         await AsyncStorage.removeItem(KEYS.CHECKINS);
       }
+      
+      // Parse remaining local data
       if (plansData && plansData.trim().startsWith('[') && plansData.trim().endsWith(']')) {
         try {
           const parsed = JSON.parse(plansData);
@@ -172,13 +225,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             setPlans(parsed);
           }
         } catch (e) {
-          console.error('Error parsing plans data, clearing corrupted data:', e);
+          console.error('Error parsing plans data:', e);
           await AsyncStorage.removeItem(KEYS.PLANS);
         }
-      } else if (plansData) {
-        console.warn('Invalid plans data format, clearing:', plansData.substring(0, 100));
-        await AsyncStorage.removeItem(KEYS.PLANS);
       }
+      
       if (basePlansData && basePlansData.trim().startsWith('[') && basePlansData.trim().endsWith(']')) {
         try {
           const parsed = JSON.parse(basePlansData);
@@ -186,13 +237,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             setBasePlans(parsed);
           }
         } catch (e) {
-          console.error('Error parsing base plans data, clearing corrupted data:', e);
+          console.error('Error parsing base plans data:', e);
           await AsyncStorage.removeItem(KEYS.BASE_PLANS);
         }
-      } else if (basePlansData) {
-        console.warn('Invalid base plans data format, clearing:', basePlansData.substring(0, 100));
-        await AsyncStorage.removeItem(KEYS.BASE_PLANS);
       }
+      
       if (foodLogsData && foodLogsData.trim().startsWith('[') && foodLogsData.trim().endsWith(']')) {
         try {
           const parsed = JSON.parse(foodLogsData);
@@ -205,13 +254,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             setFoodLogs(migratedLogs);
           }
         } catch (e) {
-          console.error('Error parsing food logs data, clearing corrupted data:', e);
+          console.error('Error parsing food logs data:', e);
           await AsyncStorage.removeItem(KEYS.FOOD_LOG);
         }
-      } else if (foodLogsData) {
-        console.warn('Invalid food logs data format, clearing:', foodLogsData.substring(0, 100));
-        await AsyncStorage.removeItem(KEYS.FOOD_LOG);
       }
+      
       if (extrasData && extrasData.trim().startsWith('[') && extrasData.trim().endsWith(']')) {
         try {
           const parsed = JSON.parse(extrasData);
@@ -219,15 +266,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             setExtras(parsed);
           }
         } catch (e) {
-          console.error('Error parsing extras data, clearing corrupted data:', e);
+          console.error('Error parsing extras data:', e);
           await AsyncStorage.removeItem(KEYS.EXTRAS);
         }
-      } else if (extrasData) {
-        console.warn('Invalid extras data format, clearing:', extrasData.substring(0, 100));
-        await AsyncStorage.removeItem(KEYS.EXTRAS);
       }
-
-      // Load completions map
+      
       if (completionsData && completionsData.trim().startsWith('{') && completionsData.trim().endsWith('}')) {
         try {
           const parsed = JSON.parse(completionsData);
@@ -235,19 +278,182 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             setCompletionsByDate(parsed);
           }
         } catch (e) {
-          console.error('Error parsing completions data, clearing corrupted data:', e);
+          console.error('Error parsing completions data:', e);
           await AsyncStorage.removeItem(KEYS.COMPLETIONS);
         }
-      } else if (completionsData) {
-        console.warn('Invalid completions data format, clearing:', completionsData.substring(0, 100));
-        await AsyncStorage.removeItem(KEYS.COMPLETIONS);
       }
+      
+      // Mark as loaded IMMEDIATELY after local data is hydrated
+      // Remote sync can happen in background
+      console.log('[UserStore] ✅ Local data loaded in', Date.now() - loadStartTime, 'ms');
+      setIsLoading(false);
+
+      // Remote hydration from Supabase profile for fresh installs/new devices
+      // If there is a logged-in user (uid) but no local user stored yet, pull profile
+      // This happens in background and doesn't block app initialization
+      if (!hasLocalUser && uid) {
+        try {
+          console.log('[UserStore] No local user found, fetching from Supabase for uid:', uid.substring(0, 8) + '...');
+        let retryCount = 0;
+        const maxRetries = 3;
+        let profile = null;
+        let profileErr = null;
+        
+        // Use retry helper for profile fetching
+        const profileData = await retrySupabaseOperation(async () =>
+          await supabase
+            .from('profiles')
+            .select(
+              [
+                'id',
+                'email',
+                'name',
+                'goal',
+                'equipment',
+                'dietary_prefs',
+                'dietary_notes',
+                'training_days',
+                'timezone',
+                'onboarding_complete',
+                'age',
+                'sex',
+                'height',
+                'weight',
+                'activity_level',
+                'daily_calorie_target',
+                'supplements',
+                'supplement_notes',
+                'personal_goals',
+                'perceived_lacks',
+                'preferred_exercises',
+                'avoid_exercises',
+                'preferred_training_time',
+                'session_length',
+                'travel_days',
+                'fasting_window',
+                'meal_count',
+                'injuries',
+                'step_target',
+                'preferred_workout_split',
+                'special_requests',
+                'goal_weight',
+                'base_plan'
+              ].join(', ')
+            )
+            .eq('id', uid)
+            .maybeSingle()
+        );
+
+        profile = profileData;
+        profileErr = null;
+
+        if (profile && typeof profile === 'object' && 'id' in profile && !('message' in profile)) {
+            console.log('[UserStore] Hydrating user from remote profile');
+            logProductionMetric('data', 'profile_hydrated', { uid });
+            // Type-safe access to profile properties - we've verified it's not an error
+            const profileRecord = profile as Record<string, any>;
+            const hydratedUser: User = {
+              id: profileRecord.id,
+              name: (profileRecord.name as string) || 'User',
+              goal: (profileRecord.goal as any) || 'GENERAL_FITNESS',
+              equipment: (profileRecord.equipment as any) || [],
+              dietaryPrefs: Array.isArray(profileRecord.dietary_prefs)
+                ? (profileRecord.dietary_prefs as string[]).map((p) => (p === 'None' ? 'Non-veg' : (p as any)))
+                : [],
+              dietaryNotes: (profileRecord.dietary_notes as any) ?? undefined,
+              trainingDays: (profileRecord.training_days as number) ?? 3,
+              timezone: (profileRecord.timezone as string) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+              onboardingComplete: !!profileRecord.onboarding_complete,
+              age: (profileRecord.age as number | null) ?? undefined,
+              sex: (profileRecord.sex as any) ?? undefined,
+              height: (profileRecord.height as number | null) ?? undefined,
+              weight: (profileRecord.weight as number | null) ?? undefined,
+              activityLevel: (profileRecord.activity_level as any) ?? undefined,
+              dailyCalorieTarget: (profileRecord.daily_calorie_target as number | null) ?? undefined,
+              supplements: (profileRecord.supplements as string[] | null) ?? undefined,
+              supplementNotes: (profileRecord.supplement_notes as string | null) ?? undefined,
+              personalGoals: (profileRecord.personal_goals as string[] | null) ?? undefined,
+              perceivedLacks: (profileRecord.perceived_lacks as string[] | null) ?? undefined,
+              preferredExercises: (profileRecord.preferred_exercises as string[] | null) ?? undefined,
+              avoidExercises: (profileRecord.avoid_exercises as string[] | null) ?? undefined,
+              preferredTrainingTime: (profileRecord.preferred_training_time as string | null) ?? undefined,
+              sessionLength: (profileRecord.session_length as number | null) ?? undefined,
+              travelDays: (profileRecord.travel_days as number | null) ?? undefined,
+              fastingWindow: (profileRecord.fasting_window as string | null) ?? undefined,
+              mealCount: (profileRecord.meal_count as number | null) ?? undefined,
+              injuries: (profileRecord.injuries as string | null) ?? undefined,
+              stepTarget: (profileRecord.step_target as number | null) ?? undefined,
+              preferredWorkoutSplit: (profileRecord.preferred_workout_split as string | null) ?? undefined,
+              specialRequests: (profileRecord.special_requests as string | null) ?? undefined,
+              goalWeight: (profileRecord.goal_weight as number | null) ?? undefined,
+              workoutIntensity: (profileRecord.workout_intensity as any) ?? undefined,
+              basePlan: (profileRecord.base_plan as any) ?? undefined,
+            };
+
+            setUser(hydratedUser);
+            try { await AsyncStorage.setItem(KEYS.USER, JSON.stringify(hydratedUser)); } catch {}
+
+            // If a base plan snapshot is stored on the profile, hydrate local base plans
+            const profileBasePlan = (profile && typeof profile === 'object' && 'base_plan' in profile && !('message' in profile)) ? (profileRecord.base_plan as any) ?? null : null;
+            if (profileBasePlan && typeof profileBasePlan === 'object') {
+              try {
+                const normalizedPlan = {
+                  // Ensure required fields exist with reasonable fallbacks
+                  id: (profileBasePlan.id as string) || `base_${Date.now()}`,
+                  createdAt: (profileBasePlan.createdAt as string) || new Date().toISOString(),
+                  days: profileBasePlan.days || {},
+                  isLocked: profileBasePlan.isLocked ?? false,
+                } as any;
+                setBasePlans([normalizedPlan]);
+                await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify([normalizedPlan]));
+              } catch (e) {
+                console.warn('[UserStore] Failed to hydrate base plan from profile', e);
+              }
+            }
+            hasLocalUser = true;
+          } else if (profileErr) {
+            console.error('[UserStore] ❌ Failed to fetch profile after all retries');
+            logProductionMetric('error', 'profile_fetch_all_retries_failed', { uid, error: String(profileErr) });
+            
+            // Create a minimal user object so app doesn't break
+            console.log('[UserStore] Creating minimal fallback user to prevent app break');
+            const fallbackUser: User = {
+              id: uid,
+              name: 'User',
+              goal: 'GENERAL_FITNESS',
+              equipment: [],
+              dietaryPrefs: ['Non-veg'],
+              trainingDays: 3,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              onboardingComplete: false,
+            };
+            setUser(fallbackUser);
+            try { 
+              await AsyncStorage.setItem(KEYS.USER, JSON.stringify(fallbackUser)); 
+            } catch {}
+            hasLocalUser = true;
+          }
+        } catch (e) {
+          console.error('[UserStore] Remote hydration exception:', e);
+          logProductionMetric('error', 'profile_hydration_exception', { uid, error: String(e) });
+        }
+      }
+      
+      // Log final hydration status
+      if (uid && !hasLocalUser) {
+        console.error('[UserStore] ❌ User not hydrated after all attempts');
+        logProductionMetric('error', 'user_not_hydrated', { uid });
+      } else if (uid && hasLocalUser) {
+        console.log('[UserStore] ✅ User data ready');
+        logProductionMetric('data', 'user_ready', { uid, hasOnboarding: user?.onboardingComplete });
+      }
+      
+      console.log('[UserStore] ✅ Background sync completed');
     } catch (error) {
       console.error('Error loading user data:', error);
-    } finally {
-      setIsLoading(false);
+      // Don't set isLoading(false) again here - it's already set after local data load
     }
-  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, uid]);
+  }, [uid, supabase]); // KEYS are derived from uid, so uid is sufficient
 
   // Reload scoped data whenever the authenticated user changes
   useEffect(() => {
@@ -267,8 +473,25 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     try {
       setUser(userData);
       await AsyncStorage.setItem(KEYS.USER, JSON.stringify(userData));
+      
+      // Log success in production
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('data', 'user_updated', { userId: userData.id });
+      }
     } catch (error) {
       console.error('Error saving user data:', error);
+      
+      // Log error in production
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('error', 'user_update_failed', { 
+          error: String(error),
+          userId: userData?.id 
+        });
+      }
+      
+      // Don't throw error to prevent app crash, but log it
     }
   }, [KEYS.USER]);
 
@@ -277,8 +500,19 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       const updatedCheckins = [...checkins, checkin];
       setCheckins(updatedCheckins);
       await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(updatedCheckins));
+      
+      // Log success in production
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('data', 'checkin_added', { date: checkin.date });
+      }
     } catch (error) {
       console.error('Error saving checkin:', error);
+      
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('error', 'checkin_save_failed', { error: String(error) });
+      }
     }
   }, [checkins, KEYS.CHECKINS]);
 
@@ -295,8 +529,19 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       }
       setPlans(updatedPlans);
       await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(updatedPlans));
+      
+      // Log success in production
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('data', 'plan_added', { date: plan.date, isUpdate: idx >= 0 });
+      }
     } catch (error) {
       console.error('Error saving plan:', error);
+      
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('error', 'plan_save_failed', { error: String(error), date: plan.date });
+      }
     }
   }, [plans, KEYS.PLANS]);
 
@@ -305,10 +550,32 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       const updatedBasePlans = [...basePlans, basePlan];
       setBasePlans(updatedBasePlans);
       await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
+      
+      // Log success in production
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('data', 'base_plan_added', { 
+          planId: basePlan.id,
+          dayCount: Object.keys(basePlan.days || {}).length 
+        });
+      }
     } catch (error) {
       console.error('Error saving base plan:', error);
+      
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('error', 'base_plan_save_failed', { 
+          error: String(error),
+          planId: basePlan.id 
+        });
+      }
     }
   }, [basePlans, KEYS.BASE_PLANS]);
+
+  // Define getCurrentBasePlan BEFORE syncLocalToBackend since it's used as a dependency
+  const getCurrentBasePlan = useCallback(() => {
+    return basePlans.find(plan => !plan.isLocked) || basePlans[basePlans.length - 1];
+  }, [basePlans]);
 
   // Persist local data to Supabase so it is available after sign out
   const syncLocalToBackend = useCallback(async () => {
@@ -349,10 +616,16 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           busy_blocks: c.busyBlocks ?? null,
           travel_yn: c.travelYN ?? null,
         }));
-        const { error: upErr } = await supabase
-          .from('checkins')
-          .upsert(rows as any, { onConflict: 'user_id,date' });
-        if (upErr) console.warn('[Sync] checkins upsert error', upErr);
+
+        try {
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('checkins')
+              .upsert(rows as any, { onConflict: 'user_id,date' })
+          );
+        } catch (upErr) {
+          console.warn('[Sync] checkins upsert error', upErr);
+        }
       }
 
       // Upsert daily plans (unique by user_id + date)
@@ -368,21 +641,32 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           adjustments: p.adjustments ?? [],
           is_from_base_plan: p.isFromBasePlan ?? false,
         }));
-        const { error: upErr } = await supabase
-          .from('daily_plans')
-          .upsert(rows as any, { onConflict: 'user_id,date' });
-        if (upErr) console.warn('[Sync] daily_plans upsert error', upErr);
+
+        try {
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('daily_plans')
+              .upsert(rows as any, { onConflict: 'user_id,date' })
+          );
+        } catch (upErr) {
+          console.warn('[Sync] daily_plans upsert error', upErr);
+        }
       }
 
       // Optionally persist the current base plan snapshot to profiles.base_plan
       try {
         const currentBase = getCurrentBasePlan();
         if (currentBase) {
-          const { error: profErr } = await supabase
-            .from('profiles')
-            .update({ base_plan: currentBase as any })
-            .eq('id', uid);
-          if (profErr) console.warn('[Sync] profiles.base_plan update error', profErr);
+          try {
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('profiles')
+                .update({ base_plan: currentBase as any })
+                .eq('id', uid)
+            );
+          } catch (profErr) {
+            console.warn('[Sync] profiles.base_plan update error', profErr);
+          }
         }
       } catch (e) {
         console.warn('[Sync] base_plan update exception', e);
@@ -394,10 +678,6 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       return { success: false, reason: 'exception' };
     }
   }, [uid, supabase, checkins, plans, getCurrentBasePlan]);
-
-  const getCurrentBasePlan = useCallback(() => {
-    return basePlans.find(plan => !plan.isLocked) || basePlans[basePlans.length - 1];
-  }, [basePlans]);
 
   const updateBasePlanDay = useCallback(async (dayKey: string, dayData: { workout: WorkoutPlan; nutrition: NutritionPlan; recovery: RecoveryPlan }) => {
     try {
@@ -575,7 +855,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
       if (uid) {
         try {
-          await supabase.from('daily_plans').upsert({ user_id: uid, date, adherence } as any, { onConflict: 'user_id,date' });
+          await retrySupabaseOperation(async () =>
+            await supabase.from('daily_plans').upsert({ user_id: uid, date, adherence } as any, { onConflict: 'user_id,date' })
+          );
         } catch (e) {
           console.warn('[Sync] adherence upsert failed', e);
         }
@@ -700,11 +982,13 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             notes: newExtra.notes ?? null,
           } as const;
 
-          const { error: insertError } = await supabase.from('food_extras').insert(insertPayload);
-          if (insertError) {
-            console.error('[Supabase] Insert food_extras failed', insertError);
-          } else {
+          try {
+            await retrySupabaseOperation(async () =>
+              await supabase.from('food_extras').insert(insertPayload)
+            );
             console.log('[Supabase] Inserted food_extras successfully');
+          } catch (insertError) {
+            console.error('[Supabase] Insert food_extras failed', insertError);
           }
         } catch (e) {
           console.error('[Supabase] addExtraFood remote sync failed', e);
@@ -785,8 +1069,12 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Best-effort remote cleanup
       if (uid) {
         try {
-          await supabase.from('food_extras').delete().match({ user_id: uid, id: extraId });
-        } catch {}
+          await retrySupabaseOperation(async () =>
+            await supabase.from('food_extras').delete().match({ user_id: uid, id: extraId })
+          );
+        } catch (e) {
+          console.warn('[Supabase] Delete food_extras failed', e);
+        }
       }
 
       return true;

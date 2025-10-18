@@ -1,0 +1,217 @@
+================================================================================
+QUICK BUILD & TEST GUIDE FOR TESTFLIGHT
+================================================================================
+
+This guide provides the essential steps to build and test the fixed plan
+generation feature in TestFlight.
+
+================================================================================
+STEP 1: VERIFY EAS SECRETS
+================================================================================
+
+Run this command to check your secrets are set:
+
+```bash
+eas secret:list
+```
+
+You should see AT MINIMUM:
+- EXPO_PUBLIC_SUPABASE_URL
+- EXPO_PUBLIC_SUPABASE_ANON_KEY
+- EXPO_PUBLIC_GEMINI_API_KEY (or EXPO_PUBLIC_AI_API_KEY)
+
+OPTIONAL but recommended:
+- EXPO_PUBLIC_AI_PROVIDER (defaults to "gemini")
+- EXPO_PUBLIC_AI_MODEL (defaults to "gemini-1.5-flash")
+- EXPO_PUBLIC_ENABLE_FALLBACK (defaults to "true")
+
+If missing, set them:
+
+```bash
+# Required
+eas secret:create --scope project --name EXPO_PUBLIC_GEMINI_API_KEY --value "YOUR_KEY_HERE"
+
+# Optional
+eas secret:create --scope project --name EXPO_PUBLIC_AI_PROVIDER --value "gemini"
+eas secret:create --scope project --name EXPO_PUBLIC_ENABLE_FALLBACK --value "true"
+```
+
+================================================================================
+STEP 2: BUILD FOR TESTFLIGHT
+================================================================================
+
+```bash
+# Clean build (recommended after these fixes)
+eas build --platform ios --profile production --clear-cache
+```
+
+Wait for build to complete (~10-20 minutes)
+
+================================================================================
+STEP 3: SUBMIT TO TESTFLIGHT
+================================================================================
+
+```bash
+eas submit --platform ios --profile production
+```
+
+Wait for Apple processing (~5-15 minutes after submission)
+
+================================================================================
+STEP 4: TEST IN TESTFLIGHT
+================================================================================
+
+### Test Case 1: Base Plan Generation
+1. Install app from TestFlight
+2. Complete onboarding (enter profile info)
+3. Should automatically start generating base plan
+4. Wait 20-60 seconds
+5. ✅ Should see plan preview screen with 7-day plan
+
+**If it fails:**
+- Should see an Alert explaining the issue
+- Should still get a basic personalized plan
+- Check console logs via Xcode
+
+### Test Case 2: Daily Plan Generation
+1. From home screen, complete daily check-in
+2. Tap "Generate Today's Plan"
+3. Wait 10-30 seconds
+4. ✅ Should see today's plan screen
+
+**If it fails:**
+- Should see an Alert explaining the issue
+- Should still get a plan based on check-in data
+
+### Test Case 3: Network Test (Snap Food)
+1. From home screen, tap "Snap Food"
+2. Take a photo of food
+3. Enter portion size
+4. Tap "Analyze Food"
+5. ✅ Should see nutrition breakdown
+
+This tests that network access is working (both plan generation and snap food
+use the same network infrastructure now).
+
+================================================================================
+STEP 5: DEBUGGING VIA XCODE CONSOLE
+================================================================================
+
+If plan generation fails in TestFlight:
+
+1. Connect iPhone to Mac
+2. Open Xcode → Window → Devices and Simulators
+3. Select your device
+4. Click "Open Console" (bottom left)
+5. Install and open TestFlight app
+6. Filter logs by searching for:
+   - `GeneratePlan` - Plan generation logs
+   - `AI Client` - API client logs
+   - `Gemini` - Gemini API logs
+   - `Rork` - Fallback API logs
+
+Look for these patterns:
+
+**Success:**
+```
+[GeneratePlan] Config valid: true
+🤖 [AI Client] Using provider: gemini
+🔑 [AI Client] API key available: true
+✅ [Gemini] Response received
+```
+
+**Network Error:**
+```
+❌ [Gemini] API Error: [status]
+🔄 [AI Client] Attempting Rork toolkit fallback
+✅ [Rork] Response received
+```
+
+**Configuration Error:**
+```
+❌ [Gemini] No API key found
+⚠️ Configuration issues: [...]
+🔄 Using adaptive fallback system
+```
+
+================================================================================
+STEP 6: COMMON ISSUES & SOLUTIONS
+================================================================================
+
+### Issue: "No API key found"
+**Cause:** EAS secrets not properly set or build cache issue
+**Solution:**
+```bash
+eas secret:list  # Verify secrets exist
+eas build --platform ios --profile production --clear-cache  # Rebuild
+```
+
+### Issue: "Network request failed"
+**Cause:** Device has no internet or API service is down
+**Solution:** 
+- Check device has internet (try Safari)
+- Fallback to Rork API should work automatically
+- Emergency fallback will still generate a plan
+
+### Issue: "Timeout error"
+**Cause:** Network too slow or API overloaded
+**Solution:**
+- App will automatically retry with fallback
+- User will still get a plan
+- Try again later for AI-generated plan
+
+### Issue: Plan generated but seems generic
+**Cause:** Emergency fallback was used (AI APIs failed)
+**Solution:**
+- This is expected behavior (not a bug)
+- Plan is still personalized to user's profile
+- User can regenerate later from settings
+
+================================================================================
+STEP 7: VERIFY FIX SUCCESS
+================================================================================
+
+The fix is successful if:
+
+✅ Base plan generates in TestFlight (not just simulator)
+✅ Daily plan generates in TestFlight
+✅ Users see clear error messages if something fails
+✅ Users ALWAYS get a plan (never stuck/broken state)
+✅ Snap Food continues to work (regression test)
+✅ Console logs show successful API calls or proper fallbacks
+
+All of these should be TRUE. If any are FALSE, check console logs and verify
+EAS secrets are set correctly.
+
+================================================================================
+ROLLBACK PLAN
+================================================================================
+
+If you need to rollback these changes:
+
+```bash
+git checkout HEAD~1 ios/liftor/Info.plist
+git checkout HEAD~1 app.json
+git checkout HEAD~1 utils/production-config.ts
+git checkout HEAD~1 utils/ai-client.ts
+git checkout HEAD~1 app/generating-base-plan.tsx
+git checkout HEAD~1 app/generating-plan.tsx
+git checkout HEAD~1 utils/plan-generation-diagnostics.ts
+git checkout HEAD~1 services/production-ai-service.ts
+```
+
+Then rebuild and resubmit.
+
+================================================================================
+NEXT STEPS AFTER SUCCESSFUL TESTFLIGHT
+================================================================================
+
+1. Monitor TestFlight user feedback
+2. Check console logs from real devices
+3. Verify plan quality is good
+4. Prepare for App Store submission
+5. Consider adding analytics for plan generation success rate
+
+================================================================================
+
+

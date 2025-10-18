@@ -74,6 +74,7 @@ create table if not exists public.profiles (
   preferred_workout_split text null,
   special_requests text null,
   vmn_transcription text null,
+  workout_intensity text null,
   base_plan jsonb null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -177,6 +178,7 @@ create table if not exists public.checkins (
   injuries text,
   busy_blocks jsonb,
   travel_yn boolean,
+  workout_intensity int,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(user_id, date)

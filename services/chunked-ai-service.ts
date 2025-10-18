@@ -1,106 +1,30 @@
 import { validateWeeklyPlan, validateDailyPlan, repairPlanData } from '@/utils/plan-schemas';
 import type { User, CheckinData, WeeklyBasePlan, DailyPlan } from '@/types/user';
-
-// AI Provider Configuration
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
-const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-const FALLBACK_ENDPOINT = 'https://toolkit.rork.com/text/llm/';
+import { generateAICompletion, type Message } from '@/utils/ai-client';
 
 /**
- * Makes a single AI request with proper token management
+ * Makes a single AI request using the central AI client with DeepSeek → Gemini → Rork fallback
  */
 async function makeAIRequest(prompt: string, maxTokens: number = 4096): Promise<string> {
   console.log(`🤖 Making AI request (max tokens: ${maxTokens})`);
   
-  // Try Gemini first if API key is available
-  if (GEMINI_API_KEY) {
-    try {
-      const response = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: prompt }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: maxTokens,
-            candidateCount: 1,
-          },
-          safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-          ],
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        
-        // Check for errors or blocks
-        if (data.promptFeedback?.blockReason) {
-          console.warn('⚠️ Gemini blocked prompt:', data.promptFeedback.blockReason);
-          throw new Error('Prompt was blocked');
-        }
-        
-        if (!data.candidates || data.candidates.length === 0) {
-          console.warn('⚠️ No candidates in response');
-          throw new Error('No candidates in response');
-        }
-        
-        const text = data.candidates[0]?.content?.parts?.[0]?.text;
-        if (!text) {
-          console.warn('⚠️ No text in candidate response');
-          throw new Error('No text in response');
-        }
-        
-        console.log('✅ Gemini API success, response length:', text.length);
-        return text;
-      } else {
-        const errorText = await response.text();
-        console.warn('⚠️ Gemini API error:', response.status, errorText);
-        throw new Error(`Gemini API error: ${response.status}`);
-      }
-    } catch (error) {
-      console.warn('⚠️ Gemini API request failed:', error);
-      // Continue to fallback
-    }
-  }
-
-  // Fallback to toolkit API
   try {
-    console.log('🔄 Using fallback AI provider');
-    const response = await fetch(FALLBACK_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Fallback API returned status ${response.status}`);
+    const messages: Message[] = [
+      { role: 'user', content: prompt }
+    ];
+    
+    // Use the central AI client which handles DeepSeek → Gemini → Rork fallback chain
+    const response = await generateAICompletion(messages);
+    
+    if (!response.completion) {
+      throw new Error('No completion in AI response');
     }
-
-    const data = await response.json();
-    const text = data?.completion;
-    if (!text) {
-      throw new Error('No completion in fallback response');
-    }
-
-    console.log('✅ Fallback API success, response length:', text.length);
-    return text;
+    
+    console.log('✅ AI response received, length:', response.completion.length);
+    return response.completion;
+    
   } catch (error) {
-    console.error('❌ All AI providers failed:', error);
+    console.error('❌ AI request failed:', error);
     throw new Error('Failed to get AI response from all providers');
   }
 }

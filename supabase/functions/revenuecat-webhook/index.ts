@@ -1,5 +1,12 @@
 // deno-lint-ignore-file no-explicit-any
+// @ts-ignore - Remote import is resolved by Deno at runtime/deploy
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.3";
+
+// Provide minimal Deno types so TypeScript can type-check in non-Deno editors
+declare const Deno: {
+  serve: (handler: (req: Request) => Response | Promise<Response>) => void;
+  env: { get: (key: string) => string | undefined };
+};
 
 type RCEntitlement = {
   expires_date: string | null;
@@ -85,7 +92,7 @@ function computePlatformAndRenew(subs: Record<string, RCSubscriptionsEntry> | un
   return { platform, willRenew };
 }
 
-Deno.serve(async (req) => {
+Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const webhookSecret = Deno.env.get('REVENUECAT_WEBHOOK_SECRET') || '';
     const rcSecretKey = Deno.env.get('REVENUECAT_SECRET_API_KEY') || '';

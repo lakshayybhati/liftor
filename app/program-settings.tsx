@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Settings, RefreshCw, Save, Calendar } from 'lucide-react-native';
+import { ArrowLeft, Settings, Save, Calendar } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
@@ -9,7 +9,7 @@ import { useUserStore } from '@/hooks/useUserStore';
 import { GOALS } from '@/constants/fitness';
 import { router } from 'expo-router';
 import { theme } from '@/constants/colors';
-import type { User, WeeklyBasePlan, Equipment, DietaryPref } from '@/types/user';
+import type { User, Equipment, DietaryPref, WorkoutIntensity } from '@/types/user';
 import { useAuth } from '@/hooks/useAuth';
 
 const WORKOUT_SPLITS = [
@@ -47,12 +47,30 @@ const DIETARY_PREFS_WITH_LABELS = [
   { id: 'Non-veg', label: 'Non-veg' },
 ];
 
+const WORKOUT_INTENSITY_OPTIONS: { id: WorkoutIntensity; label: WorkoutIntensity }[] = [
+  { id: 'Optimal', label: 'Optimal' },
+  { id: 'Ego lifts', label: 'Ego lifts' },
+  { id: 'Recovery focused', label: 'Recovery focused' },
+];
+
 export default function ProgramSettingsScreen() {
-  const { user, updateUser, basePlans, addBasePlan } = useUserStore();
-  const { session, supabase } = useAuth();
+  const { user, updateUser, basePlans } = useUserStore();
+  const auth = useAuth();
   const insets = useSafeAreaInsets();
-  const [isGenerating, setIsGenerating] = useState(false);
   const [formData, setFormData] = useState<Partial<User>>({});
+
+  // Handle case where auth context isn't ready yet
+  if (!auth) {
+    return (
+      <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={theme.color.accent.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const { session, supabase } = auth;
 
   useEffect(() => {
     if (user) {
@@ -61,6 +79,7 @@ export default function ProgramSettingsScreen() {
         trainingDays: user.trainingDays,
         equipment: user.equipment,
         dietaryPrefs: user.dietaryPrefs,
+        dietaryNotes: user.dietaryNotes || '',
         goalWeight: user.goalWeight,
         preferredExercises: user.preferredExercises || [],
         avoidExercises: user.avoidExercises || [],
@@ -80,6 +99,7 @@ export default function ProgramSettingsScreen() {
         sleepQualityBaseline: user.sleepQualityBaseline || 7,
         preferredWorkoutSplit: user.preferredWorkoutSplit || '',
         specialRequests: user.specialRequests || '',
+        workoutIntensity: user.workoutIntensity || 'Optimal',
       });
     }
   }, [user]);
@@ -90,12 +110,16 @@ export default function ProgramSettingsScreen() {
     try {
       const updatedUser = { ...user, ...formData };
       await updateUser(updatedUser);
-      // Best-effort: persist goal weight to Supabase profiles
+      // Best-effort: persist preferences to Supabase profiles
       try {
         if (session?.user?.id) {
           await supabase
             .from('profiles')
-            .update({ goal_weight: typeof formData.goalWeight === 'number' ? Math.round(formData.goalWeight) : formData.goalWeight ?? null })
+            .update({ 
+              goal_weight: typeof formData.goalWeight === 'number' ? Math.round(formData.goalWeight) : formData.goalWeight ?? null,
+              dietary_notes: formData.dietaryNotes || null,
+              workout_intensity: formData.workoutIntensity || null
+            })
             .eq('id', session.user.id);
         }
       } catch {}
@@ -103,196 +127,6 @@ export default function ProgramSettingsScreen() {
     } catch (error) {
       console.error('Error saving preferences:', error);
       Alert.alert('Error', 'Failed to save preferences. Please try again.');
-    }
-  };
-
-  const handleRegenerateWeek = async () => {
-    if (!user) return;
-
-    Alert.alert(
-      'Regenerate Week Plan',
-      'This will create a new 7-day base plan using your updated preferences. Your current plan will be kept in history. Continue?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Regenerate', onPress: performRegeneration },
-      ]
-    );
-  };
-
-  const performRegeneration = async () => {
-    if (!user) return;
-
-    try {
-      setIsGenerating(true);
-      
-      // First save current preferences
-      const updatedUser = { ...user, ...formData };
-      await updateUser(updatedUser);
-
-      // Prepare the prompt for the AI
-      const prompt = `You are a world-class Personal Trainer & Titration Specialist with deep experience in strength & conditioning, habit coaching, recovery, and nutrition. Your job is to take my inputs and produce a 7-Day Base Plan (training + nutrition + recovery) and then titrate it daily—making small, data-driven adjustments from my daily check-ins so the plan stays safe, effective, and sustainable.
-
-Build a clean, professional 7-Day Base Plan tailored to my goals, schedule, equipment, injuries, and preferences.
-Create a Daily Titration Engine that updates the plan from my daily inputs (sleep, soreness, stress, energy, time available, pain flags, adherence).
-Keep things simple and actionable (no unnecessary complexity), but clearly explain why each adjustment is made.
-Prioritize form, safety, and progressive overload. If pain or red flags appear, pivot to safe variants and reduce load/volume.
-
-User Profile:
-- Name: ${updatedUser.name}
-- Goal: ${updatedUser.goal}
-- Training Days: ${updatedUser.trainingDays} per week
-- Equipment: ${updatedUser.equipment.join(', ')}
-- Dietary Preferences: ${updatedUser.dietaryPrefs.join(', ')}
-- Preferred Exercises: ${formData.preferredExercises?.join(', ') || 'None specified'}
-- Avoid Exercises: ${formData.avoidExercises?.join(', ') || 'None specified'}
-- Preferred Training Time: ${formData.preferredTrainingTime || 'Flexible'}
-- Session Length: ${formData.sessionLength} minutes
-- Travel Days: ${formData.travelDays} per month
-- Fasting Window: ${formData.fastingWindow}
-- Meal Count: ${formData.mealCount} meals per day
-- Injuries: ${formData.injuries || 'None'}
-- Budget Constraints: ${formData.budgetConstraints || 'None'}
-- Wake Time: ${formData.wakeTime || 'Not specified'}
-- Sleep Time: ${formData.sleepTime || 'Not specified'}
-- Step Target: ${formData.stepTarget}
-- Caffeine Frequency: ${formData.caffeineFrequency || 'Not specified'}
-- Alcohol Frequency: ${formData.alcoholFrequency || 'Not specified'}
-- Stress Baseline: ${formData.stressBaseline}/10
-- Sleep Quality Baseline: ${formData.sleepQualityBaseline}/10
-- Preferred Workout Split: ${formData.preferredWorkoutSplit || 'Auto-select based on training days'}
-- Special Requests: ${formData.specialRequests || 'None'}
-
-Please create a comprehensive 7-day base plan with the following structure:
-
-**Output Format:**
-- Summary Profile
-- 7-Day Base Plan (Monday through Sunday)
-- Daily Titration Rules
-- Check-In Questions
-- Shopping/Prep recommendations
-- Tracking & Review guidelines
-
-For each day, include:
-- Workout plan with exercises, sets, reps, and RIR
-- Nutrition plan with meals and macros
-- Recovery recommendations
-
-Use tables for the weekly plan and bullets for rules and recommendations.`;
-
-      const response = await fetch('https://toolkit.rork.com/text/llm/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: 'system',
-              content: 'You are a world-class Personal Trainer & Titration Specialist. Provide detailed, actionable fitness and nutrition plans.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const planContent = data.completion;
-
-      // Parse the AI response and create a structured base plan
-      const newBasePlan: WeeklyBasePlan = {
-        id: `base-${Date.now()}`,
-        createdAt: new Date().toISOString(),
-        days: {
-          monday: {
-            workout: {
-              focus: ['Full Body'],
-              blocks: [
-                {
-                  name: 'Main Workout',
-                  items: [
-                    { exercise: 'Generated from AI plan', sets: 3, reps: '8-12', RIR: 2 },
-                  ],
-                },
-              ],
-              notes: planContent.substring(0, 500) + '...', // Store first part of AI response
-            },
-            nutrition: {
-              total_kcal: 2000,
-              protein_g: 150,
-              meals: [
-                {
-                  name: 'Breakfast',
-                  items: [{ food: 'Generated from AI plan', qty: 'As per plan' }],
-                },
-              ],
-              hydration_l: 3,
-            },
-            recovery: {
-              mobility: ['Generated from AI plan'],
-              sleep: ['8 hours', 'Cool room'],
-            },
-          },
-          // Add other days with similar structure
-          tuesday: {
-            workout: { focus: ['Rest or Light Activity'], blocks: [], notes: 'Rest day or light activity' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Light stretching'], sleep: ['8 hours'] },
-          },
-          wednesday: {
-            workout: { focus: ['Full Body'], blocks: [], notes: 'Workout day' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Post-workout stretching'], sleep: ['8 hours'] },
-          },
-          thursday: {
-            workout: { focus: ['Rest'], blocks: [], notes: 'Rest day' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Mobility work'], sleep: ['8 hours'] },
-          },
-          friday: {
-            workout: { focus: ['Full Body'], blocks: [], notes: 'Workout day' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Post-workout stretching'], sleep: ['8 hours'] },
-          },
-          saturday: {
-            workout: { focus: ['Active Recovery'], blocks: [], notes: 'Light activity' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Full body stretching'], sleep: ['8 hours'] },
-          },
-          sunday: {
-            workout: { focus: ['Rest'], blocks: [], notes: 'Complete rest' },
-            nutrition: { total_kcal: 2000, protein_g: 150, meals: [], hydration_l: 3 },
-            recovery: { mobility: ['Gentle yoga'], sleep: ['8 hours'] },
-          },
-        },
-        isLocked: false,
-      };
-
-      await addBasePlan(newBasePlan);
-      
-      Alert.alert(
-        'Plan Generated!',
-        'Your new 7-day base plan has been created successfully. You can view it in the Plan Preview.',
-        [
-          { text: 'View Plan', onPress: () => router.push('/plan-preview') },
-          { text: 'OK' },
-        ]
-      );
-    } catch (error) {
-      console.error('Error generating plan:', error);
-      Alert.alert(
-        'Generation Failed',
-        'Failed to generate new plan. Please check your connection and try again.',
-        [{ text: 'OK' }]
-      );
-    } finally {
-      setIsGenerating(false);
     }
   };
 
@@ -348,7 +182,7 @@ Use tables for the weekly plan and bullets for rules and recommendations.`;
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Training Days per Week</Text>
               <View style={styles.chipContainer}>
-                {[2, 3, 4, 5, 6].map((days) => (
+                {[2, 3, 4, 5, 6, 7].map((days) => (
                   <Chip
                     key={days}
                     label={`${days} days`}
@@ -398,6 +232,18 @@ Use tables for the weekly plan and bullets for rules and recommendations.`;
                   />
                 ))}
               </View>
+              <Text style={styles.fieldDescription}>
+                Foods you prefer or avoid (optional)
+              </Text>
+              <TextInput
+                style={styles.textInput}
+                value={formData.dietaryNotes || ''}
+                onChangeText={(text) => updateFormField('dietaryNotes', text)}
+                placeholder="e.g., No dairy, love chicken, allergic to nuts..."
+                placeholderTextColor={theme.color.muted}
+                multiline
+                numberOfLines={3}
+              />
             </View>
           </Card>
 
@@ -445,6 +291,20 @@ Use tables for the weekly plan and bullets for rules and recommendations.`;
                     selected={formData.preferredWorkoutSplit === split.id}
                     onPress={() => updateFormField('preferredWorkoutSplit', split.id)}
 
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Workout Intensity Preference</Text>
+              <View style={styles.chipContainer}>
+                {WORKOUT_INTENSITY_OPTIONS.map((intensity) => (
+                  <Chip
+                    key={intensity.id}
+                    label={intensity.label}
+                    selected={formData.workoutIntensity === intensity.id}
+                    onPress={() => updateFormField('workoutIntensity', intensity.id)}
                   />
                 ))}
               </View>
@@ -550,18 +410,6 @@ Use tables for the weekly plan and bullets for rules and recommendations.`;
               style={[styles.saveButton, styles.prettyButton]}
               textStyle={styles.prettyButtonText}
               icon={<Save color={theme.color.bg} size={20} />}
-            />
-
-            <Button
-              title={isGenerating ? "Generating..." : "Regenerate Week Plan"}
-              onPress={handleRegenerateWeek}
-              disabled={isGenerating}
-              style={[styles.regenerateButton, styles.prettyButton, isGenerating && styles.disabledButton]}
-              textStyle={styles.prettyButtonText}
-              icon={isGenerating ? 
-                <ActivityIndicator color={theme.color.bg} size={20} /> :
-                <RefreshCw color={theme.color.bg} size={20} />
-              }
             />
           </View>
 
@@ -680,9 +528,6 @@ const styles = StyleSheet.create({
   saveButton: {
     backgroundColor: theme.color.accent.green,
   },
-  regenerateButton: {
-    backgroundColor: theme.color.accent.primary,
-  },
   prettyButton: {
     borderWidth: 0,
     borderRadius: 24,
@@ -694,9 +539,6 @@ const styles = StyleSheet.create({
   },
   prettyButtonText: {
     letterSpacing: 0.2,
-  },
-  disabledButton: {
-    opacity: 0.6,
   },
   planInfoCard: {
     marginTop: theme.space.lg,

@@ -35,7 +35,7 @@ class ProductionMonitor {
   private maxMetricsHistory = 100;
   private alertThresholds = {
     minSuccessRate: 0.85,
-    maxResponseTime: 30000, // 30 seconds
+    maxResponseTime: 120000, // 120 seconds to align with DeepSeek timeout
     maxErrorRate: 0.15,
     minSatisfactionScore: 3.5
   };

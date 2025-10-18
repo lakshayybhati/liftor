@@ -10,6 +10,8 @@ export type Sex = 'Male' | 'Female';
 
 export type ActivityLevel = 'Sedentary' | 'Lightly Active' | 'Moderately Active' | 'Very Active' | 'Extra Active';
 
+export type WorkoutIntensity = 'Optimal' | 'Ego lifts' | 'Recovery focused';
+
 export interface User {
   id: string;
   name: string;
@@ -52,6 +54,7 @@ export interface User {
   preferredWorkoutSplit?: string;
   specialRequests?: string;
   vmnTranscription?: string; // VMN Transcription value
+  workoutIntensity?: WorkoutIntensity; // Workout intensity preference
   // Weight tracking
   goalWeight?: number; // in kg
   // Base plan storage
@@ -88,6 +91,7 @@ export interface CheckinData {
   injuries?: string;
   busyBlocks?: {start: string; end: string; reason: string}[];
   travelYN?: boolean;
+  workoutIntensity?: number; // Workout intensity slider value (1-10)
 }
 
 export interface WorkoutPlan {
