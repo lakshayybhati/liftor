@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView, ScrollView, Platform, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Stack, useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { theme } from '@/constants/colors';
@@ -109,7 +109,10 @@ export default function VerifyOtpScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.container}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
+          <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+            <View style={styles.container}>
         <Stack.Screen options={{ title: 'Verify Code', headerShown: true }} />
         <Text style={styles.title}>Enter the 6‑digit code</Text>
         <Text style={styles.subtitle}>Sent to {masked}</Text>
@@ -134,7 +137,10 @@ export default function VerifyOtpScreen() {
         <TouchableOpacity onPress={onResend} disabled={cooldown > 0} style={styles.resendBtn}>
           <Text style={[styles.resendText, cooldown > 0 && { opacity: 0.5 }]}>Resend {cooldown > 0 ? `in ${cooldown}s` : ''}</Text>
         </TouchableOpacity>
-      </View>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }

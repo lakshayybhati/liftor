@@ -1,11 +1,12 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Platform, Image, Alert } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Platform, Image, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
+import { getSubscriptionTier } from '@/utils/subscription-helpers';
 import * as ImagePicker from 'expo-image-picker';
 import { Camera, Image as ImageIcon, Save, UserCog, ChevronRight, ArrowLeft } from 'lucide-react-native';
 
@@ -44,6 +45,7 @@ export default function ProfileScreen() {
   const [avatar, setAvatar] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [membership, setMembership] = useState<{ tier: 'trial' | 'elite' | 'none'; label: string } | null>(null);
 
   useEffect(() => {
     setName(derivedName ?? '');
@@ -52,6 +54,17 @@ export default function ProfileScreen() {
   useEffect(() => {
     setEmail(session?.user?.email ?? '');
   }, [session?.user?.email]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const tier = await getSubscriptionTier();
+        setMembership({ tier: tier.tier, label: tier.label });
+      } catch {
+        setMembership(null);
+      }
+    })();
+  }, []);
 
   const canSave = useMemo(() => {
     const baselineName = (derivedName || '').trim();
@@ -203,6 +216,22 @@ export default function ProfileScreen() {
         <View style={styles.form}>
           {!!error && <Text style={styles.errorText}>{error}</Text>}
           {!!success && <Text style={styles.successText}>{success}</Text>}
+          {membership && membership.tier !== 'none' && (
+            <View style={styles.membershipRow}>
+              <Text style={styles.membershipLabel}>Membership</Text>
+              <View style={[
+                styles.membershipBadge,
+                membership.tier === 'elite' ? styles.eliteBadge : styles.trialBadge
+              ]}>
+                <Text style={[
+                  styles.membershipText,
+                  membership.tier === 'elite' ? styles.eliteText : styles.trialText
+                ]}>
+                  {membership.label}
+                </Text>
+              </View>
+            </View>
+          )}
           <TouchableOpacity style={styles.avatarBtn} onPress={pickImage} testID="pick-avatar">
             {(() => {
               const existing = (session?.user?.user_metadata as any)?.avatar_url as string | undefined;

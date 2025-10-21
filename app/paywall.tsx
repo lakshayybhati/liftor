@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Linking, Platform, Image } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Linking, Platform, Image, BackHandler } from 'react-native';
 import { Stack, useLocalSearchParams, router } from 'expo-router';
 import Purchases, { PurchasesOffering, PurchasesPackage } from 'react-native-purchases';
 import Constants from 'expo-constants';
@@ -10,14 +10,16 @@ import { restorePurchases } from '@/utils/subscription-helpers';
 import { Sparkles, Gauge, Camera, HeartPulse, X, Bug } from 'lucide-react-native';
 import { runRevenueCatDiagnostics } from '@/utils/test-revenuecat';
 
-type Params = { next?: string; offering?: string };
+type Params = { next?: string; offering?: string; blocking?: string };
 
 export default function PaywallScreen() {
-  const { next, offering: offeringParam } = useLocalSearchParams<Params>();
+  const { next, offering: offeringParam, blocking } = useLocalSearchParams<Params>();
+  const isBlockingMode = blocking === 'true';
   const [offering, setOffering] = useState<PurchasesOffering | null>(null);
   const [selected, setSelected] = useState<PurchasesPackage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isPurchasing, setIsPurchasing] = useState<boolean>(false);
+  const [usdRates, setUsdRates] = useState<Record<string, number> | null>(null);
 
   const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
   const isProduction = extra.EXPO_PUBLIC_ENVIRONMENT === 'production';
@@ -51,9 +53,75 @@ export default function PaywallScreen() {
     }
   }, []);
 
+  const navigateNext = useCallback(() => {
+    // Defer navigation to avoid update during render
+    setTimeout(() => {
+      if (typeof next === 'string' && next.length > 0) {
+        router.replace({ pathname: next as any });
+      } else {
+        router.replace('/generating-base-plan');
+      }
+    }, 0);
+  }, [next]);
+
   useEffect(() => {
     loadOfferings();
   }, [loadOfferings]);
+
+  // Prevent back navigation in blocking mode
+  useEffect(() => {
+    if (!isBlockingMode) return;
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      Alert.alert(
+        'Subscription Required',
+        'Please subscribe to continue using premium features.',
+        [{ text: 'OK' }]
+      );
+      return true; // Prevent back navigation
+    });
+
+    return () => backHandler.remove();
+  }, [isBlockingMode]);
+
+  // Check entitlements on mount - if already subscribed, navigate away
+  useEffect(() => {
+    let isMounted = true;
+    
+    (async () => {
+      try {
+        const entitled = await hasActiveSubscription();
+        if (entitled && isMounted) {
+          console.log('[Paywall] User already has elite entitlement, navigating to next');
+          // Navigate directly
+          if (isMounted) {
+            navigateNext();
+          }
+        }
+      } catch (err) {
+        console.warn('[Paywall] Could not check initial entitlement:', err);
+      }
+    })();
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [navigateNext]);
+
+  // Fetch USD-based FX rates to optionally show an approximate USD hint alongside local store prices
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('https://open.er-api.com/v6/latest/USD');
+        const json = await res.json();
+        if (json?.result === 'success' && json?.rates) {
+          setUsdRates(json.rates as Record<string, number>);
+        }
+      } catch {
+        // silent – hint is optional
+      }
+    })();
+  }, []);
 
   const { annualPkg, monthlyPkg, discountPct, monthlyFromAnnualText } = useMemo(() => {
     const pkgs = offering?.availablePackages ?? [];
@@ -66,6 +134,24 @@ export default function PaywallScreen() {
       monthlyFromAnnualText: annual ? perMonthPriceText(annual) : null,
     };
   }, [offering]);
+
+  // Optional approximate USD hints for transparency when testing cross-storefronts
+  const monthlyUsdHint = useMemo(() => {
+    if (!offering) return null;
+    const pkgs = offering.availablePackages || [];
+    const [, monthly] = pickAnnualAndMonthly(pkgs);
+    if (!monthly) return null;
+    return approxUSD(Number(monthly.product.price || 0), monthly.product.currencyCode as string | undefined, usdRates);
+  }, [offering, usdRates]);
+
+  const annualUsdPerMonthHint = useMemo(() => {
+    if (!offering) return null;
+    const pkgs = offering.availablePackages || [];
+    const [annual] = pickAnnualAndMonthly(pkgs);
+    if (!annual) return null;
+    const per = Number(annual.product.price || 0) / 12;
+    return approxUSD(per, annual.product.currencyCode as string | undefined, usdRates);
+  }, [offering, usdRates]);
 
   const onPurchase = async () => {
     if (!selected) return;
@@ -90,13 +176,6 @@ export default function PaywallScreen() {
     }
   };
 
-  const navigateNext = () => {
-    if (typeof next === 'string' && next.length > 0) {
-      router.replace({ pathname: next as any });
-    } else {
-      router.replace('/generating-base-plan');
-    }
-  };
 
   const onTestUnlock = () => {
     if (isProduction) {
@@ -124,10 +203,12 @@ export default function PaywallScreen() {
       <Stack.Screen options={{ headerShown: false }} />
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Close button */}
-        <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
-          <X color={theme.color.muted} size={22} />
-        </TouchableOpacity>
+        {/* Close button - only show if not in blocking mode */}
+        {!isBlockingMode && (
+          <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
+            <X color={theme.color.muted} size={22} />
+          </TouchableOpacity>
+        )}
 
         {/* Header */}
         <View style={styles.headerIconWrap}>
@@ -153,7 +234,7 @@ export default function PaywallScreen() {
               onPress={() => setSelected(annualPkg)}
               highlight={typeof discountPct === 'number' && discountPct > 0 ? `${discountPct}% OFF` : undefined}
               priceTop={monthlyFromAnnualText || annualPkg.product.priceString}
-              priceBottom={`Billed at ${annualPkg.product.priceString}/yr`}
+              priceBottom={`Billed at ${annualPkg.product.priceString}/yr${annualUsdPerMonthHint ? ` • ≈ ${annualUsdPerMonthHint}/mo` : ''}`}
             />
           )}
           {monthlyPkg && (
@@ -162,7 +243,7 @@ export default function PaywallScreen() {
               selected={!!selectedIsMonthly || (!selected && !annualPkg)}
               onPress={() => setSelected(monthlyPkg)}
               priceTop={monthlyPkg.product.priceString + '/mo'}
-              priceBottom={`Billed at ${monthlyPkg.product.priceString}/mo`}
+              priceBottom={`Billed at ${monthlyPkg.product.priceString}/mo${monthlyUsdHint ? ` • ≈ ${monthlyUsdHint}/mo` : ''}`}
             />
           )}
           {!annualPkg && !monthlyPkg && (
@@ -181,7 +262,9 @@ export default function PaywallScreen() {
           )}
         </View>
 
-        <Text style={styles.freeTrial}>Free for 5 days. Cancel anytime.</Text>
+        <Text style={styles.freeTrial}>
+          {selectedIsAnnual ? 'Free for 7 days. Cancel anytime.' : selectedIsMonthly ? 'Free for 3 days. Cancel anytime.' : 'Free trial. Cancel anytime.'}
+        </Text>
 
         {/* Primary button */}
         <TouchableOpacity
@@ -189,9 +272,25 @@ export default function PaywallScreen() {
           onPress={onPurchase}
           disabled={!selected || isPurchasing}
           accessibilityRole="button"
-          accessibilityLabel="Start 5-Day Free Trial"
+          accessibilityLabel={
+            isPurchasing
+              ? 'Processing purchase'
+              : selectedIsAnnual
+                ? 'Membership for 7 days free'
+                : selectedIsMonthly
+                  ? 'Membership for 3 days free'
+                  : 'Start free trial'
+          }
         >
-          <Text style={styles.primaryButtonText}>{isPurchasing ? 'Processing…' : 'Start 5-Day Free Trial'}</Text>
+          <Text style={styles.primaryButtonText}>
+            {isPurchasing
+              ? 'Processing…'
+              : selectedIsAnnual
+                ? 'Membership for 7 days free'
+                : selectedIsMonthly
+                  ? 'Membership for 3 days free'
+                  : 'Start Free Trial'}
+          </Text>
         </TouchableOpacity>
 
         {/* Secondary actions */}
@@ -268,14 +367,40 @@ function perMonthPriceText(annual: PurchasesPackage): string | null {
   const total = Number(annual.product.price || 0);
   if (!total) return null;
   const per = total / 12;
-  const symbol = extractCurrencySymbol(annual.product.priceString);
-  return `${symbol}${per.toFixed(2)}/mo`;
+  const code = (annual.product.currencyCode as string | undefined) || undefined;
+  try {
+    // Locale-aware currency formatting for the device's locale
+    const formatted = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: code || 'USD',
+      maximumFractionDigits: 2,
+    }).format(per);
+    return `${formatted}/mo`;
+  } catch {
+    const symbol = extractCurrencySymbol(annual.product.priceString);
+    return `${symbol}${per.toFixed(2)}/mo`;
+  }
 }
 
 function extractCurrencySymbol(priceString: string): string {
-  // Take all non-digit chars from start, e.g., "$", "₹", "€"
-  const match = priceString?.match(/^[^\d]+/);
-  return match ? match[0].trim() : '$';
+  // Try both prefix and suffix, to handle locales like 9,99 €
+  const prefix = priceString?.match(/^[^\d]+/);
+  const suffix = priceString?.match(/[^\d]+$/);
+  return (prefix?.[0] || suffix?.[0] || '$').trim();
+}
+
+// Returns an approximate USD string (e.g., "$2.99") for a local amount using USD base FX rates
+function approxUSD(amountLocal: number, currencyCode?: string, rates?: Record<string, number> | null): string | null {
+  if (!amountLocal || !currencyCode || !rates) return null;
+  if (currencyCode.toUpperCase() === 'USD') return null;
+  const r = rates[currencyCode.toUpperCase()];
+  if (!r || r <= 0) return null; // r = units of currency per 1 USD
+  const usd = amountLocal / r;   // convert local → USD
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(usd);
+  } catch {
+    return `$${usd.toFixed(2)}`;
+  }
 }
 
 function FeatureRow({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle: string }) {

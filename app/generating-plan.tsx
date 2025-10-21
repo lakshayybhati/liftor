@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, Animated, Alert } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, BackHandler } from 'react-native';
 import { router, Stack } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { DailyPlan } from '@/types/user';
@@ -31,12 +32,14 @@ export default function GeneratingPlanScreen() {
   const [, setIsGenerating] = useState(true);
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
+  const navigation = useNavigation();
 
   const generatePlan = useCallback(async () => {
     try {
       // If a plan for today already exists, skip regeneration
       const existing = getTodayPlan();
       if (existing) {
+        console.log('[GenerateDailyPlan] Plan already exists for today, navigating...');
         router.replace('/plan');
         return;
       }
@@ -57,14 +60,26 @@ export default function GeneratingPlanScreen() {
       const recentCheckins = getRecentCheckins(15);
 
       if (!todayCheckin || !user) {
-        throw new Error('Missing checkin or user data');
+        console.error('[GenerateDailyPlan] Missing checkin or user data');
+        Alert.alert(
+          'Data Missing',
+          'Please complete your daily check-in first.',
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }]
+        );
+        return;
       }
 
       // Get current base plan
       const basePlan = getCurrentBasePlan();
       
       if (!basePlan) {
-        throw new Error('No base plan available. Please complete onboarding first.');
+        console.error('[GenerateDailyPlan] No base plan available');
+        Alert.alert(
+          'Base Plan Missing',
+          'Please complete onboarding to generate your base plan first.',
+          [{ text: 'OK', onPress: () => router.replace('/onboarding') }]
+        );
+        return;
       }
 
       // Use the new AI service for daily plan generation
@@ -88,10 +103,37 @@ export default function GeneratingPlanScreen() {
       // Add the plan to store
       await addPlan(planData);
       
+      console.log('[GenerateDailyPlan] ✅ Plan saved successfully');
+      
+      // Set generating to false first
+      setIsGenerating(false);
+      
+      // Wait for state to propagate before navigating
+      // This prevents race condition where plan screen renders before state updates
+      console.log('[GenerateDailyPlan] ⏳ Waiting for state propagation...');
+      
       setTimeout(() => {
-        setIsGenerating(false);
-        router.replace('/plan?celebrate=1');
-      }, 1000);
+        try {
+          // For Expo development, use more reliable navigation
+          if (__DEV__) {
+            console.log('[GenerateDailyPlan] 🏠 Expo Dev: Using push navigation');
+            router.push('/plan?celebrate=1');
+            // Ensure navigation with replace after a delay
+            setTimeout(() => {
+              router.replace('/plan?celebrate=1');
+            }, 500);
+          } else {
+            console.log('[GenerateDailyPlan] 🚀 Production: Navigating to plan view');
+            router.replace('/plan?celebrate=1');
+          }
+        } catch (navError) {
+          console.error('[GenerateDailyPlan] ❌ Navigation error:', navError);
+          // Fallback: Try direct navigation to plan without query param
+          setTimeout(() => {
+            router.replace('/plan');
+          }, 100);
+        }
+      }, 1500); // Increased from 500ms to 1500ms for better reliability
 
     } catch (error) {
       // Ensure slowTimer is cleared on error
@@ -151,10 +193,32 @@ export default function GeneratingPlanScreen() {
       const fallbackPlan = createEmergencyFallbackPlan(todayCheckinData);
       await addPlan(fallbackPlan);
       
+      console.log('[GenerateDailyPlan] ✅ Fallback plan saved successfully');
+      
+      // Set generating to false first
+      setIsGenerating(false);
+      
+      // Wait for state to propagate before navigating
+      console.log('[GenerateDailyPlan] ⏳ Waiting for state propagation (fallback)...');
+      
       setTimeout(() => {
-        setIsGenerating(false);
-        router.replace('/plan?celebrate=1');
-      }, 1000);
+        try {
+          // For Expo development, use more reliable navigation
+          if (__DEV__) {
+            console.log('[GenerateDailyPlan] 🏠 Expo Dev (fallback): Using push navigation');
+            router.push('/plan?celebrate=1');
+            setTimeout(() => {
+              router.replace('/plan?celebrate=1');
+            }, 500);
+          } else {
+            console.log('[GenerateDailyPlan] 🚀 Navigating to plan view (fallback)');
+            router.replace('/plan?celebrate=1');
+          }
+        } catch (navError) {
+          console.error('[GenerateDailyPlan] ❌ Navigation error (fallback):', navError);
+          router.replace('/plan');
+        }
+      }, 1500); // Increased from 500ms to 1500ms
     }
   }, [user, getTodayCheckin, getRecentCheckins, addPlan, getCurrentBasePlan, getTodayPlan]);
 
@@ -279,6 +343,28 @@ export default function GeneratingPlanScreen() {
 
     return () => clearInterval(messageInterval);
   }, []);
+
+  // Ensure back/gesture takes user to home, not check-in
+  useEffect(() => {
+    const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
+      e.preventDefault();
+      // Defer navigation to avoid update during render
+      setTimeout(() => {
+        router.replace('/(tabs)/home');
+      }, 0);
+    });
+    const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+      // Defer navigation to avoid update during render
+      setTimeout(() => {
+        router.replace('/(tabs)/home');
+      }, 0);
+      return true;
+    });
+    return () => {
+      try { unsubBeforeRemove(); } catch {}
+      try { backSub.remove(); } catch {}
+    };
+  }, [navigation]);
 
   return (
     <LinearGradient

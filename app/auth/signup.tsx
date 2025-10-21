@@ -1,10 +1,10 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, KeyboardAvoidingView, ScrollView, Platform, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Link, Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
-import { Eye, EyeOff, UserPlus } from 'lucide-react-native';
+import { Eye, EyeOff, UserPlus, Check, X } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'react-native';
 
@@ -25,7 +25,32 @@ export default function SignupScreen() {
     isAuthLoading = !isAuthReady,
     googleSignIn = async () => ({ success: false, error: 'Auth not ready' }),
   } = auth ?? {};
-  const canSubmit = useMemo(() => name.trim().length > 0 && email.trim().length > 3 && password.length >= 6 && password === confirm, [name, email, password, confirm]);
+  const canSubmit = useMemo(() => name.trim().length > 0 && email.trim().length > 3 && password.length >= 8 && password === confirm, [name, email, password, confirm]);
+
+  // Password rules and strength
+  const passwordRules = useMemo(() => {
+    const hasMinLength = password.length >= 8;
+    const hasLower = /[a-z]/.test(password);
+    const hasUpper = /[A-Z]/.test(password);
+    const hasNumber = /[0-9]/.test(password);
+    const hasSpecial = /[^A-Za-z0-9]/.test(password);
+    return { hasMinLength, hasLower, hasUpper, hasNumber, hasSpecial };
+  }, [password]);
+
+  const strengthIndex = useMemo(() => {
+    if (!password) return 0; // nothing typed
+    const satisfied = Object.values(passwordRules).filter(Boolean).length; // 0..5
+    if (satisfied <= 1) return 1; // very weak
+    if (satisfied === 2) return 2; // weak
+    if (satisfied === 3 || satisfied === 4) return 3; // fair/good
+    return 4; // strong (all 5)
+  }, [password, passwordRules]);
+
+  const { strengthLabel, strengthColor } = useMemo(() => {
+    const labels = ['','Weak','Okay','Good','Strong'] as const;
+    const colors = [theme.color.muted, theme.color.accent.primary, theme.color.accent.yellow, theme.color.accent.blue, theme.color.accent.green] as const;
+    return { strengthLabel: labels[strengthIndex] ?? '', strengthColor: colors[strengthIndex] ?? theme.color.muted };
+  }, [strengthIndex]);
 
   const onSubmit = useCallback(async () => {
     if (!canSubmit || isSubmitting) return;
@@ -48,7 +73,10 @@ export default function SignupScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.container} testID="signup-screen">
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
+          <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+            <View style={styles.container} testID="signup-screen">
         <Stack.Screen options={{ title: 'Create account', headerShown: false }} />
         <Image
           source={require('../../assets/images/liftorlogo.png')}
@@ -109,6 +137,46 @@ export default function SignupScreen() {
               {showPassword ? <EyeOff color={theme.color.ink} size={20} /> : <Eye color={theme.color.ink} size={20} />}
             </TouchableOpacity>
           </View>
+          {/* Strength meter and rules */}
+          <View style={styles.strengthContainer} testID="password-strength">
+            <View style={styles.strengthBar}>
+              {[0,1,2,3].map(i => (
+                <View
+                  key={`seg-${i}`}
+                  style={[
+                    styles.strengthSegment,
+                    { backgroundColor: i < strengthIndex ? strengthColor : theme.color.line }
+                  ]}
+                />
+              ))}
+            </View>
+            <Text style={[styles.strengthLabel, { color: strengthIndex === 0 ? theme.color.muted : strengthColor }]}>
+              {strengthIndex === 0 ? 'Enter a password' : `Strength: ${strengthLabel}`}
+            </Text>
+          </View>
+
+          <View style={styles.rulesContainer} testID="password-rules">
+            <View style={styles.ruleRow}>
+              {passwordRules.hasMinLength ? <Check size={16} color={theme.color.accent.green} /> : <X size={16} color={theme.color.accent.primary} />}
+              <Text style={[styles.ruleText, { color: passwordRules.hasMinLength ? theme.color.ink : theme.color.muted }]}>At least 8 characters</Text>
+            </View>
+            <View style={styles.ruleRow}>
+              {passwordRules.hasLower ? <Check size={16} color={theme.color.accent.green} /> : <X size={16} color={theme.color.accent.primary} />}
+              <Text style={[styles.ruleText, { color: passwordRules.hasLower ? theme.color.ink : theme.color.muted }]}>One lowercase letter</Text>
+            </View>
+            <View style={styles.ruleRow}>
+              {passwordRules.hasUpper ? <Check size={16} color={theme.color.accent.green} /> : <X size={16} color={theme.color.accent.primary} />}
+              <Text style={[styles.ruleText, { color: passwordRules.hasUpper ? theme.color.ink : theme.color.muted }]}>One uppercase letter</Text>
+            </View>
+            <View style={styles.ruleRow}>
+              {passwordRules.hasNumber ? <Check size={16} color={theme.color.accent.green} /> : <X size={16} color={theme.color.accent.primary} />}
+              <Text style={[styles.ruleText, { color: passwordRules.hasNumber ? theme.color.ink : theme.color.muted }]}>One number</Text>
+            </View>
+            <View style={styles.ruleRow}>
+              {passwordRules.hasSpecial ? <Check size={16} color={theme.color.accent.green} /> : <X size={16} color={theme.color.accent.primary} />}
+              <Text style={[styles.ruleText, { color: passwordRules.hasSpecial ? theme.color.ink : theme.color.muted }]}>One special character</Text>
+            </View>
+          </View>
         </View>
 
         <View style={styles.field}>
@@ -145,7 +213,10 @@ export default function SignupScreen() {
             <Text style={styles.linkText}>Sign in</Text>
           </Link>
         </View>
-      </View>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }
@@ -169,4 +240,11 @@ const styles = StyleSheet.create({
   linkText: { color: theme.color.accent.primary, fontWeight: '600' },
   oauthBtn: { marginTop: 12, height: 48, borderRadius: 12, borderWidth: 1, borderColor: theme.color.line, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.card },
   oauthText: { color: theme.color.ink, fontWeight: '600' },
+  strengthContainer: { marginTop: 8, gap: 6 },
+  strengthBar: { flexDirection: 'row', gap: 6 },
+  strengthSegment: { flex: 1, height: 6, borderRadius: 4, backgroundColor: theme.color.line },
+  strengthLabel: { fontSize: 12, color: theme.color.muted },
+  rulesContainer: { marginTop: 8, gap: 6 },
+  ruleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  ruleText: { fontSize: 12 },
 });

@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Image } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Image, KeyboardAvoidingView, ScrollView, Platform, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Link, Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
@@ -42,8 +42,11 @@ export default function LoginScreen() {
   }, [canSubmit, email, password, signIn, router, isSubmitting]);
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.container} testID="login-screen">
+  <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
+          <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+            <View style={styles.container} testID="login-screen">
         <Stack.Screen options={{ title: 'Login', headerShown: false }} />
         <Image
           source={require('../../assets/images/liftorlogo.png')}
@@ -168,7 +171,10 @@ export default function LoginScreen() {
             <Text style={styles.linkText}>Create one</Text>
           </Link>
         </View>
-      </View>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }

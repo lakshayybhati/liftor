@@ -15,10 +15,11 @@ import {
 } from '@/constants/fitness';
 import { MoodCharacter } from '@/components/ui/MoodCharacter';
 import type { CheckinMode, CheckinData } from '@/types/user';
+import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
 
 export default function CheckinScreen() {
   const { addCheckin, getWeightData } = useUserStore();
-  const [mode, setMode] = useState<CheckinMode>('LOW');
+  const mode: CheckinMode = 'PRO';
   const [isSubmitting, setIsSubmitting] = useState(false);
   
   const [checkinData, setCheckinData] = useState<Partial<CheckinData>>({
@@ -54,6 +55,31 @@ export default function CheckinScreen() {
   };
 
   const handleSubmit = async () => {
+    // Check if user has subscription before allowing plan generation
+    try {
+      const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
+      const entitled = await hasActiveSubscription();
+      
+      // Get base plans to check if user has completed onboarding
+      const basePlans = useUserStore.getState().basePlans;
+      const hasBasePlan = basePlans && basePlans.length > 0;
+      
+      // If user has base plan but no subscription, block access
+      if (hasBasePlan && !entitled) {
+        Alert.alert(
+          'Subscription Required',
+          'Please subscribe to continue generating daily plans.',
+          [{ 
+            text: 'Subscribe', 
+            onPress: () => router.push({ pathname: '/paywall', params: { next: '/checkin', blocking: 'true' } as any })
+          }]
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn('[Checkin] Could not verify subscription:', err);
+    }
+    
     // Validate required fields
     const missing: string[] = [];
     if (!checkinData.moodCharacter) missing.push('Mood');
@@ -115,37 +141,11 @@ export default function CheckinScreen() {
     const daysFromLast = Math.max(0, (new Date().getTime() - new Date(last.date).getTime()) / (1000 * 60 * 60 * 24));
     const estimate = last.weight + slopePerDay * daysFromLast;
 
-    const rounded = Math.round(estimate * 10) / 10;
+    const rounded = Math.round(estimate * 100) / 100;
     setCheckinData(prev => ({ ...prev, currentWeight: rounded }));
   };
 
-  const renderModeSelector = () => (
-    <Card style={styles.modeCard}>
-      <Text style={styles.modeTitle}>Check-in Mode</Text>
-      <View style={styles.modeButtons}>
-        {(['LOW', 'HIGH', 'PRO'] as CheckinMode[]).map((m) => (
-          <TouchableOpacity
-            key={m}
-            style={[
-              styles.modeButton,
-              mode === m && styles.selectedMode,
-            ]}
-            onPress={() => setMode(m)}
-          >
-            <Text style={[
-              styles.modeButtonText,
-              mode === m && styles.selectedModeText,
-            ]}>
-              {m}
-            </Text>
-            <Text style={[styles.modeDescription, mode === m && styles.selectedModeText]}>
-              {m === 'LOW' ? 'about 5 questions' : m === 'HIGH' ? 'about 8 questions' : 'about 12 questions'}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </Card>
-  );
+  // Mode selector removed; defaulting to PRO mode
 
   const renderBasicMetrics = () => (
     <Card style={styles.sectionCard}>
@@ -279,32 +279,30 @@ export default function CheckinScreen() {
         </View>
       </View>
 
-      {mode !== 'LOW' && (
-        <View style={styles.fieldContainer}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-            <Text style={styles.fieldLabel}>Digestion <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
-            <TouchableOpacity
-              onPress={() => Alert.alert('Why this?', 'Digestion influences today’s nutrition suggestions and tolerance for intensity.', [{ text: 'OK' }])}
-              accessibilityRole="button"
-              accessibilityLabel="About digestion"
-              style={styles.infoIcon}
-            >
-              <Info color={'#A6A6AD'} size={16} />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.chipsContainer}>
-            {DIGESTION_OPTIONS.map((digestion) => (
-              <Chip
-                key={digestion}
-                label={digestion}
-                selected={checkinData.digestion === digestion}
-                onPress={() => setCheckinData(prev => ({ ...prev, digestion }))}
-                color="#44A08D"
-              />
-            ))}
-          </View>
+      <View style={styles.fieldContainer}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+          <Text style={styles.fieldLabel}>Digestion <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
+          <TouchableOpacity
+            onPress={() => Alert.alert('Why this?', 'Digestion influences today’s nutrition suggestions and tolerance for intensity.', [{ text: 'OK' }])}
+            accessibilityRole="button"
+            accessibilityLabel="About digestion"
+            style={styles.infoIcon}
+          >
+            <Info color={'#A6A6AD'} size={16} />
+          </TouchableOpacity>
         </View>
-      )}
+        <View style={styles.chipsContainer}>
+          {DIGESTION_OPTIONS.map((digestion) => (
+            <Chip
+              key={digestion}
+              label={digestion}
+              selected={checkinData.digestion === digestion}
+              onPress={() => setCheckinData(prev => ({ ...prev, digestion }))}
+              color="#44A08D"
+            />
+          ))}
+        </View>
+      </View>
     </Card>
   );
 
@@ -351,6 +349,12 @@ export default function CheckinScreen() {
               placeholder="Enter liters of water"
               placeholderTextColor="#A6A6AD"
               keyboardType="numeric"
+              onBlur={async () => {
+                if (checkinData.waterL === undefined || checkinData.waterL === null) return;
+                const v = await confirmNumericWithinRange(checkinData.waterL, NumberSpecs.waterL);
+                if (v === null) setCheckinData(prev => ({ ...prev, waterL: undefined }));
+                else setCheckinData(prev => ({ ...prev, waterL: v }));
+              }}
             />
           </View>
         )}
@@ -417,7 +421,13 @@ export default function CheckinScreen() {
               }}
               placeholder="Enter your current weight"
               placeholderTextColor="#A6A6AD"
-              keyboardType="numeric"
+              keyboardType="decimal-pad"
+              onBlur={async () => {
+                if (checkinData.currentWeight === undefined || checkinData.currentWeight === null) return;
+                const v = await confirmNumericWithinRange(checkinData.currentWeight, NumberSpecs.weightKg);
+                if (v === null) setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                else setCheckinData(prev => ({ ...prev, currentWeight: Math.round(v * 100) / 100 }));
+              }}
             />
             <View style={styles.assumeRow}>
               <TouchableOpacity
@@ -482,6 +492,12 @@ export default function CheckinScreen() {
               placeholder="Enter liters of water"
               placeholderTextColor="#A6A6AD"
               keyboardType="numeric"
+              onBlur={async () => {
+                if (checkinData.waterL === undefined || checkinData.waterL === null) return;
+                const v = await confirmNumericWithinRange(checkinData.waterL, NumberSpecs.waterL);
+                if (v === null) setCheckinData(prev => ({ ...prev, waterL: undefined }));
+                else setCheckinData(prev => ({ ...prev, waterL: v }));
+              }}
             />
           </View>
 
@@ -560,7 +576,6 @@ export default function CheckinScreen() {
             </Text>
           </View>
 
-          {renderModeSelector()}
           {renderBasicMetrics()}
           {renderSleepMetrics()}
           {renderPhysicalMetrics()}

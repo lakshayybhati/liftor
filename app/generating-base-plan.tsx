@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, Platform } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, Platform, BackHandler } from 'react-native';
 import { router, Stack } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
@@ -35,6 +36,7 @@ export default function GeneratingBasePlanScreen() {
   const [, setIsGenerating] = useState(true);
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
+  const navigation = useNavigation();
 
   const generatePlan = useCallback(async () => {
     try {
@@ -84,26 +86,8 @@ export default function GeneratingBasePlanScreen() {
         }
       }
       
-      // Check customer info and log status
-      try { 
-        const customerInfo = await Purchases.getCustomerInfo();
-        console.log('[GeneratePlan] Active entitlements:', Object.keys(customerInfo.entitlements.active));
-        console.log('[GeneratePlan] Has required entitlement:', !!customerInfo.entitlements.active[requiredEntitlement]);
-      } catch (err) {
-        console.warn('[GeneratePlan] Could not refresh customer info:', err);
-      }
-      
-      console.log('[GeneratePlan] Checking subscription...');
-      try {
-        const info = await Purchases.getCustomerInfo();
-        const entitled = !!info.entitlements.active[requiredEntitlement];
-        if (!entitled) {
-          router.replace({ pathname: '/paywall', params: { next: '/generating-base-plan' } as any });
-          return;
-        }
-      } catch {}
-      
-      console.log('[GeneratePlan] ✅ Subscription verified, generating plan...');
+      // Log subscription status (non-blocking)
+      console.log('[GeneratePlan] 🎯 Starting plan generation (subscription check will happen after plan is displayed)');
 
       if (!user) {
         throw new Error('No user data available');
@@ -127,12 +111,56 @@ export default function GeneratingBasePlanScreen() {
         planDays: Object.keys(basePlan.days || {}).length
       });
       
+      console.log('[GenerateBasePlan] 💾 Saving plan to store...');
+      console.log('[GenerateBasePlan] Plan has', Object.keys(basePlan.days || {}).length, 'days');
+      console.log('[GenerateBasePlan] Plan ID:', basePlan.id);
+      console.log('[GenerateBasePlan] Plan structure:', {
+        id: basePlan.id,
+        createdAt: basePlan.createdAt,
+        isLocked: basePlan.isLocked,
+        dayCount: Object.keys(basePlan.days || {}).length
+      });
       await addBasePlan(basePlan);
+      console.log('[GenerateBasePlan] ✅ Plan saved to store successfully');
       
-      setTimeout(() => {
-        setIsGenerating(false);
-        router.replace('/plan-preview');
-      }, 1000);
+      // Update state
+      console.log('[GenerateBasePlan] 🔄 Updating state...');
+      setIsGenerating(false);
+      
+      // Wait extra time to ensure state propagates through React and AsyncStorage
+      // React state updates are asynchronous and batched
+      console.log('[GenerateBasePlan] ⏳ Waiting for state propagation...');
+      
+      // Navigation approach - Direct to home for Expo reliability
+      setTimeout(async () => {
+        try {
+          // For Expo development, go directly to home where plan is available
+          if (__DEV__) {
+            console.log('[GenerateBasePlan] 🏠 Expo Dev: Navigating directly to home');
+            router.replace('/(tabs)/home');
+            return;
+          }
+          
+          // For production, try plan-preview first
+          console.log('[GenerateBasePlan] 🚀 Attempting navigation to plan-preview');
+          router.push('/plan-preview');
+          console.log('[GenerateBasePlan] ✅ Navigation push executed');
+          
+          // Ensure navigation with replace after a delay
+          setTimeout(() => {
+            console.log('[GenerateBasePlan] 🔄 Ensuring navigation with replace');
+            router.replace('/plan-preview');
+          }, 500);
+        } catch (navError) {
+          console.error('[GenerateBasePlan] ❌ Navigation error:', navError);
+          
+          // Fallback: Try direct navigation to home as last resort
+          setTimeout(() => {
+            console.log('[GenerateBasePlan] 🏠 Fallback: navigating to home');
+            router.replace('/(tabs)/home');
+          }, 100);
+        }
+      }, 1500); // Increased to 1500ms for better reliability
 
     } catch (error) {
       try { /* ensure timer cleared if set */ } catch {}
@@ -180,10 +208,34 @@ export default function GeneratingBasePlanScreen() {
       
       await addBasePlan(emergencyPlan);
       
+      console.log('[GenerateBasePlan] ✅ Emergency plan saved successfully');
+      
+      // Set generating to false first
+      setIsGenerating(false);
+      
+      // Wait for state to propagate before navigating
+      console.log('[GenerateBasePlan] ⏳ Waiting for state propagation (fallback)...');
       setTimeout(() => {
-        setIsGenerating(false);
-        router.replace('/plan-preview');
-      }, 1000);
+        // For Expo dev, go directly to home
+        if (__DEV__) {
+          console.log('[GenerateBasePlan] 🏠 Expo Dev (fallback): Navigating directly to home');
+          router.replace('/(tabs)/home');
+          return;
+        }
+        
+        console.log('[GenerateBasePlan] 🚀 Navigating to plan-preview (fallback)');
+        
+        // Try push first, then replace
+        try {
+          router.push('/plan-preview');
+          setTimeout(() => {
+            router.replace('/plan-preview');
+          }, 500);
+        } catch (e) {
+          console.error('[GenerateBasePlan] Fallback navigation error:', e);
+          router.replace('/(tabs)/home');
+        }
+      }, 1500);
     }
   }, [user, addBasePlan]);
 
@@ -293,6 +345,28 @@ export default function GeneratingBasePlanScreen() {
 
     return () => clearInterval(messageInterval);
   }, []);
+
+  // Ensure back/gesture takes user to home, not check-in or previous steps
+  useEffect(() => {
+    const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
+      e.preventDefault();
+      // Defer navigation to avoid update during render
+      setTimeout(() => {
+        router.replace('/(tabs)/home');
+      }, 0);
+    });
+    const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+      // Defer navigation to avoid update during render
+      setTimeout(() => {
+        router.replace('/(tabs)/home');
+      }, 0);
+      return true;
+    });
+    return () => {
+      try { unsubBeforeRemove(); } catch {}
+      try { backSub.remove(); } catch {}
+    };
+  }, [navigation]);
 
   return (
     <LinearGradient

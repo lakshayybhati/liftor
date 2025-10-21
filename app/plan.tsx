@@ -168,6 +168,8 @@ export default function PlanScreen() {
       carbs: totals.carbs + food.carbs,
     }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
   }, [dayExtras]);
+  const manualEntries = useMemo(() => dayExtras.filter((f: any) => !f.imageUri), [dayExtras]);
+  const snapEntries = useMemo(() => dayExtras.filter((f: any) => !!f.imageUri), [dayExtras]);
   
   const currentCalories = completedMealTotals.calories + extraTotals.calories;
   const currentProtein = completedMealTotals.protein + extraTotals.protein;
@@ -193,6 +195,12 @@ export default function PlanScreen() {
     }
     
     router.push('/snap-food');
+  }, []);
+  const handleManualEntry = useCallback(() => {
+    if (Platform.OS !== 'web') {
+      Haptics.selectionAsync();
+    }
+    router.push('/manual-entry');
   }, []);
   
 
@@ -242,40 +250,52 @@ export default function PlanScreen() {
     </View>
   );
 
-  const renderWorkout = () => (
-    <ScrollView style={styles.tabContent}>
-      <Card gradient gradientColors={['#FF6B9D', '#C147E9']} style={styles.headerCard}>
-        <Text style={styles.headerTitle}>Today&apos;s Workout</Text>
-        {plan && (
-          <Text style={styles.headerSubtitle}>
-            Focus: {plan.workout.focus.join(', ')}
-          </Text>
-        )}
-        {plan?.isFromBasePlan && (
-          <Text style={styles.basePlanIndicator}>
-            Based on your week • adjusted today
-          </Text>
-        )}
-        {plan?.workout?.notes && (
-          <Text style={styles.headerNotes}>{plan.workout.notes}</Text>
-        )}
-      </Card>
+  const renderWorkout = () => {
+    if (!plan?.workout) {
+      return (
+        <ScrollView style={styles.tabContent}>
+          <Card style={styles.headerCard}>
+            <Text style={styles.headerTitle}>No Workout Plan</Text>
+            <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
+          </Card>
+        </ScrollView>
+      );
+    }
 
-      {plan?.adjustments && plan.adjustments.length > 0 && (
-        <Card style={styles.adjustmentCard}>
-          <Text style={styles.adjustmentTitle}>🎯 Adjusted Today</Text>
-          {plan.adjustments.map((adjustment, index) => (
-            <Text key={index} style={styles.adjustmentItem}>
-              • {adjustment}
+    return (
+      <ScrollView style={styles.tabContent}>
+        <Card gradient gradientColors={['#FF6B9D', '#C147E9']} style={styles.headerCard}>
+          <Text style={styles.headerTitle}>Today&apos;s Workout</Text>
+          {plan && (
+            <Text style={styles.headerSubtitle}>
+              Focus: {plan.workout?.focus?.join(', ') || 'General'}
             </Text>
-          ))}
+          )}
+          {plan?.isFromBasePlan && (
+            <Text style={styles.basePlanIndicator}>
+              Based on your week • adjusted today
+            </Text>
+          )}
+          {plan?.workout?.notes && (
+            <Text style={styles.headerNotes}>{plan.workout.notes}</Text>
+          )}
         </Card>
-      )}
 
-      {plan?.workout?.blocks.map((block, blockIndex) => (
+        {plan?.adjustments && plan.adjustments.length > 0 && (
+          <Card style={styles.adjustmentCard}>
+            <Text style={styles.adjustmentTitle}>🎯 Adjusted Today</Text>
+            {plan.adjustments.map((adjustment, index) => (
+              <Text key={index} style={styles.adjustmentItem}>
+                • {adjustment}
+              </Text>
+            ))}
+          </Card>
+        )}
+
+        {(plan?.workout?.blocks || []).map((block, blockIndex) => (
         <Card key={blockIndex} style={styles.blockCard}>
-          <Text style={styles.blockTitle}>{block.name}</Text>
-          {block.items.map((item, itemIndex) => {
+          <Text style={styles.blockTitle}>{block?.name || 'Block'}</Text>
+          {(block?.items || []).map((item, itemIndex) => {
             const exerciseId = `${blockIndex}-${itemIndex}`;
             const isCompleted = completedExercises.has(exerciseId);
             
@@ -315,9 +335,10 @@ export default function PlanScreen() {
             );
           })}
         </Card>
-      ))}
-    </ScrollView>
-  );
+        ))}
+      </ScrollView>
+    );
+  };
 
   const renderNutrition = () => {
     const mealsData = generateMealsData();
@@ -392,9 +413,9 @@ export default function PlanScreen() {
                     <Text style={[styles.plannedMealsTitle, isCompleted && styles.completedMealText]}>
                       Suggested:
                     </Text>
-                    {plan.nutrition.meals[index].items.map((item, itemIndex) => (
+                    {(plan.nutrition.meals[index]?.items || []).map((item, itemIndex) => (
                       <Text key={itemIndex} style={[styles.plannedMealItem, isCompleted && styles.completedMealText]}>
-                        • {item.food} - {item.qty}
+                        • {item?.food || 'Item'} - {item?.qty || ''}
                       </Text>
                     ))}
                   </View>
@@ -404,6 +425,40 @@ export default function PlanScreen() {
           })}
         </View>
         
+        {/* MANUAL ENTRIES Card */}
+        <Card style={styles.manualCard}> 
+          <TouchableOpacity 
+            onPress={handleManualEntry}
+            style={styles.snapFoodButton}
+            disabled={isLoading}
+            accessibilityRole="button"
+            accessibilityLabel="Add manual food entry"
+          >
+            <View style={styles.snapFoodContent}>
+              <Apple color={theme.color.accent.green} size={24} />
+              <View style={styles.snapFoodTextContainer}>
+                <Text style={styles.snapFoodTitle}>MANUAL ENTRIES</Text>
+                <Text style={styles.snapFoodSubtitle}>
+                  {manualEntries.length === 0 
+                    ? 'NO MANUAL ENTRY (additional from the plan)'
+                    : `${manualEntries.length} entr${manualEntries.length > 1 ? 'ies' : 'y'} added`}
+                </Text>
+              </View>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            onPress={() => router.push('/food-entries')}
+            style={[styles.snapFoodButton, { marginTop: 8 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Manage your manual entries"
+          >
+            <View style={styles.snapFoodContent}>
+              <Text style={[styles.snapFoodSubtitle, { color: theme.color.accent.blue }]}>Manage entries</Text>
+            </View>
+          </TouchableOpacity>
+        </Card>
+
         {/* SNAP FOOD Card */}
         <Card style={styles.snapFoodCard}>
           <TouchableOpacity 
@@ -417,9 +472,9 @@ export default function PlanScreen() {
               <View style={styles.snapFoodTextContainer}>
                 <Text style={styles.snapFoodTitle}>SNAP FOOD</Text>
                 <Text style={styles.snapFoodSubtitle}>
-                  {dayExtras.length === 0 
+                  {snapEntries.length === 0 
                     ? 'NO FOOD SNAP (additional from the plan)' 
-                    : `${dayExtras.length} snap${dayExtras.length > 1 ? 's' : ''} added`
+                    : `${snapEntries.length} snap${snapEntries.length > 1 ? 's' : ''} added`
                   }
                 </Text>
               </View>
@@ -441,34 +496,47 @@ export default function PlanScreen() {
     );
   };
 
-  const renderRecovery = () => (
-    <ScrollView style={styles.tabContent}>
-      <Card gradient gradientColors={['#667eea', '#764ba2']} style={styles.headerCard}>
-        <Text style={styles.headerTitle}>Recovery Plan</Text>
-        <Text style={styles.headerSubtitle}>
-          Rest and recharge for tomorrow
-        </Text>
-      </Card>
+  const renderRecovery = () => {
+    if (!plan?.recovery) {
+      return (
+        <ScrollView style={styles.tabContent}>
+          <Card style={styles.headerCard}>
+            <Text style={styles.headerTitle}>No Recovery Plan</Text>
+            <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
+          </Card>
+        </ScrollView>
+      );
+    }
 
-      <Card style={styles.recoveryCard}>
-        <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility & Movement</Text>
-        {plan?.recovery?.mobility.map((item, index) => (
-          <Text key={index} style={styles.recoveryItem}>
-            • {item}
+    return (
+      <ScrollView style={styles.tabContent}>
+        <Card gradient gradientColors={['#667eea', '#764ba2']} style={styles.headerCard}>
+          <Text style={styles.headerTitle}>Recovery Plan</Text>
+          <Text style={styles.headerSubtitle}>
+            Rest and recharge for tomorrow
           </Text>
-        ))}
-      </Card>
+        </Card>
 
-      <Card style={styles.recoveryCard}>
-        <Text style={styles.recoveryTitle}>😴 Sleep Optimization</Text>
-        {plan?.recovery?.sleep.map((item, index) => (
-          <Text key={index} style={styles.recoveryItem}>
-            • {item}
-          </Text>
-        ))}
-      </Card>
-    </ScrollView>
-  );
+        <Card style={styles.recoveryCard}>
+          <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility & Movement</Text>
+          {(plan?.recovery?.mobility || []).map((item, index) => (
+            <Text key={index} style={styles.recoveryItem}>
+              • {item}
+            </Text>
+          ))}
+        </Card>
+
+        <Card style={styles.recoveryCard}>
+          <Text style={styles.recoveryTitle}>😴 Sleep Optimization</Text>
+          {(plan?.recovery?.sleep || []).map((item, index) => (
+            <Text key={index} style={styles.recoveryItem}>
+              • {item}
+            </Text>
+          ))}
+        </Card>
+      </ScrollView>
+    );
+  };
 
   const renderMotivation = () => (
     <ScrollView style={styles.tabContent}>
@@ -960,6 +1028,9 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   snapFoodCard: {
+    marginTop: theme.space.md,
+  },
+  manualCard: {
     marginTop: theme.space.md,
   },
   snapFoodButton: {

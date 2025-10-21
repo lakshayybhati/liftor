@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send } from 'lucide-react-native';
@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
+// 10s paywall logic removed per request
 
 const DAYS_OF_WEEK = [
   { key: 'monday', label: 'Mon', fullLabel: 'Monday' },
@@ -18,7 +19,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function PlanPreviewScreen() {
-  const { getCurrentBasePlan, updateBasePlanDay } = useUserStore();
+  const { basePlans, getCurrentBasePlan, updateBasePlanDay, isLoading: storeLoading, loadUserData } = useUserStore();
   const [selectedDay, setSelectedDay] = useState<string>('monday');
   const [isLocked, setIsLocked] = useState(false);
   const [confettiAnim] = useState(new Animated.Value(0));
@@ -26,39 +27,188 @@ export default function PlanPreviewScreen() {
   const [editText, setEditText] = useState('');
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
   const progressAnim = useRef(new Animated.Value(0)).current;
+  const [forceReloadAttempts, setForceReloadAttempts] = useState(0);
+  const [expandedWorkout, setExpandedWorkout] = useState(false);
+  const [expandedNutrition, setExpandedNutrition] = useState(false);
+  
+  // Reset expansion when day changes
+  useEffect(() => {
+    setExpandedWorkout(false);
+    setExpandedNutrition(false);
+  }, [selectedDay]);
+  
+  // Removed paywall timer & navigation refs
 
-  const basePlan = getCurrentBasePlan();
+  // Force reload from storage if store is empty
+  useEffect(() => {
+    console.log('[PlanPreview] Component mounted, storeLoading:', storeLoading);
+    console.log('[PlanPreview] Initial basePlans length:', basePlans?.length ?? 0);
+    
+    if (!storeLoading && (!basePlans || basePlans.length === 0) && forceReloadAttempts < 3) {
+      console.log('[PlanPreview] Store empty, forcing reload from AsyncStorage...');
+      setForceReloadAttempts(prev => prev + 1);
+      loadUserData?.();
+    }
+  }, [storeLoading, basePlans, forceReloadAttempts, loadUserData]);
+
+  // Get basePlan reactively - this will cause re-render when basePlans array updates
+  const basePlan = useMemo(() => {
+    console.log('[PlanPreview] useMemo triggered, basePlans length:', basePlans?.length ?? 0);
+    console.log('[PlanPreview] basePlans array:', basePlans?.map(p => ({ id: p.id, locked: p.isLocked })));
+    const plan = getCurrentBasePlan();
+    console.log('[PlanPreview] useMemo computed basePlan:', plan ? `Plan ID: ${plan.id}` : 'NULL');
+
+    // Debug: Check what getCurrentBasePlan logic would return
+    if (basePlans && basePlans.length > 0) {
+      const unlocked = basePlans.find(plan => !plan.isLocked);
+      const latest = basePlans[basePlans.length - 1];
+      console.log('[PlanPreview] Debug - unlocked plan:', unlocked ? `ID: ${unlocked.id}` : 'NONE');
+      console.log('[PlanPreview] Debug - latest plan:', latest ? `ID: ${latest.id}` : 'NONE');
+    }
+
+    return plan;
+  }, [basePlans, getCurrentBasePlan]);
+  const [isCheckingPlan, setIsCheckingPlan] = useState(true);
+  const [hasShownConfetti, setHasShownConfetti] = useState(false);
 
   useEffect(() => {
-    // Confetti animation on mount
-    Animated.sequence([
-      Animated.timing(confettiAnim, {
-        toValue: 1,
-        duration: 800,
-        useNativeDriver: true,
-      }),
-      Animated.timing(confettiAnim, {
-        toValue: 0,
-        duration: 600,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [confettiAnim]);
+    console.log('[PlanPreview] useEffect triggered');
+    console.log('[PlanPreview] basePlan:', basePlan ? 'EXISTS' : 'NULL');
+    console.log('[PlanPreview] basePlans array length:', basePlans?.length ?? 0);
 
-  if (!basePlan) {
-    router.replace('/onboarding');
-    return null;
+    // Safety check: if no base plan, wait a bit for state to propagate before redirecting
+    // This handles race condition where we navigate before state updates
+    if (!basePlan) {
+      console.warn('[PlanPreview] No base plan found, waiting for state propagation...');
+
+      let attempts = 0;
+      const maxAttempts = 5;
+
+      const checkInterval = setInterval(() => {
+        attempts++;
+        const planNow = getCurrentBasePlan();
+        console.log(`[PlanPreview] Attempt ${attempts}/${maxAttempts} - Plan exists:`, planNow ? 'YES' : 'NO');
+        console.log(`[PlanPreview] basePlans length in check:`, basePlans?.length ?? 0);
+
+        if (planNow) {
+          console.log('[PlanPreview] ✅ Plan found after waiting!');
+          clearInterval(checkInterval);
+          setIsCheckingPlan(false);
+          return;
+        }
+
+        if (attempts >= maxAttempts) {
+          console.error('[PlanPreview] ❌ No plan after multiple checks');
+          clearInterval(checkInterval);
+          
+          // Try to go to home instead of onboarding, since plan may be there
+          console.log('[PlanPreview] Redirecting to home to check if plan is available there');
+          router.replace('/(tabs)/home');
+        }
+      }, 500); // Check every 500ms
+
+      return () => clearInterval(checkInterval);
+    }
+
+    // Plan exists now
+    console.log('[PlanPreview] ✅ Base plan is available immediately');
+    setIsCheckingPlan(false);
+
+    // Show confetti animation only once
+    if (!hasShownConfetti) {
+      setHasShownConfetti(true);
+      Animated.sequence([
+        Animated.timing(confettiAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(confettiAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [basePlan, basePlans, hasShownConfetti, confettiAnim, getCurrentBasePlan]); // Re-run when basePlan OR basePlans changes
+
+  // Early return if no base plan or still checking
+  if (!basePlan || isCheckingPlan) {
+    console.log('[PlanPreview] Showing loading state...');
+    console.log('[PlanPreview] basePlan:', basePlan);
+    console.log('[PlanPreview] isCheckingPlan:', isCheckingPlan);
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.color.bg }}>
+        <Text style={{ color: theme.color.ink, fontSize: 16, fontWeight: '600' }}>Loading your plan...</Text>
+        <Text style={{ color: theme.color.muted, fontSize: 14, marginTop: 8 }}>This will just take a moment</Text>
+        {basePlans?.length > 0 && (
+          <Text style={{ color: theme.color.muted, fontSize: 12, marginTop: 4 }}>
+            Found {basePlans.length} plans in store
+          </Text>
+        )}
+      </View>
+    );
   }
 
-  const selectedDayData = basePlan.days[selectedDay];
+  console.log('[PlanPreview] ✅ Base plan loaded, rendering preview');
+  console.log('[PlanPreview] Base plan days:', Object.keys(basePlan.days || {}));
+  console.log('[PlanPreview] Selected day:', selectedDay);
+
+  // Safety check for day data
+  const selectedDayData = basePlan.days?.[selectedDay];
+  if (!selectedDayData) {
+    console.error('[PlanPreview] No data for selected day:', selectedDay);
+    console.error('[PlanPreview] Available days:', Object.keys(basePlan.days || {}));
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.color.bg }}>
+        <Text style={{ color: theme.color.ink }}>Loading day data...</Text>
+      </View>
+    );
+  }
 
   const handleLockPlan = () => {
     setIsLocked(!isLocked);
     // TODO: Update the base plan's locked status in storage
   };
 
-  const handleStartJourney = () => {
-    router.replace('/(tabs)/home');
+  const handleStartJourney = async () => {
+    try {
+      console.log('[PlanPreview] Starting journey...');
+      
+      // Check subscription status
+      const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
+      const entitled = await hasActiveSubscription();
+      console.log('[PlanPreview] Subscription check result:', entitled);
+      
+      if (entitled) {
+        console.log('[PlanPreview] ✅ User has active subscription, navigating to home');
+        router.replace('/(tabs)/home');
+        return;
+      }
+      
+      console.log('[PlanPreview] ❌ No active subscription, showing paywall');
+      // Not entitled → show paywall in blocking mode
+      // After subscription, user will be navigated to home
+      router.push({ 
+        pathname: '/paywall', 
+        params: { 
+          next: '/(tabs)/home', 
+          blocking: 'true' 
+        } as any 
+      });
+    } catch (err) {
+      console.error('[PlanPreview] Error checking subscription:', err);
+      
+      // On error, show paywall to be safe (premium features should be gated)
+      console.log('[PlanPreview] Error occurred, showing paywall as fallback');
+      router.push({ 
+        pathname: '/paywall', 
+        params: { 
+          next: '/(tabs)/home', 
+          blocking: 'true' 
+        } as any 
+      });
+    }
   };
 
   const handleEditDay = () => {
@@ -173,7 +323,11 @@ Please modify the plan based on their request and return ONLY the updated day da
   };
 
   const renderDayCard = (day: typeof DAYS_OF_WEEK[0]) => {
-    const dayData = basePlan.days[day.key];
+    if (!basePlan) return null;
+    
+    const dayData = basePlan.days?.[day.key];
+    if (!dayData) return null;
+    
     const isSelected = selectedDay === day.key;
     
     return (
@@ -196,101 +350,134 @@ Please modify the plan based on their request and return ONLY the updated day da
             styles.dayFocus,
             isSelected && styles.selectedDayText,
           ]}>
-            {dayData.workout.focus[0]}
+            {dayData.workout?.focus?.[0] || 'Rest'}
           </Text>
           <Text style={[
             styles.dayCalories,
             isSelected && styles.selectedDayText,
           ]}>
-            {dayData.nutrition.total_kcal}kcal
+            {dayData.nutrition?.total_kcal || 0}kcal
           </Text>
         </View>
       </TouchableOpacity>
     );
   };
 
-  const renderWorkoutPreview = () => (
-    <Card style={styles.previewCard}>
-      <View style={styles.previewHeader}>
-        <Dumbbell size={24} color={theme.color.accent.primary} />
-        <Text style={styles.previewTitle}>Workout</Text>
-      </View>
-      <Text style={styles.focusText}>
-        Focus: {selectedDayData.workout.focus.join(', ')}
-      </Text>
-      {selectedDayData.workout.blocks.map((block, index) => (
-        <View key={index} style={styles.blockPreview}>
-          <Text style={styles.blockName}>{block.name}</Text>
-          {block.items.slice(0, 2).map((item, itemIndex) => (
-            <Text key={itemIndex} style={styles.exercisePreview}>
-              • {item.exercise} {item.sets && item.reps ? `${item.sets}×${item.reps}` : ''}
+  const renderWorkoutPreview = () => {
+    if (!selectedDayData?.workout) return null;
+    
+    return (
+      <Card style={styles.previewCard}>
+        <View style={styles.previewHeader}>
+          <Dumbbell size={24} color={theme.color.accent.primary} />
+          <Text style={styles.previewTitle}>Workout</Text>
+        </View>
+        <Text style={styles.focusText}>
+          Focus: {selectedDayData.workout.focus?.join(', ') || 'General'}
+        </Text>
+        {(selectedDayData.workout.blocks || []).map((block, index) => {
+          const itemsToShow = expandedWorkout ? block.items : (block.items || []).slice(0, 2);
+          return (
+            <View key={index} style={styles.blockPreview}>
+              <Text style={styles.blockName}>{block.name || 'Block'}</Text>
+              {(itemsToShow || []).map((item, itemIndex) => (
+                <Text key={itemIndex} style={styles.exercisePreview}>
+                  • {item.exercise} {item.sets && item.reps ? `${item.sets}×${item.reps}` : ''}
+                </Text>
+              ))}
+              {!expandedWorkout && block.items && block.items.length > 2 && (
+                <TouchableOpacity onPress={() => setExpandedWorkout(true)}>
+                  <Text style={styles.moreTextLink}>+{block.items.length - 2} more exercises</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          );
+        })}
+        {expandedWorkout && (
+          <TouchableOpacity onPress={() => setExpandedWorkout(false)}>
+            <Text style={styles.showLessText}>Show less</Text>
+          </TouchableOpacity>
+        )}
+        {selectedDayData.workout.notes && (
+          <Text style={styles.notesText}>{selectedDayData.workout.notes}</Text>
+        )}
+      </Card>
+    );
+  };
+
+  const renderNutritionPreview = () => {
+    if (!selectedDayData?.nutrition) return null;
+    
+    const mealsToShow = expandedNutrition 
+      ? selectedDayData.nutrition.meals 
+      : (selectedDayData.nutrition.meals || []).slice(0, 3);
+    
+    return (
+      <Card style={styles.previewCard}>
+        <View style={styles.previewHeader}>
+          <Apple size={24} color={theme.color.accent.green} />
+          <Text style={styles.previewTitle}>Nutrition</Text>
+        </View>
+        <View style={styles.macroRow}>
+          <View style={styles.macroItem}>
+            <Text style={styles.macroValue}>{selectedDayData.nutrition.total_kcal || 0}</Text>
+            <Text style={styles.macroLabel}>Calories</Text>
+          </View>
+          <View style={styles.macroItem}>
+            <Text style={styles.macroValue}>{selectedDayData.nutrition.protein_g || 0}g</Text>
+            <Text style={styles.macroLabel}>Protein</Text>
+          </View>
+          <View style={styles.macroItem}>
+            <Text style={styles.macroValue}>{selectedDayData.nutrition.hydration_l || 0}L</Text>
+            <Text style={styles.macroLabel}>Water</Text>
+          </View>
+        </View>
+        {(mealsToShow || []).map((meal, index) => (
+          <View key={index} style={styles.mealPreview}>
+            <Text style={styles.mealName}>{meal.name || 'Meal'}</Text>
+            <Text style={styles.mealItems}>
+              {(meal.items || []).map(item => item.food).join(', ')}
             </Text>
+          </View>
+        ))}
+        {!expandedNutrition && selectedDayData.nutrition.meals && selectedDayData.nutrition.meals.length > 3 && (
+          <TouchableOpacity onPress={() => setExpandedNutrition(true)}>
+            <Text style={styles.moreTextLink}>+{selectedDayData.nutrition.meals.length - 3} more meals</Text>
+          </TouchableOpacity>
+        )}
+        {expandedNutrition && (
+          <TouchableOpacity onPress={() => setExpandedNutrition(false)}>
+            <Text style={styles.showLessText}>Show less</Text>
+          </TouchableOpacity>
+        )}
+      </Card>
+    );
+  };
+
+  const renderRecoveryPreview = () => {
+    if (!selectedDayData?.recovery) return null;
+    
+    return (
+      <Card style={styles.previewCard}>
+        <View style={styles.previewHeader}>
+          <Heart size={24} color={theme.color.accent.blue} />
+          <Text style={styles.previewTitle}>Recovery</Text>
+        </View>
+        <View style={styles.recoverySection}>
+          <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility</Text>
+          {(selectedDayData.recovery.mobility || []).slice(0, 2).map((item, index) => (
+            <Text key={index} style={styles.recoveryItem}>• {item}</Text>
           ))}
-          {block.items.length > 2 && (
-            <Text style={styles.moreText}>+{block.items.length - 2} more exercises</Text>
-          )}
         </View>
-      ))}
-      {selectedDayData.workout.notes && (
-        <Text style={styles.notesText}>{selectedDayData.workout.notes}</Text>
-      )}
-    </Card>
-  );
-
-  const renderNutritionPreview = () => (
-    <Card style={styles.previewCard}>
-      <View style={styles.previewHeader}>
-        <Apple size={24} color={theme.color.accent.green} />
-        <Text style={styles.previewTitle}>Nutrition</Text>
-      </View>
-      <View style={styles.macroRow}>
-        <View style={styles.macroItem}>
-          <Text style={styles.macroValue}>{selectedDayData.nutrition.total_kcal}</Text>
-          <Text style={styles.macroLabel}>Calories</Text>
+        <View style={styles.recoverySection}>
+          <Text style={styles.recoveryTitle}>😴 Sleep</Text>
+          {(selectedDayData.recovery.sleep || []).slice(0, 2).map((item, index) => (
+            <Text key={index} style={styles.recoveryItem}>• {item}</Text>
+          ))}
         </View>
-        <View style={styles.macroItem}>
-          <Text style={styles.macroValue}>{selectedDayData.nutrition.protein_g}g</Text>
-          <Text style={styles.macroLabel}>Protein</Text>
-        </View>
-        <View style={styles.macroItem}>
-          <Text style={styles.macroValue}>{selectedDayData.nutrition.hydration_l}L</Text>
-          <Text style={styles.macroLabel}>Water</Text>
-        </View>
-      </View>
-      {selectedDayData.nutrition.meals.slice(0, 3).map((meal, index) => (
-        <View key={index} style={styles.mealPreview}>
-          <Text style={styles.mealName}>{meal.name}</Text>
-          <Text style={styles.mealItems}>
-            {meal.items.map(item => item.food).join(', ')}
-          </Text>
-        </View>
-      ))}
-      {selectedDayData.nutrition.meals.length > 3 && (
-        <Text style={styles.moreText}>+{selectedDayData.nutrition.meals.length - 3} more meals</Text>
-      )}
-    </Card>
-  );
-
-  const renderRecoveryPreview = () => (
-    <Card style={styles.previewCard}>
-      <View style={styles.previewHeader}>
-        <Heart size={24} color={theme.color.accent.blue} />
-        <Text style={styles.previewTitle}>Recovery</Text>
-      </View>
-      <View style={styles.recoverySection}>
-        <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility</Text>
-        {selectedDayData.recovery.mobility.slice(0, 2).map((item, index) => (
-          <Text key={index} style={styles.recoveryItem}>• {item}</Text>
-        ))}
-      </View>
-      <View style={styles.recoverySection}>
-        <Text style={styles.recoveryTitle}>😴 Sleep</Text>
-        {selectedDayData.recovery.sleep.slice(0, 2).map((item, index) => (
-          <Text key={index} style={styles.recoveryItem}>• {item}</Text>
-        ))}
-      </View>
-    </Card>
-  );
+      </Card>
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -399,27 +586,28 @@ Please modify the plan based on their request and return ONLY the updated day da
                   </View>
                 )}
                 
-                <View style={styles.editActions}>
-                  <Button
-                    title="Cancel"
-                    onPress={() => {
-                      if (!isSubmittingEdit) {
+                {!isSubmittingEdit && (
+                  <View style={styles.editActions}>
+                    <Button
+                      title="Cancel"
+                      onPress={() => {
                         setShowEditInput(false);
                         setEditText('');
-                      }
-                    }}
-                    variant="outline"
-                    style={styles.editActionButton}
-                    disabled={isSubmittingEdit}
-                  />
-                  <Button
-                    title={isSubmittingEdit ? "Applying..." : "Apply Changes"}
-                    onPress={handleSubmitEdit}
-                    disabled={isSubmittingEdit || !editText.trim()}
-                    style={styles.editActionButton}
-                    icon={!isSubmittingEdit ? <Send size={16} color={theme.color.bg} /> : undefined}
-                  />
-                </View>
+                      }}
+                      variant="outline"
+                      size="small"
+                      style={styles.cancelButton}
+                    />
+                    <Button
+                      title="Apply Changes"
+                      onPress={handleSubmitEdit}
+                      disabled={!editText.trim()}
+                      size="small"
+                      style={styles.applyButton}
+                      icon={<Send size={16} color="#FFFFFF" />}
+                    />
+                  </View>
+                )}
               </View>
             )}
             
@@ -428,6 +616,7 @@ Please modify the plan based on their request and return ONLY the updated day da
                 title="Edit This Day"
                 onPress={handleEditDay}
                 variant="outline"
+                size="small"
                 style={styles.editButton}
                 icon={<Edit3 size={16} color={theme.color.accent.primary} />}
               />
@@ -456,6 +645,7 @@ Please modify the plan based on their request and return ONLY the updated day da
               title={isLocked ? 'Unlock Plan' : 'Lock Plan'}
               onPress={handleLockPlan}
               variant={isLocked ? 'outline' : 'primary'}
+              size="small"
               style={styles.lockButton}
             />
           </Card>
@@ -466,6 +656,7 @@ Please modify the plan based on their request and return ONLY the updated day da
           <Button
             title="Start My Journey"
             onPress={handleStartJourney}
+            size="medium"
             style={styles.startButton}
           />
         </View>
@@ -615,6 +806,21 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginLeft: theme.space.sm,
   },
+  moreTextLink: {
+    fontSize: 12,
+    color: theme.color.accent.primary,
+    fontWeight: '600',
+    fontStyle: 'italic',
+    marginLeft: theme.space.sm,
+    marginTop: theme.space.xs,
+  },
+  showLessText: {
+    fontSize: 12,
+    color: theme.color.accent.primary,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: theme.space.sm,
+  },
   notesText: {
     fontSize: 12,
     color: theme.color.muted,
@@ -694,7 +900,8 @@ const styles = StyleSheet.create({
     marginBottom: theme.space.lg,
   },
   lockButton: {
-    minWidth: 120,
+    alignSelf: 'center',
+    paddingHorizontal: theme.space.xl,
   },
   bottomAction: {
     padding: theme.space.lg,
@@ -744,14 +951,20 @@ const styles = StyleSheet.create({
   },
   editActions: {
     flexDirection: 'row',
-    gap: theme.space.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: theme.space.md,
+    marginTop: theme.space.sm,
   },
-  editActionButton: {
-    flex: 1,
+  cancelButton: {
+    paddingHorizontal: theme.space.xl,
+  },
+  applyButton: {
+    paddingHorizontal: theme.space.xl,
   },
   editButton: {
-    minWidth: 140,
     alignSelf: 'center',
+    paddingHorizontal: theme.space.xl,
   },
   progressContainer: {
     marginVertical: theme.space.md,

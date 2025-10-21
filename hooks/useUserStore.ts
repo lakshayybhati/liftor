@@ -547,9 +547,18 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
   const addBasePlan = useCallback(async (basePlan: WeeklyBasePlan) => {
     try {
+      console.log('[UserStore] addBasePlan called with plan ID:', basePlan.id);
+      console.log('[UserStore] Current basePlans count:', basePlans.length);
+      console.log('[UserStore] New plan has', Object.keys(basePlan.days || {}).length, 'days');
+      
       const updatedBasePlans = [...basePlans, basePlan];
+      console.log('[UserStore] Updating state with', updatedBasePlans.length, 'plans...');
       setBasePlans(updatedBasePlans);
+      console.log('[UserStore] ✅ State updated');
+      
+      console.log('[UserStore] Saving to AsyncStorage...');
       await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
+      console.log('[UserStore] ✅ AsyncStorage save complete');
       
       // Log success in production
       const config = getProductionConfig();
@@ -559,8 +568,10 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           dayCount: Object.keys(basePlan.days || {}).length 
         });
       }
+      
+      console.log('[UserStore] ✅ addBasePlan completed successfully');
     } catch (error) {
-      console.error('Error saving base plan:', error);
+      console.error('[UserStore] ❌ Error saving base plan:', error);
       
       const config = getProductionConfig();
       if (config.isProduction) {
@@ -569,12 +580,20 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           planId: basePlan.id 
         });
       }
+      
+      // Re-throw to let caller know there was an error
+      throw error;
     }
   }, [basePlans, KEYS.BASE_PLANS]);
 
   // Define getCurrentBasePlan BEFORE syncLocalToBackend since it's used as a dependency
   const getCurrentBasePlan = useCallback(() => {
-    return basePlans.find(plan => !plan.isLocked) || basePlans[basePlans.length - 1];
+    console.log('[UserStore] getCurrentBasePlan called, basePlans.length:', basePlans.length);
+    const unlocked = basePlans.find(plan => !plan.isLocked);
+    const latest = basePlans[basePlans.length - 1];
+    const result = unlocked || latest;
+    console.log('[UserStore] getCurrentBasePlan result:', result ? `Plan ID: ${result.id}` : 'NULL');
+    return result;
   }, [basePlans]);
 
   // Persist local data to Supabase so it is available after sign out
@@ -1180,7 +1199,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     toggleExerciseCompleted,
     clearAllData,
     syncLocalToBackend,
-  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted, clearAllData, syncLocalToBackend]);
+    loadUserData,
+  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted, clearAllData, syncLocalToBackend, loadUserData]);
 
   return value;
 });

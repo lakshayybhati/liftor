@@ -41,14 +41,16 @@ export const COMMON_SUPPLEMENTS = [
 ] as const;
 
 export const PERSONAL_GOALS = [
-  'Bigger arms',
-  'Stronger core',
-  'Better sleep',
-  'More energy',
-  'Improved endurance',
-  'Better flexibility',
-  'Stress reduction',
-  'Better posture',
+  'Get a V-taper',
+  'Increase PRs',
+  'Build stronger arms',
+  'Grow a thicker chest',
+  'Build wider lats/back',
+  'Get round, capped shoulders',
+  'Get visible abs',
+  'Improve cardio endurance',
+  'Enhance mobility & flexibility',
+  'Fix posture and everyday aches',
 ] as const;
 
 export const PERCEIVED_LACKS = [

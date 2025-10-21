@@ -15,7 +15,7 @@ import { useProfile } from '@/hooks/useProfile';
 import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription-helpers';
 
 export default function HomeScreen() {
-  const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress } = useUserStore();
+  const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate } = useUserStore();
   const auth = useAuth();
   const { data: profile } = useProfile();
   const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
@@ -51,17 +51,8 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  // Enforce paywall on Home if user is not entitled
-  useEffect(() => {
-    (async () => {
-      try {
-        const entitled = await hasActiveSubscription();
-        if (!entitled) {
-          router.replace({ pathname: '/paywall', params: { next: '/(tabs)/home' } as any });
-        }
-      } catch {}
-    })();
-  }, []);
+  // Remove paywall enforcement on Home screen
+  // Paywall will only appear 10 seconds after base plan generation
 
   // Compute workout caption from today's plan
   const workoutCaption = useMemo(() => {
@@ -166,21 +157,31 @@ export default function HomeScreen() {
     return 'Good evening';
   };
 
-  const getEnergyTrend = () => {
-    // Use latest 7 energy entries, compare average of last 3 vs previous 4
-    const series = recentCheckins
+  const energyTrend = useMemo(() => {
+    // Stable trend: compare average of the latest 3 vs earliest 3 (up to 7 days)
+    const energies = recentCheckins
       .filter(c => typeof c.energy === 'number')
       .map(c => c.energy as number)
-      .slice(0, 7);
+      .slice(0, 7)
+      .reverse(); // oldest -> newest
 
-    if (series.length < 2) return 0;
-    const last3 = series.slice(0, Math.min(3, series.length));
-    const prev = series.slice(last3.length);
+    if (energies.length < 2) return 0;
+    const group = Math.min(3, Math.floor(energies.length / 2));
+    const early = energies.slice(0, group);
+    const late = energies.slice(-group);
     const avg = (arr: number[]) => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0;
-    return avg(last3) - avg(prev);
-  };
+    return avg(late) - avg(early);
+  }, [recentCheckins]);
 
-  const energyTrend = getEnergyTrend();
+  // Determine workout completion status for today
+  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const workoutTotals = useMemo(() => {
+    const total = (todayPlan?.workout?.blocks || []).reduce((sum, b: any) => sum + ((b?.items || []).length), 0);
+    const completed = getCompletedExercisesForDate(todayStr).length;
+    return { total, completed };
+  }, [todayPlan, getCompletedExercisesForDate, todayStr]);
+  const workoutComplete = workoutTotals.total > 0 && workoutTotals.completed >= workoutTotals.total;
+  const workoutCardTitle = workoutComplete ? 'Workout Completed' : 'Start Workout';
 
   return (
     <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
@@ -291,8 +292,11 @@ export default function HomeScreen() {
                   
                   <View style={styles.cardContent}>
                     <Dumbbell color={theme.color.ink} size={32} />
-                    <Text style={styles.cardTitle}>Start Workout</Text>
-                    <Text style={styles.cardCaption}>{workoutCaption}</Text>
+                    <Text style={styles.cardTitle}>{workoutCardTitle}</Text>
+                    <Text style={styles.cardCaption}>
+                      {workoutCaption}
+                      {todayPlan?.workout ? ` • ${Math.min(workoutTotals.completed, workoutTotals.total)}/${workoutTotals.total}` : ''}
+                    </Text>
                   </View>
                 </Card>
               </TouchableOpacity>

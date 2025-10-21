@@ -40,10 +40,13 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
       }
     }
 
+    // Enforce user constraints (diet/exercise) and weekly meal consistency
+    const constrainedDays = applyUserConstraintsToWeeklyDays(user, days);
+
     const basePlan: WeeklyBasePlan = {
       id: Date.now().toString(),
       createdAt: new Date().toISOString(),
-      days,
+      days: constrainedDays,
       isLocked: false,
     };
 
@@ -103,7 +106,10 @@ export async function generateDailyPlan(
     const response = await makeLLMRequest(systemPrompt, userRequest);
 
     // Step 4: JSON Processing & Validation
-    const adjustedPlan = processAndValidateDailyPlan(response);
+    let adjustedPlan = processAndValidateDailyPlan(response);
+
+    // Enforce user constraints and maintain consistency with base plan
+    adjustedPlan = applyUserConstraintsToDailyPlan(user, adjustedPlan, todayBasePlan);
 
     // Step 5: Create DailyPlan Object
     const dailyPlan: DailyPlan = {
@@ -186,7 +192,13 @@ function constructBasePlanPrompts(user: User, userProfile: string) {
   const proteinTarget = calculateProteinTarget(user);
 
   const systemPrompt = `You are a precise Personal Trainer & Nutrition Specialist.
-Create a 7-Day Base Plan that EXACTLY matches the user's requirements. Keep language concise.
+Create a COMPLETE 7-Day Base Plan that EXACTLY matches the user's requirements. Keep language concise.
+
+CRITICAL INSTRUCTIONS:
+1. You MUST provide ALL 7 days (monday through sunday)
+2. Each day MUST have workout, nutrition, and recovery sections
+3. Return ONLY pure JSON - no markdown, no backticks, no explanations
+4. Complete the ENTIRE response - do not truncate
 
 === USER'S EXACT REQUIREMENTS ===
 ${userProfile}
@@ -208,9 +220,10 @@ ${userProfile}
 - Include preferred exercises when possible
 - Avoid excluded exercises entirely
 - Keep sessions within time limit
-- Honor all special requests and limitations
+- Make Wednesday and Sunday rest/recovery days
+- Vary workouts throughout the week
 
-Return ONLY valid JSON with this exact structure:`;
+Return ONLY valid JSON with ALL 7 days using this exact structure:`;
 
   const userRequest = `{
   "days": {
@@ -375,13 +388,22 @@ function processAndValidateBasePlan(rawResponse: string): any {
   let cleanedResponse = rawResponse.trim();
 
   // Enhanced markdown code block removal - handle all backtick variations
+  // First pass: remove markdown code fences
   cleanedResponse = cleanedResponse
-    .replace(/^```+json\s*\n?/gi, '')  // Remove ```json at start
-    .replace(/^```+\s*\n?/g, '')       // Remove ``` at start
-    .replace(/\n?```+\s*$/g, '')       // Remove ``` at end
-    .replace(/^`+json\s*/gi, '')       // Remove `json prefix
-    .replace(/^`+/g, '')               // Remove leading backticks
-    .replace(/`+$/g, '');              // Remove trailing backticks
+    .replace(/^```json\s*\n?/gmi, '')   // Remove ```json at start (case insensitive, multiline)
+    .replace(/^```\s*json\s*\n?/gmi, '') // Remove ``` json at start
+    .replace(/^```+\s*\n?/gm, '')        // Remove ``` at start of any line
+    .replace(/\n?```+\s*$/gm, '')        // Remove ``` at end
+    .replace(/^`+json\s*/gmi, '')        // Remove `json prefix
+    .replace(/^`+/gm, '')                // Remove leading backticks from any line
+    .replace(/`+$/gm, '')                // Remove trailing backticks from any line
+    .trim();
+
+  // Second pass: look for JSON content after any remaining text
+  const jsonMatch = cleanedResponse.match(/(\{[\s\S]*\})/);
+  if (jsonMatch) {
+    cleanedResponse = jsonMatch[1];
+  }
 
   // Try to extract JSON using multiple strategies
   let jsonString = extractBestJSON(cleanedResponse);
@@ -390,7 +412,67 @@ function processAndValidateBasePlan(rawResponse: string): any {
     console.error('❌ No valid JSON found in response');
     console.error('Raw response preview:', rawResponse.substring(0, 300));
     console.error('Cleaned response preview:', cleanedResponse.substring(0, 300));
-    throw new Error('No valid JSON found in AI response');
+    
+    // Last resort: try to find and repair JSON in the raw response
+    const rawJsonMatch = rawResponse.match(/\{[\s\S]*$/);  // Get everything from first { to end
+    if (rawJsonMatch) {
+      console.log('🔧 Found partial JSON in raw response, attempting to repair it');
+      const partialJson = rawJsonMatch[0];
+      
+      // Count UNCLOSED braces and brackets (net count)
+      let braceCount = 0;
+      let bracketCount = 0;
+      let inString = false;
+      let escapeNext = false;
+      
+      for (let i = 0; i < partialJson.length; i++) {
+        const char = partialJson[i];
+        
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+        
+        if (char === '\\') {
+          escapeNext = true;
+          continue;
+        }
+        
+        if (char === '"' && !escapeNext) {
+          inString = !inString;
+          continue;
+        }
+        
+        if (!inString) {
+          if (char === '{') braceCount++;
+          else if (char === '}') braceCount--;
+          else if (char === '[') bracketCount++;
+          else if (char === ']') bracketCount--;
+        }
+      }
+      
+      console.log(`📊 JSON structure: ${braceCount} unclosed braces, ${bracketCount} unclosed brackets`);
+      
+      // Only repair if there are actually unclosed structures
+      if (braceCount > 0 || bracketCount > 0) {
+        console.log('🔧 Attempting to close unclosed structures...');
+        jsonString = attemptJsonRepair(partialJson, braceCount, bracketCount);
+      } else if (braceCount < 0 || bracketCount < 0) {
+        // More closing than opening - truncate extras
+        console.log('⚠️ Extra closing brackets/braces detected, cleaning...');
+        jsonString = cleanExtraClosing(partialJson);
+      } else {
+        // Already balanced
+        console.log('✅ JSON appears balanced, using as-is');
+        jsonString = partialJson;
+      }
+      
+      if (!jsonString) {
+        throw new Error('No valid JSON found in AI response and repair failed');
+      }
+    } else {
+      throw new Error('No valid JSON found in AI response');
+    }
   }
 
   console.log('✅ Extracted JSON length:', jsonString.length);
@@ -407,15 +489,18 @@ function processAndValidateBasePlan(rawResponse: string): any {
     // Try to validate structure, but don't fail completely if some parts are missing
     const validation = validatePlanStructure(parsedPlan);
 
-    if (!validation.isValid) {
-      console.warn('⚠️ Plan structure validation issues:', validation.errors);
+      if (!validation.isValid) {
+        // Only show detailed warnings in development
+        if (validation.errors.length > 3) {
+          console.log(`📋 Completing partial plan (${validation.errors.length} items to fix)`);
+        }
 
-      // Try to repair the plan if possible
-      const repairedPlan = repairPlanStructure(parsedPlan);
-      if (repairedPlan) {
-        console.log('✅ Plan structure repaired');
-        return repairedPlan;
-      }
+        // Try to repair the plan if possible
+        const repairedPlan = repairPlanStructure(parsedPlan);
+        if (repairedPlan) {
+          console.log('✅ Weekly plan completed successfully');
+          return repairedPlan;
+        }
 
       // If repair fails, throw error to use fallback
       throw new Error(`Plan structure validation failed: ${validation.errors.join(', ')}`);
@@ -440,7 +525,20 @@ function extractBestJSON(response: string): string | null {
     .replace(/^`+/g, '')  // Remove leading backticks
     .replace(/`+$/g, '')  // Remove trailing backticks
     .replace(/^json\s*/i, '')  // Remove 'json' prefix
+    .replace(/^```json\s*/gi, '')  // Remove ```json prefix
+    .replace(/^```\s*/g, '')  // Remove ``` prefix
+    .replace(/```\s*$/g, '')  // Remove ``` suffix
     .trim();
+
+  // If the response starts with text before JSON, try to extract just the JSON
+  const firstBraceIndex = cleaned.indexOf('{');
+  if (firstBraceIndex > 0) {
+    // Check if there's text before the first brace
+    const textBefore = cleaned.substring(0, firstBraceIndex).trim();
+    if (textBefore.length < 100) {  // If it's a short prefix, skip it
+      cleaned = cleaned.substring(firstBraceIndex);
+    }
+  }
 
   // Strategy 1: Look for complete JSON object with balanced braces
   const completeJSON = findCompleteJSON(cleaned);
@@ -455,6 +553,200 @@ function extractBestJSON(response: string): string | null {
 }
 
 /**
+ * Clean JSON with extra closing brackets/braces
+ */
+// Utility: strip dangling commas before a closing token and at end of string
+function stripDanglingCommas(input: string): string {
+  let prev: string;
+  let next = input;
+  do {
+    prev = next;
+    // Remove commas immediately followed by a closing bracket/brace
+    next = next.replace(/,\s*([\]\}])/g, '$1');
+    // Remove trailing comma at end of string
+    next = next.replace(/,\s*$/g, '');
+  } while (next !== prev);
+  return next;
+}
+
+// Utility: compute stack of unclosed opening tokens ([ or {) in correct order
+function getUnclosedStack(jsonLike: string): string[] {
+  const stack: string[] = [];
+  let inString = false;
+  let escapeNext = false;
+  for (let i = 0; i < jsonLike.length; i++) {
+    const ch = jsonLike[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (ch === '\\') { escapeNext = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') {
+      stack.push(ch);
+    } else if (ch === '}' || ch === ']') {
+      // Pop only if matching opener exists; otherwise ignore extra closer
+      const last = stack[stack.length - 1];
+      if ((ch === '}' && last === '{') || (ch === ']' && last === '[')) {
+        stack.pop();
+      }
+    }
+  }
+  return stack;
+}
+
+function cleanExtraClosing(jsonString: string): string | null {
+  try {
+    // Remove extra closing brackets/braces from the end
+    let cleaned = stripDanglingCommas(jsonString.trim());
+    
+    while (cleaned.length > 0) {
+      // Try to parse
+      try {
+        JSON.parse(cleaned);
+        console.log('✅ Successfully cleaned extra closing characters');
+        return cleaned;
+      } catch {
+        // Remove last character and try again
+        const lastChar = cleaned[cleaned.length - 1];
+        if (lastChar === ']' || lastChar === '}') {
+          cleaned = stripDanglingCommas(cleaned.slice(0, -1).trim());
+        } else {
+          // Not a closing bracket, can't help
+          return null;
+        }
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.log('❌ Could not clean extra closing:', error);
+    return null;
+  }
+}
+
+/**
+ * Attempt to repair incomplete JSON by closing open braces/brackets
+ */
+function attemptJsonRepair(incompleteJson: string, openBraces: number, openBrackets: number): string | null {
+  try {
+    let repaired = incompleteJson.trim();
+    
+    // Check the last few characters to determine what's needed
+    const lastChars = repaired.slice(-50); // Get last 50 chars for context
+    
+    // Check if we're in the middle of a string value
+    let inString = false;
+    let lastPropertyStart = -1;
+    let escapeNext = false;
+    
+    for (let i = 0; i < repaired.length; i++) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (repaired[i] === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (repaired[i] === '"' && !escapeNext) {
+        if (!inString) {
+          lastPropertyStart = i;
+        }
+        inString = !inString;
+      }
+    }
+    
+    // If we're in a string, close it
+    if (inString) {
+      repaired += '"';
+      
+      // Check if this was a property value that needs completion
+      // Look back to see if there's a colon before the string
+      let needsComma = false;
+      for (let i = lastPropertyStart - 1; i >= 0; i--) {
+        if (repaired[i] === ':') {
+          needsComma = true;
+          break;
+        }
+        if (repaired[i] === ',' || repaired[i] === '{' || repaired[i] === '[') {
+          break;
+        }
+      }
+      
+      // If the string was a value after a colon, we might need a comma
+      // But only if we're not closing the object/array immediately
+      if (needsComma && (openBraces > 1 || openBrackets > 0)) {
+        // Don't add comma, let the structure close naturally
+      }
+    } else {
+      // Check if we ended mid-property
+      const lastChar = repaired[repaired.length - 1];
+      const secondLastChar = repaired.length > 1 ? repaired[repaired.length - 2] : '';
+      
+      // If we ended after a colon, add a default value
+      if (lastChar === ':' || (lastChar === ' ' && secondLastChar === ':')) {
+        repaired += 'null';
+      }
+      // If we ended after a comma, remove it (trailing comma)
+      else if (lastChar === ',') {
+        repaired = repaired.slice(0, -1);
+      }
+    }
+    
+    repaired = stripDanglingCommas(repaired);
+
+    // Close tokens in correct stack order (LIFO)
+    const stack = getUnclosedStack(repaired);
+    if (stack.length > 0) {
+      console.log(`🔧 Closing stack: ${stack.join('')}`);
+    }
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const opener = stack[i];
+      repaired = stripDanglingCommas(repaired);
+      repaired += (opener === '{') ? '}' : ']';
+    }
+    
+    repaired = stripDanglingCommas(repaired);
+
+    // Verify it's valid before returning
+    try {
+      JSON.parse(repaired);
+      console.log('✅ Successfully repaired incomplete JSON');
+      return repaired;
+    } catch (parseError) {
+      console.log('⚠️ Initial repair failed, trying to clean:', parseError);
+      // Try removing characters from the end until it's valid
+      return cleanExtraClosing(repaired);
+    }
+  } catch (error) {
+    console.log('❌ Could not repair JSON:', error);
+    
+    // Try a more aggressive repair - just close everything
+    try {
+      let fallback = incompleteJson.trim();
+      
+      // If it ends with an incomplete string, close it
+      if (fallback.match(/"[^"]*$/)) {
+        fallback += '"';
+      }
+      
+      // If it ends with : or , remove it
+      if (fallback.endsWith(':') || fallback.endsWith(',')) {
+        fallback = fallback.slice(0, -1);
+      }
+      
+      // Close all open structures
+      fallback += ']'.repeat(openBrackets) + '}'.repeat(openBraces);
+      
+      JSON.parse(fallback);
+      console.log('✅ Fallback repair successful');
+      return fallback;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
  * Find a complete JSON object with balanced braces
  */
 function findCompleteJSON(response: string): string | null {
@@ -462,18 +754,49 @@ function findCompleteJSON(response: string): string | null {
   const firstBrace = response.indexOf('{');
   if (firstBrace === -1) return null;
 
-  // Track braces to find the matching closing brace
+  // Track braces and brackets to find the matching closing brace
   let braceCount = 0;
+  let bracketCount = 0;
+  let inString = false;
+  let escapeNext = false;
   let endIndex = -1;
 
   for (let i = firstBrace; i < response.length; i++) {
-    if (response[i] === '{') braceCount++;
-    if (response[i] === '}') {
+    const char = response[i];
+    
+    // Handle escape sequences
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\' && i + 1 < response.length) {
+      escapeNext = true;
+      continue;
+    }
+    
+    // Handle string boundaries
+    if (char === '"' && !escapeNext) {
+      inString = !inString;
+      continue;
+    }
+    
+    // Skip characters inside strings
+    if (inString) continue;
+    
+    // Track braces and brackets
+    if (char === '{') {
+      braceCount++;
+    } else if (char === '}') {
       braceCount--;
-      if (braceCount === 0) {
+      if (braceCount === 0 && bracketCount === 0) {
         endIndex = i;
         break;
       }
+    } else if (char === '[') {
+      bracketCount++;
+    } else if (char === ']') {
+      bracketCount--;
     }
   }
 
@@ -487,6 +810,20 @@ function findCompleteJSON(response: string): string | null {
       return jsonString;
     } catch {
       return null;
+    }
+  }
+
+  // If the JSON is incomplete, try to repair it
+  if (braceCount > 0 || bracketCount > 0) {
+    console.log('🔧 Attempting to repair incomplete JSON...');
+    const repairedJson = attemptJsonRepair(response.substring(firstBrace), braceCount, bracketCount);
+    if (repairedJson) {
+      try {
+        JSON.parse(repairedJson);
+        return repairedJson;
+      } catch {
+        return null;
+      }
     }
   }
 
@@ -596,10 +933,16 @@ function repairPlanStructure(plan: any): any {
   const repairedPlan = { ...plan };
   const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
+  // Count how many days are missing
+  const missingDays = requiredDays.filter(day => !repairedPlan.days[day]);
+  
+  if (missingDays.length > 0) {
+    console.log(`📝 Auto-generating ${missingDays.length} missing day${missingDays.length > 1 ? 's' : ''} to complete weekly plan`);
+  }
+  
   for (const day of requiredDays) {
     if (!repairedPlan.days[day]) {
-      console.warn(`⚠️ Creating missing ${day} plan`);
-      repairedPlan.days[day] = createMinimalDayPlan(day);
+      repairedPlan.days[day] = createMinimalDayPlan(day, repairedPlan.days);
       continue;
     }
 
@@ -628,57 +971,192 @@ function repairPlanStructure(plan: any): any {
   return repairedPlan;
 }
 
-function createMinimalDayPlan(day: string) {
+function createMinimalDayPlan(day: string, existingDays?: any) {
+  // Determine if this should be a rest day or active day
+  const isWeekend = day === 'saturday' || day === 'sunday';
+  const isRestDay = day === 'wednesday' || day === 'sunday';
+  
+  // Try to extract patterns from existing days if available
+  let targetCalories = 2000;
+  let targetProtein = 150;
+  
+  if (existingDays) {
+    const existingCalories = Object.values(existingDays)
+      .filter((d: any) => d?.nutrition?.total_kcal)
+      .map((d: any) => d.nutrition.total_kcal);
+    
+    if (existingCalories.length > 0) {
+      targetCalories = Math.round(existingCalories.reduce((a: number, b: number) => a + b, 0) / existingCalories.length);
+    }
+    
+    const existingProtein = Object.values(existingDays)
+      .filter((d: any) => d?.nutrition?.protein_g)
+      .map((d: any) => d.nutrition.protein_g);
+    
+    if (existingProtein.length > 0) {
+      targetProtein = Math.round(existingProtein.reduce((a: number, b: number) => a + b, 0) / existingProtein.length);
+    }
+  }
+  
   return {
-    workout: createMinimalWorkout(),
-    nutrition: createMinimalNutrition(),
-    recovery: createMinimalRecovery()
+    workout: createMinimalWorkout(day, isRestDay),
+    nutrition: createMinimalNutrition(targetCalories, targetProtein),
+    recovery: createMinimalRecovery(isRestDay)
   };
 }
 
-function createMinimalWorkout() {
+function createMinimalWorkout(day: string, isRestDay: boolean) {
+  if (isRestDay) {
+    return {
+      focus: ['Recovery', 'Mobility'],
+      blocks: [{
+        name: 'Active Recovery',
+        items: [
+          {
+            exercise: 'Light Walking',
+            sets: 1,
+            reps: '20-30 min',
+            RIR: 0
+          },
+          {
+            exercise: 'Gentle Stretching',
+            sets: 1,
+            reps: '10-15 min',
+            RIR: 0
+          }
+        ]
+      }],
+      notes: 'Rest and recovery day - light movement only'
+    };
+  }
+  
+  // Create varied workouts for different days
+  const workoutFocus: Record<string, string[]> = {
+    monday: ['Upper Body', 'Push'],
+    tuesday: ['Lower Body', 'Legs'],
+    thursday: ['Upper Body', 'Pull'],
+    friday: ['Full Body', 'Conditioning'],
+    saturday: ['Core', 'Flexibility']
+  };
+  
+  const focus = workoutFocus[day] || ['General Fitness'];
+  
   return {
-    focus: ['General Fitness'],
-    blocks: [createMinimalWorkoutBlock()],
-    notes: 'Generated workout plan'
+    focus,
+    blocks: [
+      {
+        name: 'Warm-up',
+        items: [{
+          exercise: 'Dynamic Stretching',
+          sets: 1,
+          reps: '5-10 min',
+          RIR: 0
+        }]
+      },
+      createMinimalWorkoutBlock(focus[0])
+    ],
+    notes: `Focus on ${focus.join(' and ')}`
   };
 }
 
-function createMinimalWorkoutBlock() {
+function createMinimalWorkoutBlock(focus: string) {
+  const exercises: Record<string, any[]> = {
+    'Upper Body': [
+      { exercise: 'Push-ups', sets: 3, reps: '8-12', RIR: 2 },
+      { exercise: 'Dumbbell Rows', sets: 3, reps: '10-12', RIR: 2 },
+      { exercise: 'Shoulder Press', sets: 3, reps: '10-12', RIR: 2 }
+    ],
+    'Lower Body': [
+      { exercise: 'Squats', sets: 3, reps: '10-12', RIR: 2 },
+      { exercise: 'Lunges', sets: 3, reps: '10 each leg', RIR: 2 },
+      { exercise: 'Calf Raises', sets: 3, reps: '15-20', RIR: 1 }
+    ],
+    'Full Body': [
+      { exercise: 'Burpees', sets: 3, reps: '8-10', RIR: 2 },
+      { exercise: 'Mountain Climbers', sets: 3, reps: '20', RIR: 2 },
+      { exercise: 'Plank', sets: 3, reps: '30-60 sec', RIR: 1 }
+    ],
+    'Core': [
+      { exercise: 'Plank', sets: 3, reps: '30-60 sec', RIR: 1 },
+      { exercise: 'Bicycle Crunches', sets: 3, reps: '20', RIR: 1 },
+      { exercise: 'Leg Raises', sets: 3, reps: '10-15', RIR: 2 }
+    ]
+  };
+  
   return {
-    name: 'Main',
-    items: [{
-      exercise: 'Bodyweight Squats',
-      sets: 3,
-      reps: '10-12',
-      RIR: 2
-    }]
+    name: 'Main Workout',
+    items: exercises[focus] || exercises['Full Body']
   };
 }
 
-function createMinimalNutrition() {
+function createMinimalNutrition(calories: number = 2000, protein: number = 150) {
   return {
-    total_kcal: 2000,
-    protein_g: 150,
-    meals: [createMinimalMeal()],
+    total_kcal: calories,
+    protein_g: protein,
+    meals: [
+      {
+        name: 'Breakfast',
+        items: [
+          { food: 'Oatmeal with berries', qty: '1 cup' },
+          { food: 'Protein shake', qty: '1 scoop' }
+        ]
+      },
+      {
+        name: 'Lunch',
+        items: [
+          { food: 'Grilled chicken breast', qty: '150g' },
+          { food: 'Brown rice', qty: '1 cup' },
+          { food: 'Mixed vegetables', qty: '2 cups' }
+        ]
+      },
+      {
+        name: 'Dinner',
+        items: [
+          { food: 'Lean protein', qty: '150g' },
+          { food: 'Sweet potato', qty: '1 medium' },
+          { food: 'Salad', qty: '2 cups' }
+        ]
+      }
+    ],
     hydration_l: 2.5
   };
 }
 
 function createMinimalMeal() {
   return {
-    name: 'Main Meal',
+    name: 'Balanced Meal',
     items: [{
-      food: 'Balanced meal',
+      food: 'Protein, carbs, and vegetables',
       qty: '1 serving'
     }]
   };
 }
 
-function createMinimalRecovery() {
+function createMinimalRecovery(isRestDay: boolean = false) {
+  if (isRestDay) {
+    return {
+      mobility: [
+        'Full body stretching routine (15 min)',
+        'Foam rolling if available',
+        'Light yoga or meditation'
+      ],
+      sleep: [
+        '8-9 hours recommended',
+        'Focus on recovery and relaxation',
+        'Avoid intense activities'
+      ]
+    };
+  }
+  
   return {
-    mobility: ['Stretching'],
-    sleep: ['7-8 hours']
+    mobility: [
+      'Post-workout stretching (10 min)',
+      'Focus on worked muscle groups'
+    ],
+    sleep: [
+      '7-8 hours minimum',
+      'Consistent sleep schedule'
+    ]
   };
 }
 
@@ -1130,4 +1608,165 @@ function createAdaptiveRecovery(isTrainingDay: boolean): any {
   };
 }
 
+
+/**
+ * Constraint Enforcement & Smart Post-processing
+ * - Enforce dietary preferences strictly (e.g., Vegetarian never gets chicken/fish)
+ * - Replace avoided exercises instead of deleting whole blocks
+ * - Keep nutrition fairly consistent across the week (limited variety)
+ */
+function applyUserConstraintsToWeeklyDays(user: User, days: Record<string, any>): Record<string, any> {
+  const dietary = normalizeDietary(user.dietaryPrefs || []);
+  const avoid = new Set((user.avoidExercises || []).map(safeLower));
+  const prefer = new Set((user.preferredExercises || []).map(safeLower));
+
+  const result: Record<string, any> = {};
+  const dayOrder = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+
+  // Build a small rotating palette to keep week consistent but not identical
+  const palette = buildWeeklyMealPalette(dietary);
+  let paletteIndex = 0;
+
+  for (const day of dayOrder) {
+    const d = days[day] || {};
+    const workout = sanitizeWorkout(d.workout, avoid, prefer);
+    const nutrition = sanitizeNutrition(d.nutrition, dietary, palette[paletteIndex % palette.length]);
+    const recovery = d.recovery || createMinimalRecovery(day === 'wednesday' || day === 'sunday');
+    result[day] = { workout, nutrition, recovery };
+    paletteIndex++;
+  }
+
+  return result;
+}
+
+function applyUserConstraintsToDailyPlan(user: User, plan: any, baseDay: any): any {
+  const dietary = normalizeDietary(user.dietaryPrefs || []);
+  const avoid = new Set((user.avoidExercises || []).map(safeLower));
+  const prefer = new Set((user.preferredExercises || []).map(safeLower));
+
+  const sanitizedWorkout = sanitizeWorkout(plan?.workout || baseDay?.workout, avoid, prefer, baseDay?.workout);
+  const sanitizedNutrition = sanitizeNutrition(plan?.nutrition || baseDay?.nutrition, dietary);
+
+  return { ...plan, workout: sanitizedWorkout, nutrition: sanitizedNutrition };
+}
+
+function normalizeDietary(prefs: string[]): 'vegetarian' | 'eggitarian' | 'nonveg' {
+  if (prefs.includes('Vegetarian')) return 'vegetarian';
+  if (prefs.includes('Eggitarian')) return 'eggitarian';
+  return 'nonveg';
+}
+
+function safeLower(s: string): string { return (s || '').toLowerCase().trim(); }
+function capitalize(s: string): string { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+function sanitizeWorkout(workout: any, avoid: Set<string>, prefer: Set<string>, baseWorkout?: any): any {
+  if (!workout && baseWorkout) return JSON.parse(JSON.stringify(baseWorkout));
+  if (!workout) return createMinimalWorkout('', false);
+
+  const clone = JSON.parse(JSON.stringify(workout));
+  const blocks = Array.isArray(clone.blocks) ? clone.blocks : [];
+
+  const replacementsMap: Record<string, string> = {
+    'deadlift': 'Hip thrusts',
+    'deadlifts': 'Hip thrusts',
+    'barbell deadlift': 'Back extensions',
+    'squat': 'Leg press',
+    'squats': 'Leg press',
+  };
+
+  blocks.forEach((block: any) => {
+    if (!Array.isArray(block.items)) return;
+    block.items = block.items.map((item: any) => {
+      const exerciseName = String(item?.exercise || '');
+      const nameLower = safeLower(exerciseName);
+
+      // If this exercise matches any avoided term, swap it (do not delete)
+      let shouldSwap = false;
+      avoid.forEach(term => { if (nameLower.includes(term)) shouldSwap = true; });
+      if (shouldSwap) {
+        // Prefer user's preferred exercise if provided and not also avoided
+        const preferred = Array.from(prefer).find(p => !Array.from(avoid).some(a => p.includes(a)));
+        const explicitReplacement = Object.keys(replacementsMap).find(k => nameLower.includes(k));
+        const replacement = preferred ? preferred : (explicitReplacement ? replacementsMap[explicitReplacement] : 'Cable row');
+        return { ...item, exercise: capitalize(replacement) };
+      }
+      return item;
+    });
+  });
+
+  clone.blocks = blocks.length ? blocks : [createMinimalWorkoutBlock(clone.focus?.[0] || 'Full Body')];
+  return clone;
+}
+
+function sanitizeNutrition(nutrition: any, diet: 'vegetarian' | 'eggitarian' | 'nonveg', palette?: { name: string; items: any[] }): any {
+  const base = createMinimalNutrition();
+  const clone = JSON.parse(JSON.stringify(nutrition || base));
+  clone.meals = Array.isArray(clone.meals) ? clone.meals : base.meals;
+
+  const forbidden = new Set<string>();
+  if (diet === 'vegetarian') {
+    ['chicken','fish','meat','pork','beef','mutton','tuna','egg','eggs'].forEach(f => forbidden.add(f));
+  } else if (diet === 'eggitarian') {
+    ['chicken','fish','meat','pork','beef','mutton','tuna'].forEach(f => forbidden.add(f));
+  }
+
+  const vegSwaps = [
+    { match: ['chicken','meat','beef','pork','mutton'], repl: 'Tofu/Paneer' },
+    { match: ['fish','tuna','salmon'], repl: 'Chickpeas/Lentils' },
+    { match: ['egg','eggs'], repl: diet === 'vegetarian' ? 'Paneer/Tofu' : 'Eggs' },
+  ];
+
+  clone.meals = clone.meals.map((meal: any, idx: number) => {
+    const items = Array.isArray(meal.items) ? meal.items : [];
+    const sanitized = items.map((it: any) => {
+      const nameLower = safeLower(it?.food || '');
+      if (!nameLower) return it;
+      const badToken = Array.from(forbidden).find(tok => nameLower.includes(tok));
+      if (badToken) {
+        const swap = vegSwaps.find(s => s.match.some(m => badToken.includes(m) || m.includes(badToken)));
+        const replacement = swap ? swap.repl : (diet === 'eggitarian' ? 'Eggs' : 'Paneer/Tofu');
+        return { ...it, food: replacement };
+      }
+      return it;
+    });
+
+    // Apply palette for consistency (keep 2-3 items max per meal)
+    if (palette && idx % 3 === 0) {
+      const merged = mergeMealTemplate(sanitized, palette.items);
+      return { name: meal.name || palette.name, items: merged };
+    }
+
+    return { ...meal, items: sanitized.slice(0, Math.min(3, sanitized.length)) };
+  });
+
+  return clone;
+}
+
+function buildWeeklyMealPalette(diet: 'vegetarian' | 'eggitarian' | 'nonveg'): { name: string; items: any[] }[] {
+  if (diet === 'vegetarian') {
+    return [
+      { name: 'Breakfast', items: [{ food: 'Oats + plant protein', qty: '80g + 1 scoop' }] },
+      { name: 'Lunch', items: [{ food: 'Rajma/Chana + rice', qty: '1 cup + 1 cup' }] },
+      { name: 'Dinner', items: [{ food: 'Tofu/Paneer stir-fry + roti', qty: '200g + 2' }] },
+    ];
+  }
+  if (diet === 'eggitarian') {
+    return [
+      { name: 'Breakfast', items: [{ food: 'Eggs + toast', qty: '3 + 2 slices' }] },
+      { name: 'Lunch', items: [{ food: 'Egg rice bowl', qty: '2 eggs + 1 cup rice' }] },
+      { name: 'Dinner', items: [{ food: 'Veg omelet + salad', qty: '3 eggs + 200g' }] },
+    ];
+  }
+  return [
+    { name: 'Breakfast', items: [{ food: 'Greek yogurt + protein', qty: '200g + 1 scoop' }] },
+    { name: 'Lunch', items: [{ food: 'Chicken + rice + veg', qty: '150g + 1 cup + 200g' }] },
+    { name: 'Dinner', items: [{ food: 'Fish + quinoa + salad', qty: '150g + 150g + 200g' }] },
+  ];
+}
+
+function mergeMealTemplate(items: any[], templateItems: any[]): any[] {
+  if (!items || items.length === 0) return templateItems.slice(0, 3);
+  // Keep up to 3 items to reduce diversity and improve consistency
+  return items.slice(0, Math.min(3, items.length));
+}
 

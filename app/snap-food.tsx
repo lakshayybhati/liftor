@@ -45,7 +45,7 @@ export default function SnapFoodScreen() {
   const [showPreview, setShowPreview] = useState(false);
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<FoodAnalysisResponse | null>(null);
-  const [portionHint, setPortionHint] = useState('');
+  const [extraNotes, setExtraNotes] = useState('');
   const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
   const [manualEntry, setManualEntry] = useState<ManualFoodEntry>({
     name: '',
@@ -97,7 +97,7 @@ export default function SnapFoodScreen() {
     }
   }, []);
 
-  const analyzeFood = useCallback(async (imageBase64: string, portion: string) => {
+  const analyzeFood = useCallback(async (imageBase64: string, notes: string) => {
     try {
       const response = await fetch('https://toolkit.rork.com/text/llm/', {
         method: 'POST',
@@ -115,7 +115,7 @@ export default function SnapFoodScreen() {
               content: [
                 {
                   type: 'text',
-                  text: `Analyze this food image and estimate nutritional information for portion: ${portion}`
+                  text: `Analyze this food image and estimate nutritional information.${notes && notes.trim() ? ` Additional notes: ${notes.trim()}` : ''}`
                 },
                 {
                   type: 'image',
@@ -187,8 +187,8 @@ export default function SnapFoodScreen() {
   }, [compressImage]);
 
   const handleAnalyze = useCallback(async () => {
-    if (!capturedImageUri || !portionHint.trim()) {
-      Alert.alert('Missing Information', 'Please provide a portion hint (e.g., "1 plate", "½ bowl", "250g")');
+    if (!capturedImageUri) {
+      Alert.alert('Missing Information', 'Please capture a photo first.');
       return;
     }
 
@@ -196,7 +196,7 @@ export default function SnapFoodScreen() {
     
     try {
       const imageBase64 = await convertToBase64(capturedImageUri);
-      const result = await analyzeFood(imageBase64, portionHint.trim());
+      const result = await analyzeFood(imageBase64, extraNotes.trim());
       setAnalysisResult(result);
     } catch (error) {
       console.error('Analysis failed:', error);
@@ -211,7 +211,7 @@ export default function SnapFoodScreen() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [capturedImageUri, portionHint, convertToBase64, analyzeFood]);
+  }, [capturedImageUri, extraNotes, convertToBase64, analyzeFood]);
 
   const handleAddToExtras = useCallback(async () => {
     if (Platform.OS !== 'web') {
@@ -229,8 +229,7 @@ export default function SnapFoodScreen() {
         fat: analysisResult.totals.fat_g,
         carbs: analysisResult.totals.carbs_g,
         confidence: analysisResult.confidence,
-        notes: analysisResult.notes,
-        portionHint,
+        notes: (extraNotes && extraNotes.trim()) ? extraNotes.trim() : (analysisResult.notes || undefined),
         imageUri: capturedImageUri || undefined,
       };
     } else if (manualAnalysisResult) {
@@ -242,8 +241,7 @@ export default function SnapFoodScreen() {
         fat: manualAnalysisResult.totals.fat_g,
         carbs: manualAnalysisResult.totals.carbs_g,
         confidence: manualAnalysisResult.confidence,
-        notes: manualAnalysisResult.notes,
-        portionHint: manualEntry.portionSize,
+        notes: (extraNotes && extraNotes.trim()) ? extraNotes.trim() : (manualAnalysisResult.notes || undefined),
         imageUri: capturedImageUri || undefined,
       };
     } else {
@@ -265,7 +263,7 @@ export default function SnapFoodScreen() {
       console.error('Error adding extra food:', error);
       Alert.alert('Error', 'Failed to add food to extras. Please try again.');
     }
-  }, [analysisResult, manualAnalysisResult, manualEntry, portionHint, capturedImageUri, addExtraFood]);
+  }, [analysisResult, manualAnalysisResult, manualEntry, extraNotes, capturedImageUri, addExtraFood]);
 
   const handleAnalyzeManualEntry = useCallback(async () => {
     if (!manualEntry.name.trim() || !manualEntry.portionSize.trim()) {
@@ -335,7 +333,7 @@ export default function SnapFoodScreen() {
     setCapturedImageUri(null);
     setShowPreview(false);
     setAnalysisResult(null);
-    setPortionHint('');
+    setExtraNotes('');
     setShowManualEntry(false);
     setManualEntry({ name: '', portionSize: '' });
     setIsAnalyzingManual(false);
@@ -384,16 +382,16 @@ export default function SnapFoodScreen() {
           </View>
 
           <Card style={styles.portionCard}>
-            <Text style={styles.portionLabel}>Portion Size Hint</Text>
+            <Text style={styles.portionLabel}>Anything the picture might miss or you want us to know?</Text>
             <TextInput
               style={styles.portionInput}
-              value={portionHint}
-              onChangeText={setPortionHint}
-              placeholder="e.g., 1 plate, ½ bowl, 250g"
+              value={extraNotes}
+              onChangeText={setExtraNotes}
+              placeholder="e.g., extra sauce, toppings, sides, customizations"
               placeholderTextColor={theme.color.muted}
             />
             <Text style={styles.portionHint}>
-              Help us estimate calories by describing the portion size
+              Add details not obvious from the photo to improve accuracy
             </Text>
           </Card>
 
@@ -450,7 +448,7 @@ export default function SnapFoodScreen() {
               <Button
                 title="Analyze Food"
                 onPress={handleAnalyze}
-                disabled={!portionHint.trim()}
+                disabled={false}
                 style={styles.analyzeButton}
               />
             )}

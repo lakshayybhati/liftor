@@ -43,6 +43,9 @@ import { theme } from '@/constants/colors';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import { Power } from 'lucide-react-native';
+import { BlurView } from 'expo-blur';
+import Svg, { Line } from 'react-native-svg';
+import { confirmNumericWithinRange, NumberSpecs, confirmCaloriesWithBaseline } from '@/utils/number-guards';
 
 
 
@@ -119,10 +122,13 @@ export default function OnboardingScreen() {
   const [mealCount, setMealCount] = useState(4);
   const [injuries, setInjuries] = useState('');
   const [stepTarget, setStepTarget] = useState(8000);
+  const [stepTargetInput, setStepTargetInput] = useState('8000');
   const [preferredWorkoutSplit, setPreferredWorkoutSplit] = useState('');
   const [specialRequests, setSpecialRequests] = useState('');
   const [goalWeight, setGoalWeight] = useState('');
   const [workoutIntensity, setWorkoutIntensity] = useState<WorkoutIntensity>('Optimal');
+  const innerScrollRef = useRef<ScrollView | null>(null);
+  const [showScrollHint, setShowScrollHint] = useState(false);
   
   // Removed VMN transcription per requirements
 
@@ -141,6 +147,22 @@ export default function OnboardingScreen() {
       }),
     ]).start();
   }, [step, fadeAnim]);
+
+  useEffect(() => {
+    // Show hint initially for steps with inner scrollviews
+    setShowScrollHint([3, 5, 6].includes(step));
+  }, [step]);
+
+  const handleInnerScrollEvent = (e: any) => {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const paddingToBottom = 20;
+    const atBottom = layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom;
+    setShowScrollHint(!atBottom);
+  };
+
+  const handleScrollToEnd = () => {
+    innerScrollRef.current?.scrollToEnd({ animated: true });
+  };
 
   // Calculate calories when body stats change
   useEffect(() => {
@@ -363,14 +385,9 @@ export default function OnboardingScreen() {
       console.log('[Onboarding] profile sync error', e);
     }
 
-    try {
-      const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
-      const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
-      // Navigate to custom paywall; it will handle purchase/restore and then continue
-      router.replace({ pathname: '/paywall', params: { next: '/generating-base-plan' } as any });
-    } catch (e) {
-      router.replace('/(tabs)/home');
-    }
+    // After onboarding, go directly to base plan generation
+    // Paywall will be shown 10 seconds after the plan is ready
+    router.replace('/generating-base-plan');
   };
 
   const handleSignOutPress = () => {
@@ -474,7 +491,14 @@ export default function OnboardingScreen() {
     {
       title: "Let's calculate your daily calories",
       content: (
-        <ScrollView style={styles.bodyStatsContainer} showsVerticalScrollIndicator={false}>
+        <View style={{ flex: 1, position: 'relative' }}>
+          <ScrollView 
+            style={styles.bodyStatsContainer} 
+            showsVerticalScrollIndicator={false}
+            ref={(ref) => { if (step === 3) innerScrollRef.current = ref; }}
+            onScroll={handleInnerScrollEvent}
+            scrollEventThrottle={32}
+          >
           <View style={styles.statsRow}>
             <View style={styles.statInput}>
               <Text style={styles.inputLabel}>Age *</Text>
@@ -484,7 +508,13 @@ export default function OnboardingScreen() {
                 onChangeText={setAge}
                 placeholder="25"
                 placeholderTextColor={theme.color.muted}
-                keyboardType="numeric"
+                keyboardType="decimal-pad"
+                onBlur={async () => {
+                  if (!age.trim()) return;
+                  const v = await confirmNumericWithinRange(age, NumberSpecs.age);
+                  if (v === null) setAge('');
+                  else setAge(String(Math.round(v)));
+                }}
               />
             </View>
             <View style={styles.statInput}>
@@ -515,7 +545,13 @@ export default function OnboardingScreen() {
                 onChangeText={setHeight}
                 placeholder="175"
                 placeholderTextColor={theme.color.muted}
-                keyboardType="numeric"
+                keyboardType="decimal-pad"
+                onBlur={async () => {
+                  if (!height.trim()) return;
+                  const v = await confirmNumericWithinRange(height, NumberSpecs.heightCm);
+                  if (v === null) setHeight('');
+                  else setHeight(String(Math.round(v)));
+                }}
               />
             </View>
             <View style={styles.statInput}>
@@ -526,7 +562,13 @@ export default function OnboardingScreen() {
                 onChangeText={setWeight}
                 placeholder="70"
                 placeholderTextColor={theme.color.muted}
-                keyboardType="numeric"
+                keyboardType="decimal-pad"
+                onBlur={async () => {
+                  if (!weight.trim()) return;
+                  const v = await confirmNumericWithinRange(weight, NumberSpecs.weightKg);
+                  if (v === null) setWeight('');
+                  else setWeight(String(Math.round(v * 100) / 100));
+                }}
               />
             </View>
           </View>
@@ -560,8 +602,8 @@ export default function OnboardingScreen() {
             ))}
           </View>
 
-          {dailyCalorieTarget && (
-            <View style={styles.calorieResult}>
+          {/* Always show the calorie card; keep the input visible even if empty */}
+          <View style={styles.calorieResult}>
               <Text style={styles.calorieLabel}>Your Daily Target</Text>
               <TouchableOpacity
                 style={styles.calorieDisplay}
@@ -573,17 +615,50 @@ export default function OnboardingScreen() {
                     value={dailyCalorieTarget}
                     onChangeText={setDailyCalorieTarget}
                     keyboardType="numeric"
-                    onBlur={() => setShowCalorieEdit(false)}
+                    onBlur={async () => {
+                      const baseline = (() => {
+                        const a = parseFloat(age || '');
+                        const w = parseFloat(weight || '');
+                        const h = parseFloat(height || '');
+                        if (!isFinite(a) || !isFinite(w) || !isFinite(h)) return null;
+                        const bmr = calculateBMR(w, h, a, sex);
+                        let reco = calculateTDEE(bmr, activityLevel);
+                        if (goal === 'WEIGHT_LOSS') reco = Math.round(reco * 0.85);
+                        else if (goal === 'MUSCLE_GAIN') reco = Math.round(reco * 1.15);
+                        return reco;
+                      })();
+
+                      if (dailyCalorieTarget && dailyCalorieTarget.trim()) {
+                        const v = await confirmCaloriesWithBaseline(dailyCalorieTarget, baseline, 0.25, 0.5);
+                        if (v === null) setDailyCalorieTarget('');
+                        else setDailyCalorieTarget(String(Math.round(v)));
+                      } else {
+                        // Empty input, restore baseline if available
+                        if (baseline) setDailyCalorieTarget(String(baseline));
+                      }
+                      setShowCalorieEdit(false);
+                    }}
                     autoFocus
                   />
                 ) : (
-                  <Text style={styles.calorieValue}>{dailyCalorieTarget} kcal</Text>
+                  <Text style={styles.calorieValue}>{dailyCalorieTarget ? `${dailyCalorieTarget} kcal` : 'Tap to set'}</Text>
                 )}
               </TouchableOpacity>
               <Text style={styles.calorieHint}>Tap to adjust if needed</Text>
             </View>
+          </ScrollView>
+          {step === 3 && showScrollHint && (
+            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
+              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
+                <Svg width={40} height={40} viewBox="0 0 24 24">
+                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                </Svg>
+              </BlurView>
+            </TouchableOpacity>
           )}
-        </ScrollView>
+        </View>
       ),
     },
     {
@@ -617,7 +692,14 @@ export default function OnboardingScreen() {
     {
       title: "Supplements & personal needs (optional)",
       content: (
-        <ScrollView style={styles.supplementsContainer} showsVerticalScrollIndicator={false}>
+        <View style={{ flex: 1, position: 'relative' }}>
+          <ScrollView 
+            style={styles.supplementsContainer} 
+            showsVerticalScrollIndicator={false}
+            ref={(ref) => { if (step === 5) innerScrollRef.current = ref; }}
+            onScroll={handleInnerScrollEvent}
+            scrollEventThrottle={32}
+          >
           <Text style={styles.sectionLabel}>Current supplements</Text>
           <View style={styles.chipsContainer}>
             {COMMON_SUPPLEMENTS.map((supp) => (
@@ -666,13 +748,32 @@ export default function OnboardingScreen() {
               />
             ))}
           </View>
-        </ScrollView>
+          </ScrollView>
+          {step === 5 && showScrollHint && (
+            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
+              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
+                <Svg width={40} height={40} viewBox="0 0 24 24">
+                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                </Svg>
+              </BlurView>
+            </TouchableOpacity>
+          )}
+        </View>
       ),
     },
     {
       title: "Let's get specific about your journey",
       content: (
-        <ScrollView style={styles.specificsContainer} showsVerticalScrollIndicator={false}>
+        <View style={{ flex: 1, position: 'relative' }}>
+          <ScrollView 
+            style={styles.specificsContainer} 
+            showsVerticalScrollIndicator={false}
+            ref={(ref) => { if (step === 6) innerScrollRef.current = ref; }}
+            onScroll={handleInnerScrollEvent}
+            scrollEventThrottle={32}
+          >
           <Text style={styles.sectionLabel}>Exercises you prefer</Text>
           <View style={styles.chipsContainer}>
             {PREFERRED_EXERCISES.map((exercise) => (
@@ -756,17 +857,33 @@ export default function OnboardingScreen() {
                 placeholder="0"
                 placeholderTextColor={theme.color.muted}
                 keyboardType="numeric"
+                onBlur={async () => {
+                  const v = await confirmNumericWithinRange(travelDays, NumberSpecs.travelDaysPerMonth);
+                  if (v === null) setTravelDays(0);
+                  else setTravelDays(Math.round(v));
+                }}
               />
             </View>
             <View style={styles.inputHalf}>
               <Text style={styles.inputLabel}>Step target</Text>
               <TextInput
-                style={styles.numberInput}
-                value={stepTarget.toString()}
-                onChangeText={(text) => setStepTarget(parseInt(text) || 8000)}
+              style={styles.numberInput}
+              value={stepTargetInput}
+              onChangeText={setStepTargetInput}
                 placeholder="8000"
                 placeholderTextColor={theme.color.muted}
                 keyboardType="numeric"
+                onBlur={async () => {
+                  const v = await confirmNumericWithinRange(stepTargetInput, NumberSpecs.steps);
+                  if (v === null) {
+                    // Revert to prior saved value
+                    setStepTargetInput(String(stepTarget));
+                  } else {
+                    const rounded = Math.round(v);
+                    setStepTarget(rounded);
+                    setStepTargetInput(String(rounded));
+                  }
+                }}
               />
             </View>
           </View>
@@ -781,6 +898,12 @@ export default function OnboardingScreen() {
                 placeholder={weight ? (parseFloat(weight) - 5).toString() : "65"}
                 placeholderTextColor={theme.color.muted}
                 keyboardType="numeric"
+                onBlur={async () => {
+                  if (!goalWeight.trim()) return;
+                  const v = await confirmNumericWithinRange(goalWeight, NumberSpecs.weightKg);
+                  if (v === null) setGoalWeight('');
+                  else setGoalWeight(String(Math.round(v * 100) / 100));
+                }}
               />
             </View>
             <View style={styles.inputHalf}>
@@ -863,7 +986,19 @@ export default function OnboardingScreen() {
               numberOfLines={3}
             />
           </View>
-        </ScrollView>
+          </ScrollView>
+          {step === 6 && showScrollHint && (
+            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
+              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
+                <Svg width={40} height={40} viewBox="0 0 24 24">
+                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                </Svg>
+              </BlurView>
+            </TouchableOpacity>
+          )}
+        </View>
       ),
     },
   ];
@@ -890,7 +1025,7 @@ export default function OnboardingScreen() {
             <Text style={styles.subtitle}>Your AI-powered fitness companion</Text>
           </View>
 
-          <Animated.View style={[styles.fadeWrapper, { opacity: fadeAnim }]}>
+          <Animated.View style={[styles.fadeWrapper, { opacity: fadeAnim }]}> 
             <Card style={styles.stepCard}>
               <View style={styles.progressContainer}>
                 <View style={styles.progressBar}>
@@ -1268,6 +1403,23 @@ const styles = StyleSheet.create({
   fadeWrapper: {
     flex: 1,
   },
+  scrollHintOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 16,
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  blurCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    overflow: 'hidden',
+  },
   // New styles for specifics step
   specificsContainer: {
     maxHeight: 400,
@@ -1330,12 +1482,15 @@ const styles = StyleSheet.create({
   },
   mealCountContainer: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
     gap: theme.space.sm,
     marginBottom: theme.space.lg,
   },
   mealOption: {
-    flex: 1,
-    padding: theme.space.md,
+    width: '48%',
+    paddingVertical: theme.space.md,
+    paddingHorizontal: theme.space.sm,
     borderRadius: theme.radius.md,
     borderWidth: 1,
     borderColor: theme.color.line,

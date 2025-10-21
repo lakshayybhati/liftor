@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, Image } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Trash2, ChevronLeft } from 'lucide-react-native';
@@ -8,19 +8,20 @@ import { Card } from '@/components/ui/Card';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 
-export default function FoodSnapsScreen() {
+export default function FoodEntriesScreen() {
   const insets = useSafeAreaInsets();
   const { getTodayFoodLog, removeExtraFood } = useUserStore();
   const [isDeleting, setIsDeleting] = useState<string | null>(null);
 
-  const allExtras = useMemo(() => {
+  const manualExtras = useMemo(() => {
     const todayLog = getTodayFoodLog();
-    return todayLog?.extras || [];
+    const list = todayLog?.extras || [];
+    return list.filter((e: any) => !e.imageUri);
   }, [getTodayFoodLog]);
 
   const confirmDelete = useCallback((id: string) => {
     Alert.alert(
-      'Remove snap',
+      'Remove entry',
       "This will exclude this food from today's totals.",
       [
         { text: 'Cancel', style: 'cancel' },
@@ -37,9 +38,6 @@ export default function FoodSnapsScreen() {
   const renderItem = ({ item }: any) => (
     <Card style={styles.itemCard}>
       <View style={styles.itemRow}>
-        {!!item.imageUri && (
-          <Image source={{ uri: item.imageUri }} style={styles.thumb} />
-        )}
         <View style={styles.itemInfo}>
           <Text style={styles.itemName}>{item.name}</Text>
           <Text style={styles.itemMeta}>
@@ -66,7 +64,7 @@ export default function FoodSnapsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}> 
       <Stack.Screen 
         options={{ 
-          title: 'Food Snaps',
+          title: 'Manual Entries',
           headerShown: true,
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
@@ -78,14 +76,14 @@ export default function FoodSnapsScreen() {
         }} 
       />
 
-      {allExtras.length === 0 ? (
+      {manualExtras.length === 0 ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No snaps yet</Text>
-          <Text style={styles.emptySubtitle}>Use Snap Food to add additional items beyond your plan.</Text>
+          <Text style={styles.emptyTitle}>No manual entries yet</Text>
+          <Text style={styles.emptySubtitle}>Use Manual Entry to add additional items beyond your plan.</Text>
         </View>
       ) : (
         <FlatList
-          data={allExtras}
+          data={manualExtras}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           renderItem={renderItem}
@@ -100,7 +98,6 @@ const styles = StyleSheet.create({
   listContent: { padding: theme.space.lg },
   itemCard: { marginBottom: theme.space.sm },
   itemRow: { flexDirection: 'row', alignItems: 'center', gap: theme.space.md },
-  thumb: { width: 48, height: 48, borderRadius: 8, backgroundColor: theme.color.card },
   itemInfo: { flex: 1 },
   itemName: { fontSize: 16, fontWeight: '600', color: theme.color.ink },
   itemMeta: { fontSize: 12, color: theme.color.muted, marginTop: 2 },
@@ -110,8 +107,5 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 18, fontWeight: '700', color: theme.color.ink, marginBottom: 6 },
   emptySubtitle: { fontSize: 14, color: theme.color.muted, textAlign: 'center' },
 });
-
-
-
 
 
