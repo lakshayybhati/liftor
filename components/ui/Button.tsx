@@ -62,13 +62,13 @@ export function Button({
 
   if (variant === 'primary' && !disabled) {
     return (
-      <Animated.View style={[styles.animatedContainer, { transform: [{ scale: scaleValue }] }]}> 
+      <Animated.View style={[styles.animatedContainer, style, { transform: [{ scale: scaleValue }] }]}> 
         <TouchableOpacity 
           onPress={handlePress}
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
           disabled={disabled} 
-          style={[styles.base, styles.primaryOuter, style]}
+          style={[styles.base, styles.primaryOuter]}
           activeOpacity={1}
         >
           <LinearGradient
@@ -88,13 +88,13 @@ export function Button({
   }
 
   return (
-    <Animated.View style={[styles.animatedContainer, { transform: [{ scale: scaleValue }] }]}> 
+    <Animated.View style={[styles.animatedContainer, style, { transform: [{ scale: scaleValue }] }]}> 
       <TouchableOpacity 
         onPress={handlePress}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
         disabled={disabled}
-        style={[styles.base, styles[size], styles[variant], disabled && styles.disabled, style]}
+        style={[styles.base, styles[size], styles[variant], disabled && styles.disabled]}
         activeOpacity={1}
       >
         <View style={styles.content}>
@@ -118,7 +118,7 @@ const styles = StyleSheet.create({
   primaryOuter: {
     borderRadius: theme.radius.pill,
     backgroundColor: theme.color.accent.primary,
-    padding: 4,
+    padding: 2, // thinner outer border
   },
   small: {
     paddingHorizontal: theme.space.lg,
@@ -149,7 +149,7 @@ const styles = StyleSheet.create({
   },
   outline: {
     backgroundColor: 'transparent',
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: theme.color.accent.primary,
   },
   disabled: {
@@ -164,9 +164,9 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   primaryInner: {
-    // Make inner black body larger for a bolder look
-    paddingVertical: 14,
-    paddingHorizontal: 20,
+    // Make inner black body larger; keep thin outer accent
+    paddingVertical: 16,
+    paddingHorizontal: 22,
   },
   text: {
     fontWeight: '600' as const,
@@ -198,7 +198,8 @@ const styles = StyleSheet.create({
     color: theme.color.muted,
   },
   animatedContainer: {
-    // Empty style for animated container
+    // Ensure container respects pill radius when style prop sets backgroundColor
+    borderRadius: theme.radius.pill,
   },
   content: {
     flexDirection: 'row',

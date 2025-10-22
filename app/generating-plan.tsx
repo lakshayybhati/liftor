@@ -114,26 +114,32 @@ export default function GeneratingPlanScreen() {
       
       setTimeout(() => {
         try {
-          // For Expo development, use more reliable navigation
-          if (__DEV__) {
-            console.log('[GenerateDailyPlan] 🏠 Expo Dev: Using push navigation');
-            router.push('/plan?celebrate=1');
-            // Ensure navigation with replace after a delay
-            setTimeout(() => {
-              router.replace('/plan?celebrate=1');
-            }, 500);
-          } else {
-            console.log('[GenerateDailyPlan] 🚀 Production: Navigating to plan view');
+          // Use push + replace combo for all environments (dev and production)
+          // This is more reliable than replace alone
+          console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation');
+          router.push('/plan?celebrate=1');
+          
+          // Ensure navigation with replace after a delay
+          setTimeout(() => {
+            console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace');
             router.replace('/plan?celebrate=1');
-          }
+          }, 500);
         } catch (navError) {
           console.error('[GenerateDailyPlan] ❌ Navigation error:', navError);
-          // Fallback: Try direct navigation to plan without query param
+          // Fallback 1: Try without celebrate parameter
           setTimeout(() => {
-            router.replace('/plan');
+            console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
+            try {
+              router.push('/plan');
+              setTimeout(() => router.replace('/plan'), 300);
+            } catch (fallbackError) {
+              // Fallback 2: Navigate to home as last resort
+              console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+              router.replace('/(tabs)/home');
+            }
           }, 100);
         }
-      }, 1500); // Increased from 500ms to 1500ms for better reliability
+      }, 2000); // Increased from 1500ms to 2000ms for better reliability in production
 
     } catch (error) {
       // Ensure slowTimer is cleared on error
@@ -203,22 +209,29 @@ export default function GeneratingPlanScreen() {
       
       setTimeout(() => {
         try {
-          // For Expo development, use more reliable navigation
-          if (__DEV__) {
-            console.log('[GenerateDailyPlan] 🏠 Expo Dev (fallback): Using push navigation');
-            router.push('/plan?celebrate=1');
-            setTimeout(() => {
-              router.replace('/plan?celebrate=1');
-            }, 500);
-          } else {
-            console.log('[GenerateDailyPlan] 🚀 Navigating to plan view (fallback)');
+          // Use push + replace combo for all environments (dev and production)
+          console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation (fallback)');
+          router.push('/plan?celebrate=1');
+          setTimeout(() => {
+            console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace (fallback)');
             router.replace('/plan?celebrate=1');
-          }
+          }, 500);
         } catch (navError) {
           console.error('[GenerateDailyPlan] ❌ Navigation error (fallback):', navError);
-          router.replace('/plan');
+          // Fallback 1: Try without celebrate parameter
+          setTimeout(() => {
+            console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
+            try {
+              router.push('/plan');
+              setTimeout(() => router.replace('/plan'), 300);
+            } catch (fallbackError) {
+              // Fallback 2: Navigate to home as last resort
+              console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+              router.replace('/(tabs)/home');
+            }
+          }, 100);
         }
-      }, 1500); // Increased from 500ms to 1500ms
+      }, 2000); // Increased from 1500ms to 2000ms for better reliability in production
     }
   }, [user, getTodayCheckin, getRecentCheckins, addPlan, getCurrentBasePlan, getTodayPlan]);
 

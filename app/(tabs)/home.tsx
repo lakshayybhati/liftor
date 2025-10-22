@@ -158,19 +158,18 @@ export default function HomeScreen() {
   };
 
   const energyTrend = useMemo(() => {
-    // Stable trend: compare average of the latest 3 vs earliest 3 (up to 7 days)
-    const energies = recentCheckins
-      .filter(c => typeof c.energy === 'number')
-      .map(c => c.energy as number)
-      .slice(0, 7)
-      .reverse(); // oldest -> newest
+    // More responsive trend: today's value minus average of previous 3-4 check-ins
+    // Accept legacy string energies as well
+    const values = recentCheckins
+      .map(c => (typeof c.energy === 'number' ? c.energy : parseFloat(String(c.energy ?? ''))))
+      .filter(v => isFinite(v))
+      .slice(0, 7); // most recent first
 
-    if (energies.length < 2) return 0;
-    const group = Math.min(3, Math.floor(energies.length / 2));
-    const early = energies.slice(0, group);
-    const late = energies.slice(-group);
-    const avg = (arr: number[]) => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0;
-    return avg(late) - avg(early);
+    if (values.length < 2) return 0;
+    const todayVal = values[0];
+    const prev = values.slice(1, 5); // up to previous 4 entries
+    const avgPrev = prev.reduce((a, b) => a + b, 0) / prev.length;
+    return todayVal - avgPrev;
   }, [recentCheckins]);
 
   // Determine workout completion status for today
@@ -411,6 +410,7 @@ const styles = StyleSheet.create({
   },
   checkinCard: {
     minHeight: 180,
+    borderRadius: 36,
   },
   checkinContent: {
     alignItems: 'center',

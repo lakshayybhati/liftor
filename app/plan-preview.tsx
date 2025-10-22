@@ -953,14 +953,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: theme.space.md,
+    gap: theme.space.xs,
     marginTop: theme.space.sm,
   },
   cancelButton: {
-    paddingHorizontal: theme.space.xl,
+    paddingHorizontal: 0,
   },
   applyButton: {
-    paddingHorizontal: theme.space.xl,
+    paddingHorizontal: 0,
   },
   editButton: {
     alignSelf: 'center',

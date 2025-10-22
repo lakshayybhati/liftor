@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Platform, Modal, Animated, Easing, BackHandler } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Platform, Modal, Animated, Easing, BackHandler, ActivityIndicator } from 'react-native';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { Dumbbell, Apple, Heart, Sparkles, CheckCircle, Check, Camera, ChevronDown, ChevronLeft } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -53,6 +53,7 @@ export default function PlanScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [showConfetti, setShowConfetti] = useState(celebrate === '1');
   const [confettiAnim] = useState(new Animated.Value(0));
+  const [isWaitingForPlan, setIsWaitingForPlan] = useState(false);
 
   // Set initial tab from URL parameter
   useEffect(() => {
@@ -86,6 +87,39 @@ export default function PlanScreen() {
   const plan = useMemo(() => plans.find(p => p.date === selectedDate), [plans, selectedDate]);
   const dayExtras = useMemo(() => (foodLogs.find(l => l.date === selectedDate)?.extras) || [], [foodLogs, selectedDate]);
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
+
+  // Handle race condition: Wait for plan to be available if navigated from generating-plan
+  useEffect(() => {
+    if (!plan && isToday && celebrate === '1') {
+      console.log('[PlanScreen] Navigated from generation but no plan found yet, waiting...');
+      setIsWaitingForPlan(true);
+      
+      let attempts = 0;
+      const maxAttempts = 8; // Wait up to 4 seconds (8 * 500ms)
+      
+      const checkInterval = setInterval(() => {
+        attempts++;
+        const currentPlan = plans.find(p => p.date === selectedDate);
+        
+        console.log(`[PlanScreen] Waiting attempt ${attempts}/${maxAttempts} - Plan exists:`, currentPlan ? 'YES' : 'NO');
+        
+        if (currentPlan) {
+          console.log('[PlanScreen] ✅ Plan appeared after waiting!');
+          clearInterval(checkInterval);
+          setIsWaitingForPlan(false);
+          return;
+        }
+        
+        if (attempts >= maxAttempts) {
+          console.warn('[PlanScreen] ⚠️ No plan after waiting, staying on plan screen');
+          clearInterval(checkInterval);
+          setIsWaitingForPlan(false);
+        }
+      }, 500);
+      
+      return () => clearInterval(checkInterval);
+    }
+  }, [plan, isToday, celebrate, selectedDate, plans]);
 
   // Load persisted ticks for selected date
   useEffect(() => {
@@ -200,7 +234,7 @@ export default function PlanScreen() {
     if (Platform.OS !== 'web') {
       Haptics.selectionAsync();
     }
-    router.push('/manual-entry');
+    router.push({ pathname: '/snap-food', params: { manual: '1' } as any });
   }, []);
   
 
@@ -655,7 +689,15 @@ export default function PlanScreen() {
           </View>
         </Modal>
         {renderTabBar()}
-        {plan ? renderContent() : (
+        {plan ? renderContent() : isWaitingForPlan ? (
+          <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }}>
+            <Card style={{ padding: theme.space.lg, alignItems: 'center' }}>
+              <ActivityIndicator size="large" color={theme.color.accent.primary} style={{ marginBottom: 12 }} />
+              <Text style={{ fontSize: 16, fontWeight: '600', color: theme.color.ink, marginBottom: 6 }}>Loading your plan...</Text>
+              <Text style={{ color: theme.color.muted, textAlign: 'center' }}>Just a moment while we finalize everything.</Text>
+            </Card>
+          </ScrollView>
+        ) : (
           <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }}>
             <Card style={{ padding: theme.space.lg }}>
               <Text style={{ fontSize: 16, fontWeight: '600', color: theme.color.ink, marginBottom: 6 }}>No plan found</Text>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, TextInput, Alert } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { ChevronLeft, Info } from 'lucide-react-native';
@@ -18,7 +18,7 @@ import type { CheckinMode, CheckinData } from '@/types/user';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
 
 export default function CheckinScreen() {
-  const { addCheckin, getWeightData } = useUserStore();
+  const { addCheckin, getWeightData, basePlans } = useUserStore();
   const mode: CheckinMode = 'PRO';
   const [isSubmitting, setIsSubmitting] = useState(false);
   
@@ -45,6 +45,13 @@ export default function CheckinScreen() {
     workoutIntensity: 5,
   });
 
+  // Local string state to allow decimals while typing (up to 2 dp)
+  const [currentWeightInput, setCurrentWeightInput] = useState('');
+  const clampAlertShownRef = useRef(false);
+
+  // Maximum allowed change per day; scales with days since last weight entry
+  const MAX_WEIGHT_CHANGE_PER_DAY_KG = 5;
+
   const handleSorenessToggle = (area: string) => {
     setCheckinData(prev => ({
       ...prev,
@@ -61,7 +68,6 @@ export default function CheckinScreen() {
       const entitled = await hasActiveSubscription();
       
       // Get base plans to check if user has completed onboarding
-      const basePlans = useUserStore.getState().basePlans;
       const hasBasePlan = basePlans && basePlans.length > 0;
       
       // If user has base plan but no subscription, block access
@@ -87,9 +93,9 @@ export default function CheckinScreen() {
     if (!checkinData.stress) missing.push('Stress');
     if (!checkinData.sleepHrs) missing.push('Hours of Sleep');
     if (!checkinData.wokeFeeling) missing.push('Woke up feeling');
-    if (mode !== 'LOW' && !checkinData.digestion) missing.push('Digestion');
+    if (!checkinData.digestion) missing.push('Digestion');
     // Soreness is optional
-    if ((mode === 'HIGH' || mode === 'PRO') && (checkinData.waterL === undefined || checkinData.waterL === null)) missing.push('Water Yesterday');
+    if (checkinData.waterL === undefined || checkinData.waterL === null) missing.push('Water Yesterday');
 
     if (missing.length > 0) {
       Alert.alert(
@@ -143,6 +149,7 @@ export default function CheckinScreen() {
 
     const rounded = Math.round(estimate * 100) / 100;
     setCheckinData(prev => ({ ...prev, currentWeight: rounded }));
+    setCurrentWeightInput(String(rounded));
   };
 
   // Mode selector removed; defaulting to PRO mode
@@ -307,7 +314,6 @@ export default function CheckinScreen() {
   );
 
   const renderHighModeExtras = () => {
-    if (mode === 'LOW') return null;
 
     return (
       <Card style={styles.sectionCard}>
@@ -322,8 +328,8 @@ export default function CheckinScreen() {
           maximumValue={10}
         />
 
-        {/* Water input only shown in HIGH mode, not PRO (PRO has its own) */}
-        {mode === 'HIGH' && (
+        {/* Water input */}
+        {(
           <View style={styles.waterInputContainer}>
             <View style={styles.labelRow}>
               <Text style={styles.fieldLabel}>Water Yesterday (L) <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
@@ -359,7 +365,7 @@ export default function CheckinScreen() {
           </View>
         )}
 
-        {/* Remove weight input in HIGH mode as requested */}
+        {/* No separate weight input here */}
 
         <View style={styles.toggleContainer}>
           <TouchableOpacity
@@ -397,7 +403,6 @@ export default function CheckinScreen() {
   };
 
   const renderProModeExtras = () => {
-    if (mode !== 'PRO') return null;
 
     return (
       <>
@@ -411,22 +416,95 @@ export default function CheckinScreen() {
                 styles.weightInput,
                 !checkinData.currentWeight && styles.requiredField
               ]}
-              value={checkinData.currentWeight?.toString() || ''}
+              value={currentWeightInput}
               onChangeText={(text) => {
-                const weight = parseFloat(text);
-                setCheckinData(prev => ({ 
-                  ...prev, 
-                  currentWeight: isNaN(weight) ? undefined : weight 
-                }));
+                // Allow only numbers with optional single dot and up to 2 decimals
+                const decimalPattern = /^\d*\.?\d{0,2}$/;
+                if (text === '' || decimalPattern.test(text)) {
+                  let nextText = text;
+                  let numeric = parseFloat(text);
+
+                  if (text) {
+                    // Enforce dynamic bounds based on last recorded weight and elapsed days
+                    const weights = getWeightData?.() || [];
+                    const last = weights.length > 0 ? weights[weights.length - 1] : undefined;
+                    const now = Date.now();
+                    // Only apply dynamic clamp if we have a prior weight; otherwise, allow free typing
+                    let minBound = -Infinity;
+                    let maxBound = Infinity;
+
+                    if (last && isFinite(last.weight) && last.date) {
+                      const lastTime = new Date(last.date).getTime();
+                      const rawDays = (now - lastTime) / (1000 * 60 * 60 * 24);
+                      const daysBetween = isFinite(rawDays) ? Math.max(1, Math.round(rawDays)) : 1;
+                      const allowedDelta = MAX_WEIGHT_CHANGE_PER_DAY_KG * daysBetween;
+                      minBound = last.weight - allowedDelta;
+                      maxBound = last.weight + allowedDelta;
+                    }
+
+                    if (!isNaN(numeric)) {
+                      if (numeric < minBound) {
+                        const clamped = Math.round(minBound * 100) / 100;
+                        numeric = clamped;
+                        nextText = String(clamped);
+                        if (!clampAlertShownRef.current && isFinite(minBound)) {
+                          Alert.alert(
+                            'Too big a change',
+                            `You can change at most ±${MAX_WEIGHT_CHANGE_PER_DAY_KG} kg per day from your last recorded weight.`,
+                            [{ text: 'OK' }]
+                          );
+                          clampAlertShownRef.current = true;
+                        }
+                      } else if (numeric > maxBound) {
+                        const clamped = Math.round(maxBound * 100) / 100;
+                        numeric = clamped;
+                        nextText = String(clamped);
+                        if (!clampAlertShownRef.current && isFinite(maxBound)) {
+                          Alert.alert(
+                            'Too big a change',
+                            `You can change at most ±${MAX_WEIGHT_CHANGE_PER_DAY_KG} kg per day from your last recorded weight.`,
+                            [{ text: 'OK' }]
+                          );
+                          clampAlertShownRef.current = true;
+                        }
+                      } else {
+                        // Back within bounds → allow alerts again
+                        clampAlertShownRef.current = false;
+                      }
+                    }
+                  }
+
+                  setCurrentWeightInput(nextText);
+                  setCheckinData(prev => ({
+                    ...prev,
+                    currentWeight: nextText && !isNaN(numeric) ? numeric : undefined,
+                  }));
+                }
               }}
               placeholder="Enter your current weight"
               placeholderTextColor="#A6A6AD"
               keyboardType="decimal-pad"
               onBlur={async () => {
-                if (checkinData.currentWeight === undefined || checkinData.currentWeight === null) return;
-                const v = await confirmNumericWithinRange(checkinData.currentWeight, NumberSpecs.weightKg);
-                if (v === null) setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
-                else setCheckinData(prev => ({ ...prev, currentWeight: Math.round(v * 100) / 100 }));
+                const input = currentWeightInput.trim();
+                if (!input) {
+                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                  return;
+                }
+                const numeric = parseFloat(input);
+                if (isNaN(numeric)) {
+                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                  setCurrentWeightInput('');
+                  return;
+                }
+                const v = await confirmNumericWithinRange(numeric, NumberSpecs.weightKg);
+                if (v === null) {
+                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                  setCurrentWeightInput('');
+                } else {
+                  const rounded = Math.round(v * 100) / 100;
+                  setCheckinData(prev => ({ ...prev, currentWeight: rounded }));
+                  setCurrentWeightInput(String(rounded));
+                }
               }}
             />
             <View style={styles.assumeRow}>

@@ -7,8 +7,9 @@ import { theme } from '@/constants/colors';
 import { Card } from '@/components/ui/Card';
 import { hasActiveSubscription } from '@/utils/subscription-helpers';
 import { restorePurchases } from '@/utils/subscription-helpers';
-import { Sparkles, Gauge, Camera, HeartPulse, X, Bug } from 'lucide-react-native';
-import { runRevenueCatDiagnostics } from '@/utils/test-revenuecat';
+import { Sparkles, Gauge, Camera, HeartPulse, X } from 'lucide-react-native';
+import { useProfile } from '@/hooks/useProfile';
+import type { Profile } from '@/hooks/useProfile';
 
 type Params = { next?: string; offering?: string; blocking?: string };
 
@@ -19,11 +20,13 @@ export default function PaywallScreen() {
   const [selected, setSelected] = useState<PurchasesPackage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isPurchasing, setIsPurchasing] = useState<boolean>(false);
-  const [usdRates, setUsdRates] = useState<Record<string, number> | null>(null);
+  // USD hints and debug panel removed for production-ready paywall
 
   const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
-  const isProduction = extra.EXPO_PUBLIC_ENVIRONMENT === 'production';
-  const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
+  const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'elite';
+
+  const { data: profile } = useProfile();
+  const goalPhrase = useMemo(() => prettyGoal(profile?.goal ?? null), [profile?.goal]);
 
   const loadOfferings = useCallback(async () => {
     setIsLoading(true);
@@ -108,20 +111,7 @@ export default function PaywallScreen() {
     };
   }, [navigateNext]);
 
-  // Fetch USD-based FX rates to optionally show an approximate USD hint alongside local store prices
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('https://open.er-api.com/v6/latest/USD');
-        const json = await res.json();
-        if (json?.result === 'success' && json?.rates) {
-          setUsdRates(json.rates as Record<string, number>);
-        }
-      } catch {
-        // silent – hint is optional
-      }
-    })();
-  }, []);
+  // Removed USD hint fetch; rely solely on localized store pricing
 
   const { annualPkg, monthlyPkg, discountPct, monthlyFromAnnualText } = useMemo(() => {
     const pkgs = offering?.availablePackages ?? [];
@@ -135,23 +125,7 @@ export default function PaywallScreen() {
     };
   }, [offering]);
 
-  // Optional approximate USD hints for transparency when testing cross-storefronts
-  const monthlyUsdHint = useMemo(() => {
-    if (!offering) return null;
-    const pkgs = offering.availablePackages || [];
-    const [, monthly] = pickAnnualAndMonthly(pkgs);
-    if (!monthly) return null;
-    return approxUSD(Number(monthly.product.price || 0), monthly.product.currencyCode as string | undefined, usdRates);
-  }, [offering, usdRates]);
-
-  const annualUsdPerMonthHint = useMemo(() => {
-    if (!offering) return null;
-    const pkgs = offering.availablePackages || [];
-    const [annual] = pickAnnualAndMonthly(pkgs);
-    if (!annual) return null;
-    const per = Number(annual.product.price || 0) / 12;
-    return approxUSD(per, annual.product.currencyCode as string | undefined, usdRates);
-  }, [offering, usdRates]);
+  // USD hints removed
 
   const onPurchase = async () => {
     if (!selected) return;
@@ -173,20 +147,6 @@ export default function PaywallScreen() {
       Alert.alert('Purchase Error', e?.message || 'Unable to complete purchase.');
     } finally {
       setIsPurchasing(false);
-    }
-  };
-
-
-  const onTestUnlock = () => {
-    if (isProduction) {
-      Alert.alert('Not available', 'Test Unlock is disabled in production.');
-      return;
-    }
-    // Add bypass flag so the next screen skips entitlement check in development
-    if (typeof next === 'string' && next.length > 0) {
-      router.replace({ pathname: next as any, params: { bypass: '1' } as any });
-    } else {
-      router.replace({ pathname: '/generating-base-plan', params: { bypass: '1' } });
     }
   };
 
@@ -217,6 +177,10 @@ export default function PaywallScreen() {
         <Text style={styles.title}>We Will Transform{"\n"}Every Day</Text>
         <Text style={styles.subtitle}>With You <Text style={styles.emoji}>🫵</Text></Text>
 
+        {profile && (
+          <Text style={styles.personalizedIntro}>{`We reviewed your goal to ${goalPhrase}. Join free to unlock your plan.`}</Text>
+        )}
+
         {/* Feature list */}
         <Card style={styles.featuresCard}>
           <FeatureRow icon={<Sparkles color={theme.color.accent.primary} size={18} />} title="Adapts daily to you" subtitle="your workouts and meals change a little every day, based on your check-ins" />
@@ -233,8 +197,8 @@ export default function PaywallScreen() {
               selected={!!selectedIsAnnual || (!selected && !!annualPkg)}
               onPress={() => setSelected(annualPkg)}
               highlight={typeof discountPct === 'number' && discountPct > 0 ? `${discountPct}% OFF` : undefined}
-              priceTop={monthlyFromAnnualText || annualPkg.product.priceString}
-              priceBottom={`Billed at ${annualPkg.product.priceString}/yr${annualUsdPerMonthHint ? ` • ≈ ${annualUsdPerMonthHint}/mo` : ''}`}
+              priceTop={monthlyFromAnnualText || (annualPkg.product.priceString || formatLocalPrice(Number(annualPkg.product.price || 0), annualPkg.product.currencyCode as string | undefined))}
+              priceBottom={`Billed at ${(annualPkg.product.priceString || formatLocalPrice(Number(annualPkg.product.price || 0), annualPkg.product.currencyCode as string | undefined))}/yr`}
             />
           )}
           {monthlyPkg && (
@@ -242,8 +206,8 @@ export default function PaywallScreen() {
               label="Monthly"
               selected={!!selectedIsMonthly || (!selected && !annualPkg)}
               onPress={() => setSelected(monthlyPkg)}
-              priceTop={monthlyPkg.product.priceString + '/mo'}
-              priceBottom={`Billed at ${monthlyPkg.product.priceString}/mo${monthlyUsdHint ? ` • ≈ ${monthlyUsdHint}/mo` : ''}`}
+              priceTop={(monthlyPkg.product.priceString || formatLocalPrice(Number(monthlyPkg.product.price || 0), monthlyPkg.product.currencyCode as string | undefined)) + '/mo'}
+              priceBottom={`Billed at ${(monthlyPkg.product.priceString || formatLocalPrice(Number(monthlyPkg.product.price || 0), monthlyPkg.product.currencyCode as string | undefined))}/mo`}
             />
           )}
           {!annualPkg && !monthlyPkg && (
@@ -262,6 +226,8 @@ export default function PaywallScreen() {
           )}
         </View>
 
+        <FunFactBadge />
+
         <Text style={styles.freeTrial}>
           {selectedIsAnnual ? 'Free for 7 days. Cancel anytime.' : selectedIsMonthly ? 'Free for 3 days. Cancel anytime.' : 'Free trial. Cancel anytime.'}
         </Text>
@@ -276,9 +242,9 @@ export default function PaywallScreen() {
             isPurchasing
               ? 'Processing purchase'
               : selectedIsAnnual
-                ? 'Membership for 7 days free'
+                ? 'Start your 7-day free trial'
                 : selectedIsMonthly
-                  ? 'Membership for 3 days free'
+                  ? 'Start your 3-day free trial'
                   : 'Start free trial'
           }
         >
@@ -286,9 +252,9 @@ export default function PaywallScreen() {
             {isPurchasing
               ? 'Processing…'
               : selectedIsAnnual
-                ? 'Membership for 7 days free'
+                ? 'Start your 7-day free trial'
                 : selectedIsMonthly
-                  ? 'Membership for 3 days free'
+                  ? 'Start your 3-day free trial'
                   : 'Start Free Trial'}
           </Text>
         </TouchableOpacity>
@@ -298,7 +264,7 @@ export default function PaywallScreen() {
           <TouchableOpacity onPress={() => Linking.openURL('https://liftor.app/terms')}>
             <Text style={styles.link}>Terms</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => Linking.openURL('https://liftor.app/privacy')}>
+          <TouchableOpacity onPress={() => Linking.openURL('https://www.liftor.app/privacy-policy')}>
             <Text style={styles.link}>Privacy</Text>
           </TouchableOpacity>
         </View>
@@ -311,26 +277,9 @@ export default function PaywallScreen() {
           <TouchableOpacity onPress={() => Purchases.showManageSubscriptions().catch(() => {})}>
             <Text style={styles.utilityLink}>Manage Subscription</Text>
           </TouchableOpacity>
-          {!isProduction && (
-            <TouchableOpacity onPress={onTestUnlock}>
-              <Text style={[styles.utilityLink, { color: theme.color.accent.primary }]}>Test Unlock</Text>
-            </TouchableOpacity>
-          )}
         </View>
 
-        {!isProduction && (
-          <View style={styles.debugPanel}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Bug color={theme.color.muted} size={16} />
-              <Text style={styles.debugTitle}>Debug</Text>
-            </View>
-            <Text style={styles.debugText}>current: {offering?.identifier || '—'}</Text>
-            <Text style={styles.debugText}>packages: {(offering?.availablePackages || []).map(p => p.identifier).join(', ') || '—'}</Text>
-            <TouchableOpacity onPress={() => runRevenueCatDiagnostics().catch(() => {})} style={styles.debugBtn}>
-              <Text style={styles.debugBtnText}>Run RevenueCat Diagnostics (console)</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+        {/* Debug panel removed for production */}
       </ScrollView>
     </View>
   );
@@ -389,6 +338,21 @@ function extractCurrencySymbol(priceString: string): string {
   return (prefix?.[0] || suffix?.[0] || '$').trim();
 }
 
+// Formats a numeric amount using the user's locale and the storefront's currency code
+function formatLocalPrice(amount: number, currencyCode?: string): string {
+  if (!amount || isNaN(amount)) return '';
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: (currencyCode as string | undefined) || 'USD',
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    // Fallback if Intl formatter doesn't support provided currency
+    return `$${amount.toFixed(2)}`;
+  }
+}
+
 // Returns an approximate USD string (e.g., "$2.99") for a local amount using USD base FX rates
 function approxUSD(amountLocal: number, currencyCode?: string, rates?: Record<string, number> | null): string | null {
   if (!amountLocal || !currencyCode || !rates) return null;
@@ -438,6 +402,34 @@ function PlanOption({ label, priceTop, priceBottom, selected, onPress, highlight
       <View style={[styles.radio, selected ? styles.radioSelected : undefined]} />
     </TouchableOpacity>
   );
+}
+
+function FunFactBadge() {
+  return (
+    <View style={styles.funFactContainer}>
+      <View style={styles.funFactPill}><Text style={styles.funFactPillText}>FUN FACT</Text></View>
+      <View style={styles.funFactBubble}>
+        <Text style={styles.funFactText}>Liftor users are 60% more likely to reach their aesthetic goals</Text>
+      </View>
+    </View>
+  );
+}
+
+function prettyGoal(goal: Profile['goal'] | null): string {
+  switch (goal) {
+    case 'WEIGHT_LOSS':
+      return 'lose fat';
+    case 'MUSCLE_GAIN':
+      return 'build muscle';
+    case 'ENDURANCE':
+      return 'boost endurance';
+    case 'FLEXIBILITY_MOBILITY':
+      return 'move better';
+    case 'GENERAL_FITNESS':
+      return 'get fitter';
+    default:
+      return 'reach your goals';
+  }
 }
 
 const styles = StyleSheet.create({
@@ -606,6 +598,11 @@ const styles = StyleSheet.create({
     color: theme.color.muted,
     marginTop: theme.space.sm,
   },
+  personalizedIntro: {
+    marginTop: 6,
+    textAlign: 'center',
+    color: theme.color.muted,
+  },
   primaryButton: {
     marginTop: theme.space.md,
     backgroundColor: theme.color.accent.primary,
@@ -669,6 +666,36 @@ const styles = StyleSheet.create({
     color: theme.color.accent.primary,
     fontSize: 12,
     fontWeight: '700',
+  },
+  funFactContainer: {
+    marginTop: theme.space.md,
+  },
+  funFactPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2F80ED',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 2,
+  },
+  funFactPillText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  funFactBubble: {
+    marginTop: 6,
+    backgroundColor: '#0F3D2E',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  funFactText: {
+    color: '#E9F6EC',
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '600',
   },
 });
 

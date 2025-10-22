@@ -133,10 +133,24 @@ export default function HistoryScreen() {
     };
 
     const getCompletionRate = () => {
-      // Prefer adherence when available: average adherence across recent plans
+      // Prefer adherence when available: weighted average giving more importance to recent days
       const plansWithAdherence = recentPlans.filter(p => typeof p.adherence === 'number');
       if (plansWithAdherence.length > 0) {
-        const avg = plansWithAdherence.reduce((sum, p) => sum + (p.adherence || 0), 0) / plansWithAdherence.length;
+        // Use weighted average: recent days have more weight
+        // Most recent day has weight 1.0, second most recent 0.9, etc.
+        let weightedSum = 0;
+        let totalWeight = 0;
+        
+        plansWithAdherence.forEach((p, index) => {
+          // Calculate weight: more recent = higher weight
+          const weight = 1 - (index * 0.1); // Decreases by 10% for each day back
+          const actualWeight = Math.max(0.3, weight); // Minimum weight of 0.3
+          
+          weightedSum += (p.adherence || 0) * actualWeight;
+          totalWeight += actualWeight;
+        });
+        
+        const avg = totalWeight > 0 ? weightedSum / totalWeight : 0;
         return Math.round(avg * 100);
       }
 
@@ -213,7 +227,7 @@ export default function HistoryScreen() {
           <Text style={styles.statValue}>
             {(hasPlans || hasCheckins) ? `${statistics.completionRate}%` : '--'}
           </Text>
-          <Text style={styles.statLabel}>Completion</Text>
+          <Text style={styles.statLabel} numberOfLines={1}>Completion</Text>
         </View>
       </Card>
     </View>
@@ -567,6 +581,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: theme.color.muted,
     marginTop: 4,
+    textAlign: 'center',
   },
   chartCard: {
     marginBottom: 20,

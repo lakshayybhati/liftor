@@ -42,7 +42,7 @@ import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel, WorkoutIntensity
 import { theme } from '@/constants/colors';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
-import { Power } from 'lucide-react-native';
+import { Power, Info } from 'lucide-react-native';
 import { BlurView } from 'expo-blur';
 import Svg, { Line } from 'react-native-svg';
 import { confirmNumericWithinRange, NumberSpecs, confirmCaloriesWithBaseline } from '@/utils/number-guards';
@@ -65,6 +65,51 @@ const calculateTDEE = (bmr: number, activityLevel: ActivityLevel): number => {
   const level = ACTIVITY_LEVELS.find(l => l.id === activityLevel);
   const multiplier = level?.multiplier || 1.2;
   return Math.round(bmr * multiplier);
+};
+
+// Small helper to render a label with an Info ("i") icon that shows an explanation
+const LabelWithInfo = ({
+  label,
+  required,
+  infoTitle = 'Why this?',
+  infoText,
+  labelStyle,
+}: {
+  label: string;
+  required?: boolean;
+  infoTitle?: string;
+  infoText: string;
+  labelStyle?: any;
+}) => (
+  <View style={styles.labelRow}>
+    <Text style={labelStyle || styles.inputLabel}>
+      {label}
+      {required ? <Text style={{ color: theme.color.accent.primary }}> *</Text> : null}
+    </Text>
+    <TouchableOpacity
+      onPress={() => Alert.alert(infoTitle, infoText, [{ text: 'OK' }])}
+      accessibilityRole="button"
+      accessibilityLabel={`About ${label}`}
+      style={styles.infoIcon}
+    >
+      <Info color={theme.color.muted} size={16} />
+    </TouchableOpacity>
+  </View>
+);
+
+// Scroll hint component with glass effect using BlurView
+const ScrollHintOverlay = ({ onPress }: { onPress: () => void }) => {
+  return (
+    <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={onPress}>
+      <BlurView intensity={20} tint="light" style={styles.glassCircle}>
+        <Svg width={28} height={28} viewBox="0 0 24 24">
+          <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+          <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+          <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+        </Svg>
+      </BlurView>
+    </TouchableOpacity>
+  );
 };
 
 export default function OnboardingScreen() {
@@ -104,6 +149,7 @@ export default function OnboardingScreen() {
   const [weight, setWeight] = useState('');
   const [activityLevel, setActivityLevel] = useState<ActivityLevel>('Moderately Active');
   const [dailyCalorieTarget, setDailyCalorieTarget] = useState('');
+  const [calorieSource, setCalorieSource] = useState<'auto' | 'manual'>('auto');
   const [showCalorieEdit, setShowCalorieEdit] = useState(false);
   
   // Supplementation & personal needs
@@ -164,9 +210,9 @@ export default function OnboardingScreen() {
     innerScrollRef.current?.scrollToEnd({ animated: true });
   };
 
-  // Calculate calories when body stats change
+  // Calculate calories when body stats change (only if user hasn't manually overridden)
   useEffect(() => {
-    if (age && weight && height && sex && activityLevel) {
+    if (age && weight && height && sex && activityLevel && calorieSource === 'auto') {
       const bmr = calculateBMR(
         parseFloat(weight),
         parseFloat(height),
@@ -180,11 +226,9 @@ export default function OnboardingScreen() {
       if (goal === 'WEIGHT_LOSS') adjusted = Math.round(tdee * 0.85);
       else if (goal === 'MUSCLE_GAIN') adjusted = Math.round(tdee * 1.15);
       
-      if (!showCalorieEdit) {
-        setDailyCalorieTarget(adjusted.toString());
-      }
+      setDailyCalorieTarget(adjusted.toString());
     }
-  }, [age, weight, height, sex, activityLevel, goal, showCalorieEdit]);
+  }, [age, weight, height, sex, activityLevel, goal, calorieSource]);
 
   const handleEquipmentToggle = (item: Equipment) => {
     setEquipment(prev => 
@@ -416,45 +460,59 @@ export default function OnboardingScreen() {
     {
       title: "What's your fitness goal?",
       content: (
-        <View style={styles.optionsContainer}>
-          {GOALS.map((g) => (
-            <TouchableOpacity
-              key={g.id}
-              style={[
-                styles.goalOption,
-                goal === g.id && styles.selectedGoal,
-              ]}
-              onPress={() => setGoal(g.id as Goal)}
-            >
-              <Text style={[
-                styles.goalTitle,
-                goal === g.id && styles.selectedGoalText,
-              ]}>
-                {g.label}
-              </Text>
-              <Text style={[
-                styles.goalDescription,
-                goal === g.id && styles.selectedGoalText,
-              ]}>
-                {g.description}
-              </Text>
-            </TouchableOpacity>
-          ))}
+        <View>
+          <LabelWithInfo
+            label="Fitness Goal"
+            required
+            infoText="Your goal guides your training split and nutrition targets."
+          />
+          <View style={styles.optionsContainer}>
+            {GOALS.map((g) => (
+              <TouchableOpacity
+                key={g.id}
+                style={[
+                  styles.goalOption,
+                  goal === g.id && styles.selectedGoal,
+                ]}
+                onPress={() => setGoal(g.id as Goal)}
+              >
+                <Text style={[
+                  styles.goalTitle,
+                  goal === g.id && styles.selectedGoalText,
+                ]}>
+                  {g.label}
+                </Text>
+                <Text style={[
+                  styles.goalDescription,
+                  goal === g.id && styles.selectedGoalText,
+                ]}>
+                  {g.description}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
       ),
     },
     {
       title: "What equipment do you have?",
       content: (
-        <View style={styles.chipsContainer}>
-          {EQUIPMENT_OPTIONS.map((item) => (
-            <Chip
-              key={item}
-              label={item}
-              selected={equipment.includes(item)}
-              onPress={() => handleEquipmentToggle(item)}
-            />
-          ))}
+        <View>
+          <LabelWithInfo
+            label="Equipment"
+            required
+            infoText="We tailor exercises to what you can access at home or the gym."
+          />
+          <View style={styles.chipsContainer}>
+            {EQUIPMENT_OPTIONS.map((item) => (
+              <Chip
+                key={item}
+                label={item}
+                selected={equipment.includes(item)}
+                onPress={() => handleEquipmentToggle(item)}
+              />
+            ))}
+          </View>
         </View>
       ),
     },
@@ -462,6 +520,11 @@ export default function OnboardingScreen() {
       title: "Your dietary preference?",
       content: (
         <View>
+          <LabelWithInfo
+            label="Dietary Preference"
+            required
+            infoText="We align meal suggestions and macros to your dietary pattern."
+          />
           <View style={styles.chipsContainer}>
             {DIETARY_PREFS.map((pref) => (
               <Chip
@@ -474,7 +537,10 @@ export default function OnboardingScreen() {
             ))}
           </View>
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Foods you prefer or avoid (optional)</Text>
+            <LabelWithInfo
+              label="Foods you prefer or avoid (optional)"
+              infoText="Calling out preferences, allergies, or restrictions helps personalize meal ideas."
+            />
             <TextInput
               style={styles.textInput}
               value={dietaryNotes}
@@ -501,7 +567,11 @@ export default function OnboardingScreen() {
           >
           <View style={styles.statsRow}>
             <View style={styles.statInput}>
-              <Text style={styles.inputLabel}>Age *</Text>
+              <LabelWithInfo
+                label="Age"
+                required
+                infoText="Age improves calorie estimation and training recommendations."
+              />
               <TextInput
                 style={[styles.numberInput, !age.trim() && styles.requiredField]}
                 value={age}
@@ -518,7 +588,11 @@ export default function OnboardingScreen() {
               />
             </View>
             <View style={styles.statInput}>
-              <Text style={styles.inputLabel}>Gender *</Text>
+              <LabelWithInfo
+                label="Gender"
+                required
+                infoText="Sex is used in BMR (calorie) and training volume estimates."
+              />
               <View style={styles.sexButtons}>
                 <TouchableOpacity
                   style={[styles.sexButton, sex === 'Male' && styles.selectedSexButton]}
@@ -538,7 +612,11 @@ export default function OnboardingScreen() {
 
           <View style={styles.statsRow}>
             <View style={styles.statInput}>
-              <Text style={styles.inputLabel}>Height (cm) *</Text>
+              <LabelWithInfo
+                label="Height (cm)"
+                required
+                infoText="Height helps calculate calorie needs and set healthy targets."
+              />
               <TextInput
                 style={[styles.numberInput, !height.trim() && styles.requiredField]}
                 value={height}
@@ -555,11 +633,20 @@ export default function OnboardingScreen() {
               />
             </View>
             <View style={styles.statInput}>
-              <Text style={styles.inputLabel}>Weight (kg) *</Text>
+              <LabelWithInfo
+                label="Weight (kg)"
+                required
+                infoText="Weight is needed for calorie estimation and progress tracking."
+              />
               <TextInput
                 style={[styles.numberInput, !weight.trim() && styles.requiredField]}
                 value={weight}
-                onChangeText={setWeight}
+                onChangeText={(text) => {
+                  const decimalPattern = /^\d*\.?\d{0,2}$/;
+                  if (text === '' || decimalPattern.test(text)) {
+                    setWeight(text);
+                  }
+                }}
                 placeholder="70"
                 placeholderTextColor={theme.color.muted}
                 keyboardType="decimal-pad"
@@ -574,7 +661,10 @@ export default function OnboardingScreen() {
           </View>
 
           <View style={styles.activitySection}>
-            <Text style={styles.inputLabel}>Activity Level</Text>
+            <LabelWithInfo
+              label="Activity Level"
+              infoText="Choose the option that best matches your usual daily movement."
+            />
             {ACTIVITY_LEVELS.map((level) => (
               <TouchableOpacity
                 key={level.id}
@@ -630,11 +720,13 @@ export default function OnboardingScreen() {
 
                       if (dailyCalorieTarget && dailyCalorieTarget.trim()) {
                         const v = await confirmCaloriesWithBaseline(dailyCalorieTarget, baseline, 0.25, 0.5);
-                        if (v === null) setDailyCalorieTarget('');
-                        else setDailyCalorieTarget(String(Math.round(v)));
-                      } else {
-                        // Empty input, restore baseline if available
-                        if (baseline) setDailyCalorieTarget(String(baseline));
+                        if (v !== null) {
+                          setDailyCalorieTarget(String(Math.round(v)));
+                          setCalorieSource('manual');
+                        }
+                      } else if (baseline) {
+                        setDailyCalorieTarget(String(baseline));
+                        setCalorieSource('auto');
                       }
                       setShowCalorieEdit(false);
                     }}
@@ -647,45 +739,41 @@ export default function OnboardingScreen() {
               <Text style={styles.calorieHint}>Tap to adjust if needed</Text>
             </View>
           </ScrollView>
-          {step === 3 && showScrollHint && (
-            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
-              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
-                <Svg width={40} height={40} viewBox="0 0 24 24">
-                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                </Svg>
-              </BlurView>
-            </TouchableOpacity>
-          )}
+          {step === 3 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
     {
       title: "How many days per week can you train?",
       content: (
-        <View style={styles.daysContainer}>
-          {[1, 2, 3, 4, 5, 6, 7].map((days) => (
-            <TouchableOpacity
-              key={days}
-              style={[
-                styles.dayOption,
-                trainingDays === days && styles.selectedDay,
-              ]}
-              onPress={() => {
-                if (days >= 1 && days <= 7) {
-                  setTrainingDays(days);
-                }
-              }}
-            >
-              <Text style={[
-                styles.dayText,
-                trainingDays === days && styles.selectedDayText,
-              ]}>
-                {days}
-              </Text>
-            </TouchableOpacity>
-          ))}
+        <View>
+          <LabelWithInfo
+            label="Training Days"
+            infoText="We build your weekly plan around how many days you can train."
+          />
+          <View style={styles.daysContainer}>
+            {[1, 2, 3, 4, 5, 6, 7].map((days) => (
+              <TouchableOpacity
+                key={days}
+                style={[
+                  styles.dayOption,
+                  trainingDays === days && styles.selectedDay,
+                ]}
+                onPress={() => {
+                  if (days >= 1 && days <= 7) {
+                    setTrainingDays(days);
+                  }
+                }}
+              >
+                <Text style={[
+                  styles.dayText,
+                  trainingDays === days && styles.selectedDayText,
+                ]}>
+                  {days}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
       ),
     },
@@ -700,7 +788,11 @@ export default function OnboardingScreen() {
             onScroll={handleInnerScrollEvent}
             scrollEventThrottle={32}
           >
-          <Text style={styles.sectionLabel}>Current supplements</Text>
+          <LabelWithInfo
+            label="Current supplements"
+            infoText="Knowing your supplements helps us avoid duplicate advice and optimize recovery."
+            labelStyle={styles.sectionLabel}
+          />
           <View style={styles.chipsContainer}>
             {COMMON_SUPPLEMENTS.map((supp) => (
               <Chip
@@ -723,7 +815,13 @@ export default function OnboardingScreen() {
             numberOfLines={2}
           />
 
-          <Text style={[styles.sectionLabel, { marginTop: theme.space.lg }]}>Personal goals</Text>
+          <View style={{ marginTop: theme.space.lg }}>
+            <LabelWithInfo
+              label="Personal goals"
+              infoText="Your personal goals guide coaching tone and focus areas."
+              labelStyle={styles.sectionLabel}
+            />
+          </View>
           <View style={styles.chipsContainer}>
             {PERSONAL_GOALS.map((goal) => (
               <Chip
@@ -736,7 +834,13 @@ export default function OnboardingScreen() {
             ))}
           </View>
 
-          <Text style={[styles.sectionLabel, { marginTop: theme.space.lg }]}>What you feel you lack</Text>
+          <View style={{ marginTop: theme.space.lg }}>
+            <LabelWithInfo
+              label="What you feel you lack"
+              infoText="Telling us where you need support helps shape your program."
+              labelStyle={styles.sectionLabel}
+            />
+          </View>
           <View style={styles.chipsContainer}>
             {PERCEIVED_LACKS.map((lack) => (
               <Chip
@@ -749,17 +853,7 @@ export default function OnboardingScreen() {
             ))}
           </View>
           </ScrollView>
-          {step === 5 && showScrollHint && (
-            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
-              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
-                <Svg width={40} height={40} viewBox="0 0 24 24">
-                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                </Svg>
-              </BlurView>
-            </TouchableOpacity>
-          )}
+          {step === 5 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
@@ -774,7 +868,11 @@ export default function OnboardingScreen() {
             onScroll={handleInnerScrollEvent}
             scrollEventThrottle={32}
           >
-          <Text style={styles.sectionLabel}>Exercises you prefer</Text>
+          <LabelWithInfo
+            label="Exercises you prefer"
+            infoText="We’ll prioritize exercises you enjoy to boost consistency."
+            labelStyle={styles.sectionLabel}
+          />
           <View style={styles.chipsContainer}>
             {PREFERRED_EXERCISES.map((exercise) => (
               <Chip
@@ -787,7 +885,11 @@ export default function OnboardingScreen() {
             ))}
           </View>
 
-          <Text style={styles.sectionLabel}>Exercises to avoid</Text>
+          <LabelWithInfo
+            label="Exercises to avoid"
+            infoText="We’ll avoid these to reduce injury risk and frustration."
+            labelStyle={styles.sectionLabel}
+          />
           <View style={styles.chipsContainer}>
             {AVOID_EXERCISES.map((exercise) => (
               <Chip
@@ -802,7 +904,10 @@ export default function OnboardingScreen() {
 
           <View style={styles.inputRow}>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Preferred training time</Text>
+              <LabelWithInfo
+                label="Preferred training time"
+                infoText="We’ll schedule workouts when you tend to have the most energy."
+              />
               <View style={styles.timeChips}>
                 {TRAINING_TIMES.map((time) => (
                   <TouchableOpacity
@@ -824,7 +929,10 @@ export default function OnboardingScreen() {
               </View>
             </View>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Session length</Text>
+              <LabelWithInfo
+                label="Session length"
+                infoText="Pick the typical time you can dedicate to a session."
+              />
               <View style={styles.sessionLengthContainer}>
                 {SESSION_LENGTHS.map((length) => (
                   <TouchableOpacity
@@ -849,7 +957,10 @@ export default function OnboardingScreen() {
 
           <View style={styles.inputRow}>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Travel days/month</Text>
+              <LabelWithInfo
+                label="Travel days/month"
+                infoText="We’ll plan more flexible training for frequent travel."
+              />
               <TextInput
                 style={styles.numberInput}
                 value={travelDays.toString()}
@@ -865,7 +976,10 @@ export default function OnboardingScreen() {
               />
             </View>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Step target</Text>
+              <LabelWithInfo
+                label="Step target"
+                infoText="Daily steps support recovery and calorie balance."
+              />
               <TextInput
               style={styles.numberInput}
               value={stepTargetInput}
@@ -890,14 +1004,23 @@ export default function OnboardingScreen() {
 
           <View style={styles.inputRow}>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Goal weight (kg) *</Text>
+              <LabelWithInfo
+                label="Goal weight (kg)"
+                required
+                infoText="Your target helps us guide pace and plan adjustments."
+              />
               <TextInput
                 style={[styles.numberInput, !goalWeight.trim() && styles.requiredField]}
                 value={goalWeight}
-                onChangeText={setGoalWeight}
+                onChangeText={(text) => {
+                  const decimalPattern = /^\d*\.?\d{0,2}$/;
+                  if (text === '' || decimalPattern.test(text)) {
+                    setGoalWeight(text);
+                  }
+                }}
                 placeholder={weight ? (parseFloat(weight) - 5).toString() : "65"}
                 placeholderTextColor={theme.color.muted}
-                keyboardType="numeric"
+                keyboardType="decimal-pad"
                 onBlur={async () => {
                   if (!goalWeight.trim()) return;
                   const v = await confirmNumericWithinRange(goalWeight, NumberSpecs.weightKg);
@@ -907,14 +1030,23 @@ export default function OnboardingScreen() {
               />
             </View>
             <View style={styles.inputHalf}>
-              <Text style={styles.inputLabel}>Current weight</Text>
+              <LabelWithInfo
+                label="Current weight"
+                infoText="Shown from earlier body stats to compare with your goal."
+              />
               <Text style={[styles.numberInput, { color: theme.color.muted, textAlignVertical: 'center' }]}>
                 {weight ? `${weight} kg` : 'Not set'}
               </Text>
             </View>
           </View>
 
-          <Text style={[styles.sectionLabel, { marginTop: theme.space.lg }]}>Fasting window</Text>
+          <View style={{ marginTop: theme.space.lg }}>
+            <LabelWithInfo
+              label="Fasting window"
+              infoText="If you fast, we’ll time meals and training accordingly."
+              labelStyle={styles.sectionLabel}
+            />
+          </View>
           <View style={styles.chipsContainer}>
             {FASTING_WINDOWS.map((window) => (
               <Chip
@@ -927,7 +1059,11 @@ export default function OnboardingScreen() {
             ))}
           </View>
 
-          <Text style={styles.sectionLabel}>Meals per day</Text>
+          <LabelWithInfo
+            label="Meals per day"
+            infoText="Choose what’s realistic; we’ll balance macros across meals."
+            labelStyle={styles.sectionLabel}
+          />
           <View style={styles.mealCountContainer}>
             {MEAL_COUNTS.map((count) => (
               <TouchableOpacity
@@ -949,7 +1085,10 @@ export default function OnboardingScreen() {
           </View>
 
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Injuries or limitations</Text>
+            <LabelWithInfo
+              label="Injuries or limitations"
+              infoText="We’ll avoid movements that aggravate existing issues."
+            />
             <TextInput
               style={styles.textInput}
               value={injuries}
@@ -961,21 +1100,30 @@ export default function OnboardingScreen() {
             />
           </View>
 
-          <Text style={styles.sectionLabel}>Workout Intensity Preference</Text>
-          <View style={styles.chipsContainer}>
-            {(['Optimal', 'Ego lifts', 'Recovery focused'] as WorkoutIntensity[]).map((intensity) => (
-              <Chip
-                key={intensity}
-                label={intensity}
-                selected={workoutIntensity === intensity}
-                onPress={() => setWorkoutIntensity(intensity)}
-                color={theme.color.accent.primary}
-              />
-            ))}
+          <View style={{ marginTop: theme.space.lg }}>
+            <LabelWithInfo
+              label="Workout Intensity Preference"
+              infoText="We’ll tune training difficulty and recovery based on your preference."
+              labelStyle={styles.sectionLabel}
+            />
+            <View style={styles.chipsContainer}>
+              {(['Optimal', 'Ego lifts', 'Recovery focused'] as WorkoutIntensity[]).map((intensity) => (
+                <Chip
+                  key={intensity}
+                  label={intensity}
+                  selected={workoutIntensity === intensity}
+                  onPress={() => setWorkoutIntensity(intensity)}
+                  color={theme.color.accent.primary}
+                />
+              ))}
+            </View>
           </View>
 
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Special requests (optional)</Text>
+            <LabelWithInfo
+              label="Special requests (optional)"
+              infoText="Anything we should honor? (e.g., no barbell, religious constraints)"
+            />
             <TextInput
               style={styles.textInput}
               value={specialRequests}
@@ -987,17 +1135,7 @@ export default function OnboardingScreen() {
             />
           </View>
           </ScrollView>
-          {step === 6 && showScrollHint && (
-            <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={handleScrollToEnd}>
-              <BlurView intensity={40} tint="dark" style={styles.blurCircle}>
-                <Svg width={40} height={40} viewBox="0 0 24 24">
-                  <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                  <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                </Svg>
-              </BlurView>
-            </TouchableOpacity>
-          )}
+          {step === 6 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
@@ -1108,7 +1246,7 @@ const styles = StyleSheet.create({
   },
   powerButton: {
     padding: 10,
-    borderRadius: 12,
+    borderRadius: 20,
   },
   scrollContent: {
     flexGrow: 1,
@@ -1374,6 +1512,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: theme.space.sm,
     marginTop: 'auto',
+    paddingTop: theme.space.lg,
     paddingHorizontal: theme.space.sm,
     paddingBottom: theme.space.sm,
     width: '100%',
@@ -1383,7 +1522,9 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   backButton: {
-    flex: 1,
+    flex: 0,
+    minWidth: 100,
+    maxWidth: 120,
   },
   nextButton: {
     flex: 1,
@@ -1407,18 +1548,28 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 16,
+    bottom: 80,
     alignItems: 'center',
     zIndex: 100,
   },
-  blurCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+  glassCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.2)',
     overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.35)',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 8,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 10,
   },
   // New styles for specifics step
   specificsContainer: {
@@ -1484,30 +1635,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    gap: theme.space.sm,
     marginBottom: theme.space.lg,
   },
   mealOption: {
-    width: '48%',
-    paddingVertical: theme.space.md,
-    paddingHorizontal: theme.space.sm,
-    borderRadius: theme.radius.md,
+    width: '48.5%',
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: theme.color.line,
     backgroundColor: theme.color.card,
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 80,
+    marginBottom: 12,
   },
   selectedMeal: {
     borderColor: theme.color.accent.primary,
     backgroundColor: theme.color.accent.primary,
+    borderWidth: 0,
   },
   mealText: {
-    fontSize: 14,
+    fontSize: 18,
     color: theme.color.ink,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   selectedMealText: {
-    color: theme.color.bg,
+    color: '#FFFFFF',
   },
   requiredField: {
     borderColor: theme.color.accent.primary,
@@ -1525,5 +1679,16 @@ const styles = StyleSheet.create({
   requiredButtonText: {
     lineHeight: 16,
     textAlign: 'center',
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.space.xs,
+    marginBottom: theme.space.xs,
+  },
+  infoIcon: {
+    padding: 4,
+    marginLeft: -6,
+    marginTop: -10,
   },
 });

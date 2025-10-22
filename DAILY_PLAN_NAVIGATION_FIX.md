@@ -1,5 +1,7 @@
 # Daily Plan Navigation Fix - Applied Same Expo Fix
 
+⚠️ **SUPERSEDED BY:** `TESTFLIGHT_NAVIGATION_FIX.md` - This fix worked in development but failed in TestFlight production builds. See the new document for the production-ready solution.
+
 ## Problem
 
 After completing check-in, the app generates the daily plan successfully but gets stuck on the loading screen. The plan is saved correctly (visible when reopening the app), but navigation fails in Expo.

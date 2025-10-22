@@ -33,10 +33,13 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
     // Normalize nutrition metrics across all days to ensure targets are enforced
     const days = parsedPlan.days;
     const requiredDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    // Respect manual calorie target from onboarding when provided
+    const normalizedCalories = user.dailyCalorieTarget ?? calculateTDEE(user);
+    const normalizedProtein = calculateProteinTarget(user);
     for (const day of requiredDays) {
       if (days[day]?.nutrition) {
-        days[day].nutrition.total_kcal = calculateTDEE(user);
-        days[day].nutrition.protein_g = calculateProteinTarget(user);
+        days[day].nutrition.total_kcal = normalizedCalories;
+        days[day].nutrition.protein_g = normalizedProtein;
       }
     }
 

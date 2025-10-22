@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform, TextInput, Modal, ScrollView, ActivityIndicator } from 'react-native';
-import { router, Stack } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Haptics from 'expo-haptics';
@@ -37,8 +37,10 @@ interface ManualFoodEntry {
 }
 
 export default function SnapFoodScreen() {
+  const params = useLocalSearchParams<{ manual?: string }>();
   const { addExtraFood } = useUserStore();
   const insets = useSafeAreaInsets();
+  const isManualOnly = params?.manual === '1';
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('back');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -56,10 +58,17 @@ export default function SnapFoodScreen() {
   const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
+    if (isManualOnly) return;
     if (!permission) {
       requestPermission();
     }
-  }, [permission, requestPermission]);
+  }, [permission, requestPermission, isManualOnly]);
+
+  useEffect(() => {
+    if (params?.manual === '1') {
+      setShowManualEntry(true);
+    }
+  }, [params]);
 
   const compressImage = useCallback(async (uri: string): Promise<string> => {
     try {
@@ -339,6 +348,114 @@ export default function SnapFoodScreen() {
     setIsAnalyzingManual(false);
     setManualAnalysisResult(null);
   }, []);
+
+  if (isManualOnly) {
+    return (
+      <View style={styles.container}>
+        <Stack.Screen options={{ title: 'Manual Entry', headerShown: false }} />
+        <View style={[styles.modalContainer, { paddingTop: insets.top }]}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => router.back()}>
+              <X size={24} color={theme.color.ink} />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Manual Entry</Text>
+            <TouchableOpacity 
+              onPress={manualAnalysisResult ? handleAddToExtras : handleAnalyzeManualEntry}
+              disabled={isAnalyzingManual}
+            >
+              <Check size={24} color={theme.color.accent.green} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.modalContent}>
+            <Card style={styles.manualEntryCard}>
+              <Text style={styles.inputLabel}>Food Name</Text>
+              <TextInput
+                style={styles.textInput}
+                value={manualEntry.name}
+                onChangeText={(text) => setManualEntry(prev => ({ ...prev, name: text }))}
+                placeholder="e.g., Grilled chicken breast"
+                placeholderTextColor={theme.color.muted}
+              />
+
+              <Text style={styles.inputLabel}>Portion Size</Text>
+              <TextInput
+                style={styles.textInput}
+                value={manualEntry.portionSize}
+                onChangeText={(text) => setManualEntry(prev => ({ ...prev, portionSize: text }))}
+                placeholder="e.g., 1 piece, 200g, 1 cup"
+                placeholderTextColor={theme.color.muted}
+              />
+
+              <Text style={styles.portionHint}>
+                We&apos;ll use AI to calculate the nutritional information based on the food name and portion size.
+              </Text>
+
+              {!manualAnalysisResult && !isAnalyzingManual && (
+                <Button
+                  title="Calculate Nutrition"
+                  onPress={handleAnalyzeManualEntry}
+                  disabled={!manualEntry.name.trim() || !manualEntry.portionSize.trim()}
+                  style={styles.calculateButton}
+                />
+              )}
+
+              {isAnalyzingManual && (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator size="large" color={theme.color.accent.primary} />
+                  <Text style={styles.loadingText}>Calculating nutrition...</Text>
+                </View>
+              )}
+
+              {manualAnalysisResult && (
+                <View style={styles.analysisResultContainer}>
+                  <View style={styles.analysisHeader}>
+                    <Text style={styles.analysisTitle}>Nutritional Information</Text>
+                    <View style={styles.confidenceBadge}>
+                      <Zap size={16} color={theme.color.accent.yellow} />
+                      <Text style={styles.confidenceText}>
+                        {Math.round(manualAnalysisResult.confidence * 100)}% confident
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.macroGrid}>
+                    <View style={styles.macroItem}>
+                      <Text style={styles.macroValue}>{manualAnalysisResult.totals.kcal}</Text>
+                      <Text style={styles.macroLabel}>Calories</Text>
+                    </View>
+                    <View style={styles.macroItem}>
+                      <Text style={styles.macroValue}>{Math.round(manualAnalysisResult.totals.protein_g)}g</Text>
+                      <Text style={styles.macroLabel}>Protein</Text>
+                    </View>
+                    <View style={styles.macroItem}>
+                      <Text style={styles.macroValue}>{Math.round(manualAnalysisResult.totals.fat_g)}g</Text>
+                      <Text style={styles.macroLabel}>Fat</Text>
+                    </View>
+                    <View style={styles.macroItem}>
+                      <Text style={styles.macroValue}>{Math.round(manualAnalysisResult.totals.carbs_g)}g</Text>
+                      <Text style={styles.macroLabel}>Carbs</Text>
+                    </View>
+                  </View>
+
+                  {manualAnalysisResult.notes && (
+                    <Text style={styles.analysisNotes}>{manualAnalysisResult.notes}</Text>
+                  )}
+
+                  <Button
+                    title="Recalculate"
+                    onPress={() => setManualAnalysisResult(null)}
+                    variant="outline"
+                    style={styles.recalculateButton}
+                  />
+                </View>
+              )}
+            </Card>
+          </ScrollView>
+        </View>
+      </View>
+    );
+  }
 
   if (!permission) {
     return (

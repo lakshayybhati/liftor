@@ -623,11 +623,11 @@ const styles = StyleSheet.create({
     marginTop: theme.space.lg,
   },
   saveButton: {
-    backgroundColor: theme.color.accent.green,
+    backgroundColor: 'transparent',
   },
   prettyButton: {
     borderWidth: 0,
-    borderRadius: 24,
+    borderRadius: theme.radius.pill,
     shadowColor: '#000',
     shadowOpacity: 0.35,
     shadowRadius: 14,
