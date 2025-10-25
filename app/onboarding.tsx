@@ -429,9 +429,9 @@ export default function OnboardingScreen() {
       console.log('[Onboarding] profile sync error', e);
     }
 
-    // After onboarding, go directly to base plan generation
-    // Paywall will be shown 10 seconds after the plan is ready
-    router.replace('/generating-base-plan');
+    // After onboarding, take user directly to Home
+    // Background flows (plan generation) can be triggered from Home later
+    router.replace('/(tabs)/home');
   };
 
   const handleSignOutPress = () => {

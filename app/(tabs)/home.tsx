@@ -17,7 +17,7 @@ import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription
 export default function HomeScreen() {
   const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate } = useUserStore();
   const auth = useAuth();
-  const { data: profile } = useProfile();
+  const { data: profile, isLoading: isProfileLoading } = useProfile();
   const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
   const insets = useSafeAreaInsets();
 
@@ -126,13 +126,29 @@ export default function HomeScreen() {
     router.push('/snap-food');
   }, []);
 
+  // Determine onboarding and subscription status using both local store and backend profile
+  const onboardingCompleteFlag = Boolean(user?.onboardingComplete) || Boolean(profile?.onboarding_complete);
+  const subscriptionActive = Boolean(profile?.subscription_active);
+
   useEffect(() => {
-    if (!isLoading && (user === null || (user && !user.onboardingComplete))) {
+    // Wait for both local store and profile to hydrate before deciding
+    if (isLoading || isProfileLoading) return;
+    if (!onboardingCompleteFlag && !subscriptionActive) {
       router.replace('/onboarding');
     }
-  }, [isLoading, user]);
+  }, [isLoading, isProfileLoading, onboardingCompleteFlag, subscriptionActive]);
 
-  if (isLoading || !user || !user.onboardingComplete) {
+  // Show a simple loading state while hydrating required data
+  if (isLoading || isProfileLoading) {
+    return (
+      <View style={styles.container}>
+        <Text>Loading...</Text>
+      </View>
+    );
+  }
+
+  // If onboarding is not complete and no active subscription, the effect above will redirect
+  if (!onboardingCompleteFlag && !subscriptionActive) {
     return (
       <View style={styles.container}>
         <Text>Loading...</Text>
