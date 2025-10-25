@@ -152,6 +152,9 @@ function RootLayoutNav() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="onboarding" options={{ headerShown: false }} />
       <Stack.Screen name="paywall" options={{ headerShown: false }} />
+      <Stack.Screen name="manage-subscription" options={{ headerShown: false }} />
+      <Stack.Screen name="cancel-retention" options={{ headerShown: false }} />
+      <Stack.Screen name="cancel-reasons" options={{ headerShown: false }} />
       <Stack.Screen name="checkin" options={{ headerShown: true }} />
       <Stack.Screen name="generating-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan" options={{ headerShown: true }} />

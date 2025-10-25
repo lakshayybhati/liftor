@@ -297,6 +297,15 @@ export default function ProfileScreen() {
           </TouchableOpacity>
 
           <Button title={saving ? 'Saving…' : 'Save'} onPress={onSave} disabled={!canSave || saving} icon={<Save color="#fff" size={18} />} />
+
+          {/* Manage Subscription Entry Point */}
+          <TouchableOpacity
+            onPress={() => router.push('/manage-subscription')}
+            accessibilityRole="button"
+            style={{ alignSelf: 'center', marginTop: 8 }}
+          >
+            <Text style={{ color: theme.color.muted, fontSize: 13 }}>Subscription</Text>
+          </TouchableOpacity>
         </View>
       )}
     </View>
