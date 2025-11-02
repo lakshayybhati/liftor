@@ -40,6 +40,8 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
       if (days[day]?.nutrition) {
         days[day].nutrition.total_kcal = normalizedCalories;
         days[day].nutrition.protein_g = normalizedProtein;
+        // Dynamic hydration per day based on workout intensity and session/user factors
+        days[day].nutrition.hydration_l = computeHydrationLiters(user, days[day]?.workout);
       }
     }
 
@@ -51,6 +53,9 @@ export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan
       createdAt: new Date().toISOString(),
       days: constrainedDays,
       isLocked: false,
+      expectedWeeksToGoal: typeof parsedPlan.expectedWeeksToGoal === 'number'
+        ? parsedPlan.expectedWeeksToGoal
+        : estimateWeeksToGoal(user)
     };
 
     console.log('✅ Base plan generated successfully with', Object.keys(basePlan.days).length, 'days');
@@ -166,9 +171,11 @@ function buildComprehensiveUserProfile(user: User): string {
     `Meal Count: ${user.mealCount || 3} meals per day`,
     `Fasting Window: ${user.fastingWindow || 'None'}`,
     
-    // Exercise Preferences
-    user.preferredExercises?.length ? `Preferred Exercises: ${user.preferredExercises.join(', ')}` : null,
-    user.avoidExercises?.length ? `Avoid Exercises: ${user.avoidExercises.join(', ')}` : null,
+    // Intensity & Dietary Notes
+    user.workoutIntensity ? `Workout Intensity Preference: ${user.workoutIntensity}` : null,
+    typeof user.workoutIntensityLevel === 'number' ? `Workout Intensity Level: ${user.workoutIntensityLevel}/10 (${user.workoutIntensityLevel <= 3 ? 'Light effort per session' : user.workoutIntensityLevel <= 6 ? 'Moderate effort per session' : 'High intensity per session'})` : null,
+    user.trainingLevel ? `Training Experience: ${user.trainingLevel} (${user.trainingLevel === 'Beginner' ? '<1 year' : user.trainingLevel === 'Intermediate' ? '1-3 years' : '>3 years'})` : null,
+    user.dietaryNotes ? `Dietary Notes: ${user.dietaryNotes}` : null,
     
     // Supplements & Goals
     user.supplements?.length ? `Supplements: ${user.supplements.join(', ')}` : null,
@@ -182,109 +189,420 @@ function buildComprehensiveUserProfile(user: User): string {
     // Lifestyle Factors
     user.timezone ? `Timezone: ${user.timezone}` : null,
     user.travelDays ? `Travel Days: ${user.travelDays}` : null,
+    // Schedule & routine
+    user.preferredTrainingTime ? `Preferred Training Time: ${user.preferredTrainingTime}` : null,
+    user.wakeTime ? `Wake Time: ${user.wakeTime}` : null,
+    user.sleepTime ? `Sleep Time: ${user.sleepTime}` : null,
+    user.stepTarget ? `Daily Step Target: ${user.stepTarget}` : null,
+    user.checkInReminderTime ? `Check-in Reminder Time: ${user.checkInReminderTime}` : null,
+    typeof user.stressBaseline === 'number' ? `Stress Baseline: ${user.stressBaseline}/10` : null,
+    typeof user.sleepQualityBaseline === 'number' ? `Sleep Quality Baseline: ${user.sleepQualityBaseline}/10` : null,
+    user.budgetConstraints ? `Budget Constraints: ${user.budgetConstraints}` : null,
+    // Program preferences (workout split is auto-selected by AI based on training level, days, and intensity)
+    user.preferredExercises?.length ? `Preferred Exercises: ${user.preferredExercises.join(', ')}` : null,
+    user.avoidExercises?.length ? `Avoid Exercises: ${user.avoidExercises.join(', ')}` : null,
   ].filter(Boolean);
 
   return profile.join('\n');
 }
 
 /**
- * Step 2: AI Prompt Construction for Base Plan
+ * Step 2: HYPER-PERSONALIZED AI Prompt Construction for Base Plan
+ * Reactive microcycle with Yesterday→Today→Tomorrow logic and deep justification
  */
 function constructBasePlanPrompts(user: User, userProfile: string) {
   const targetCalories = user.dailyCalorieTarget || calculateTDEE(user);
   const proteinTarget = calculateProteinTarget(user);
+  const split = getWorkoutSplit(user);
+  const schedule = computeTrainingSchedule(user.trainingDays || 3);
+  const dayNames = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
+  
+  // Calculate session time budget
+  const sessionCap = user.sessionLength || 45;
+  const intensityLevel = user.workoutIntensityLevel || 6;
+  const bodyweight = user.weight || 70;
+  
+  console.log('🎯 Hyper-Personalized Plan Generation:', { 
+    split, 
+    sessionCap, 
+    intensityLevel,
+    trainingDays: user.trainingDays 
+  });
 
-  const systemPrompt = `You are a precise Personal Trainer & Nutrition Specialist.
-Create a COMPLETE 7-Day Base Plan that EXACTLY matches the user's requirements. Keep language concise.
+  const systemPrompt = `You are an elite strength coach and sports nutritionist. Create a REACTIVE, HYPER-PERSONALIZED 7-day microcycle that deeply analyzes and justifies EVERY decision using Yesterday→Today→Tomorrow logic.
 
-CRITICAL INSTRUCTIONS:
-1. You MUST provide ALL 7 days (monday through sunday)
-2. Each day MUST have workout, nutrition, and recovery sections
-3. Return ONLY pure JSON - no markdown, no backticks, no explanations
-4. Complete the ENTIRE response - do not truncate
+⚠️  CRITICAL AUTONOMY REQUIREMENT ⚠️
+You will receive a JSON structure showing REQUIRED FIELDS AND FORMAT ONLY.
+The example exercises, foods, and reasoning text are PLACEHOLDERS prefixed with "[AI: ...]".
+You MUST think independently and generate a completely original plan based on user data.
+DO NOT copy any placeholder text. SELECT, CALCULATE, and JUSTIFY every choice.
 
-=== USER'S EXACT REQUIREMENTS ===
-${userProfile}
+=== CORE USER CONTEXT ===
+Goal: ${user.goal} (optimize every choice toward this)
+Experience: ${user.trainingLevel || 'Beginner'} (${user.trainingLevel === 'Beginner' ? '<1yr' : user.trainingLevel === 'Intermediate' ? '1-3yrs' : '>3yrs'})
+Training Frequency: ${user.trainingDays} days/week
+Session Cap: ${sessionCap} minutes HARD LIMIT (est_time_min must be ≤ ${sessionCap})
+Intensity Preference: ${intensityLevel}/10 (${intensityLevel <= 3 ? 'light effort' : intensityLevel <= 6 ? 'moderate' : 'high intensity'})
+Equipment: ${user.equipment.join(', ')} (ONLY use these)
+Body Weight: ${bodyweight}kg
+Injuries/Limitations: ${user.injuries || 'None'}
+Diet: ${user.dietaryPrefs.join(', ')}
+Meals/Day: ${user.mealCount || 3} (must match exactly)
+Fasting Window: ${user.fastingWindow || 'None'}
+Daily Calories: ${targetCalories} kcal (±5% tolerance: ${Math.round(targetCalories * 0.95)}-${Math.round(targetCalories * 1.05)})
+Daily Protein: ${proteinTarget}g (±5% tolerance: ${Math.round(proteinTarget * 0.95)}-${Math.round(proteinTarget * 1.05)})
+${user.allergies ? `Allergies/Avoid: ${user.allergies}` : ''}
+${user.budgetConstraints ? `Budget: ${user.budgetConstraints}` : ''}
+${user.preferredExercises?.length ? `Preferred Movements: ${user.preferredExercises.join(', ')}` : ''}
+${user.avoidExercises?.length ? `Avoid Exercises: ${user.avoidExercises.join(', ')}` : ''}
 
-=== MANDATORY CONSTRAINTS ===
-🏋️ EQUIPMENT AVAILABLE: ${user.equipment.join(', ')}
-🎯 FITNESS GOAL: ${user.goal}
-📅 TRAINING DAYS: ${user.trainingDays} days per week
-⏱️ SESSION LENGTH: ${user.sessionLength || 45} minutes MAX
-🍽️ DIETARY PREFERENCE: ${user.dietaryPrefs.join(', ')}
-🚫 AVOID EXERCISES: ${user.avoidExercises?.join(', ') || 'None'}
-✅ PREFERRED EXERCISES: ${user.preferredExercises?.join(', ') || 'None'}
-🎯 DAILY CALORIES: ${targetCalories} kcal
-💪 DAILY PROTEIN: ${proteinTarget}g
+=== REACTIVE MICROCYCLE PRINCIPLES ===
 
-=== QUALITY REQUIREMENTS ===
-- Use ONLY equipment from the available list
-- Respect dietary restrictions completely
-- Include preferred exercises when possible
-- Avoid excluded exercises entirely
-- Keep sessions within time limit
-- Make Wednesday and Sunday rest/recovery days
-- Vary workouts throughout the week
+1. YESTERDAY→TODAY→TOMORROW LOGIC (CRITICAL):
+   - Track per-muscle load across the cycle
+   - Day 1 → baseline (fresh state)
+   - Day 2+ → consider what was trained Day N-1
+   - If muscle group hit hard yesterday (high volume/low RIR):
+     → Reduce sets by 20-40% today
+     → Increase RIR by 1-2 points
+     → Prefer machine/isometric variations
+     → Consider complete rest for that muscle
+   - If muscle under-served and soreness low:
+     → Increase volume/frequency
+     → Add compound movements
+     → Lower RIR for progressive overload
+   - Each day sets up tomorrow's capabilities
 
-Return ONLY valid JSON with ALL 7 days using this exact structure:`;
+2. OPTIMAL EXERCISE SELECTION (CRITICAL):
+   - Choose THE MOST EFFECTIVE exercises for user's goal + equipment + experience
+   - Vary rep zones across week: 5-8 (strength), 8-12 (hypertrophy), 12-20 (endurance/pump)
+   - Explicit guidance: RIR (0-5), RPE (6-10), tempo (e.g., "3010"), rest periods (60-180s)
+   - Progressive load recommendations (e.g., "+2.5kg from last week")
+   - 2-3 SUBSTITUTIONS per exercise:
+     a) Unilateral option (address imbalances)
+     b) Grip/stance variation (change stimulus angle)
+     c) Low-impact alternative (for high DOMS days)
 
-  const userRequest = `{
-  "days": {
-    "monday": {
-      "workout": {
-        "focus": ["Primary muscle groups"],
-        "blocks": [
-          {
-            "name": "Warm-up",
-            "items": [{"exercise": "Dynamic stretching", "sets": 1, "reps": "5-8 min", "RIR": 0}]
+3. TIME MANAGEMENT (HARD CONSTRAINT):
+   - Estimate time per exercise: warmup sets + working sets + rest
+   - Total workout est_time_min MUST BE ≤ ${sessionCap} min
+   - Include time for warmup, cool-down, transitions
+   - If over budget: reduce exercises, not quality
+
+4. DAILY INTENSITY LABELING:
+   - Assign intensity: "Deload" | "Light" | "Moderate" | "Hard" | "Peak"
+   - Distribute across week to prevent overtraining
+   - Match intensity to user's ${intensityLevel}/10 preference
+
+5. CONDITIONING INTEGRATION:
+   - Weave goal-appropriate cardio:
+     - Fat loss: HIIT, circuits, finishers
+     - Muscle gain: minimal, low-impact
+     - Endurance: steady-state, tempo runs
+   - Time-efficient placement (supersets, active rest)
+
+6. NUTRITION HYPER-PERSONALIZATION:
+   - Lock to ${user.mealCount || 3} meals (never deviate)
+   - Hit ${targetCalories}±5% kcal and ${proteinTarget}±5%g
+   - Use LOCAL, PRACTICAL foods (${user.dietaryPrefs.join(', ')})
+   - Macro timing:
+     → Pre-workout: carbs 1-2hrs before
+     → Post-workout: protein + carbs within 2hrs
+     → Fat lower around training, higher at night
+   - Honor allergies, budget, cooking complexity
+   - 2-3 swap options per meal (same macros)
+   - Ensure fiber (25-35g) and micronutrients
+   - Hydration: ${Math.round(bodyweight * 0.033)}L base + activity adjustments
+
+7. RECOVERY SPECIFICITY:
+   - Day-specific mobility matching worked tissues
+   - Actionable sleep tactics (not generic)
+   - Gentle cardio/step prescriptions
+   - Stress control options
+   - Empathetic careNotes referencing user's goals
+   - Supplements: ONLY if not in user's list AND relevant to today
+
+8. REASON STRING (MOST CRITICAL):
+   For EACH day, write a comprehensive 3-5 sentence reasoning that EXPLICITLY states:
+   a) What was trained YESTERDAY (specific muscles, sets, intensity)
+   b) Why TODAY's exercise selection, RIR, time allocation fit the user
+   c) How today sets up TOMORROW (muscle recovery, fatigue management)
+   d) Which user data dictated decisions:
+      - Equipment limitations
+      - Meal count requirements
+      - Intensity slider (${intensityLevel}/10)
+      - Injuries/avoid exercises
+      - Session time cap (${sessionCap}min)
+      - IF window timing
+      - Experience level
+   e) Training split justification and weekly balance
+   
+   Make each day's reason UNIQUE and SPECIFIC - reference actual exercises, rep ranges, and user constraints.
+
+=== OUTPUT REQUIREMENTS ===
+- Pure JSON (no markdown, no backticks)
+- Days labeled: day1, day2, day3, day4, day5, day6, day7
+- Include expectedWeeksToGoal
+- Autonomous split/rest placement (balance weekly volume)
+- Same input → same output (deterministic)
+- Progressive volume balance across microcycle
+- Equipment filters enforced
+- All constraints validated
+
+Return ONLY valid JSON matching this structure:`;
+
+  // Build enhanced example with reactive microcycle structure
+  const exampleDays: any = {};
+  dayNames.forEach((day, index) => {
+    const isTraining = schedule[index];
+    const focus = isTraining ? split[index % split.length] : 'Recovery';
+    const prevDayIndex = index === 0 ? 6 : index - 1;
+    const nextDayIndex = (index + 1) % 7;
+    const wasPrevTraining = schedule[prevDayIndex];
+    const isNextTraining = schedule[nextDayIndex];
+    
+    exampleDays[day] = {
+      workout: {
+        focus: [focus],
+        intensity: isTraining ? "Moderate" : "Deload",
+        est_time_min: isTraining ? sessionCap - 5 : 20,
+        blocks: isTraining ? [
+          { 
+            name: "Warm-up", 
+            items: [
+              { 
+                exercise: "Dynamic stretching + movement prep", 
+                sets: 1, 
+                reps: "5-8 min", 
+                RIR: 0,
+                tempo: "controlled",
+                rest_sec: 0,
+                notes: "Activate target muscles, increase core temp"
+              }
+            ] 
           },
-          {
-            "name": "Main Training",
-            "items": [
-              {"exercise": "Exercise name", "sets": 3, "reps": "8-12", "RIR": 2},
-              {"exercise": "Exercise name", "sets": 3, "reps": "10-15", "RIR": 2}
+          { 
+            name: "Main Training", 
+            items: [
+              { 
+                exercise: "[AI: SELECT specific compound from user equipment - e.g., Barbell Squat if gym, DB Goblet Squat if dumbbells]",
+                sets: 4, 
+                reps: "[AI: CHOOSE based on goal - strength: 5-8, hypertrophy: 8-12, endurance: 12-20]", 
+                RIR: 2,
+                RPE: 8,
+                tempo: "[AI: SELECT - e.g., 3010, 2020, 3120]",
+                rest_sec: 120,
+                load_guidance: "[AI: SPECIFY - e.g., 80% 1RM, RPE 8, +2.5kg from last week]",
+                substitutions: [
+                  "[AI: Unilateral variation for THIS exercise - e.g., Single-leg squat, Split squat]",
+                  "[AI: Grip/stance variation for THIS exercise - e.g., Wide stance, Front squat]",
+                  "[AI: Low-impact alternative for THIS exercise - e.g., Leg press, Wall sit]"
+                ],
+                notes: "[AI: Add context - e.g., Progressive overload, Form focus, Volume reduced due to yesterday]"
+              },
+              { 
+                exercise: "[AI: SELECT secondary compound matching focus]", 
+                sets: 3, 
+                reps: "[AI: CHOOSE rep range]", 
+                RIR: 2,
+                RPE: 7,
+                tempo: "[AI: SELECT tempo]",
+                rest_sec: 90,
+                load_guidance: "[AI: SPECIFY load]",
+                substitutions: [
+                  "[AI: Unilateral option]",
+                  "[AI: Alternative equipment]",
+                  "[AI: Variation pattern]"
+                ]
+              },
+              {
+                exercise: "[AI: SELECT isolation matching focus]",
+                sets: 3,
+                reps: "[AI: Higher reps for isolation work]",
+                RIR: 1,
+                RPE: 8,
+                tempo: "[AI: Slower tempo for isolation]",
+                rest_sec: 60,
+                substitutions: [
+                  "[AI: Different angle]",
+                  "[AI: Different tool]",
+                  "[AI: Intensity technique]"
+                ]
+              }
             ]
           },
-          {"name": "Cool-down","items": [{"exercise": "Static stretching", "sets": 1, "reps": "5-10 min", "RIR": 0}]}
-        ],
-        "notes": "Specific training notes (short)"
-      },
-      "nutrition": {
-        "total_kcal": ${targetCalories},
-        "protein_g": ${proteinTarget},
-        "meals": [
-          {
-            "name": "Breakfast",
-            "items": [{"food": "Specific food item", "qty": "Exact quantity"}]
+          { 
+            name: "Conditioning", 
+            items: [
+              {
+                exercise: "Goal-appropriate finisher",
+                sets: 1,
+                reps: "10-15 min",
+                RIR: 3,
+                notes: "Fat loss: HIIT | Muscle gain: light cardio | Endurance: steady state"
+              }
+            ]
           },
-          {
-            "name": "Lunch", 
-            "items": [{"food": "Specific food item", "qty": "Exact quantity"}]
-          },
-          {
-            "name": "Dinner",
-            "items": [{"food": "Specific food item", "qty": "Exact quantity"}]
+          { 
+            name: "Cool-down", 
+            items: [
+              { 
+                exercise: "Static stretching + breathing", 
+                sets: 1, 
+                reps: "5-10 min", 
+                RIR: 0,
+                notes: "Target worked muscles, parasympathetic activation"
+              }
+            ]
+          }
+        ] : [
+          { 
+            name: "Active Recovery", 
+            items: [
+              { exercise: "Light walking or cycling", sets: 1, reps: "20-30 min", RIR: 0, notes: "Zone 2 HR, conversational pace" },
+              { exercise: "Gentle mobility flow", sets: 1, reps: "10-15 min", RIR: 0, notes: "Focus on yesterday's worked tissues" }
+            ]
           }
         ],
-        "hydration_l": 2.5
+        notes: isTraining ? 
+          `Training ${focus}. Managed volume based on ${wasPrevTraining ? 'yesterday\'s training load' : 'fresh state'}. Sets up ${isNextTraining ? 'tomorrow\'s session' : 'recovery period'}.` : 
+          "Active recovery - facilitate repair, manage fatigue"
       },
-      "recovery": {
-        "mobility": ["Specific mobility work"],
-        "sleep": ["Sleep optimization tip"]
-      }
-    },
-    "tuesday": { /* Same structure */ },
-    "wednesday": { /* Same structure */ },
-    "thursday": { /* Same structure */ },
-    "friday": { /* Same structure */ },
-    "saturday": { /* Same structure */ },
-    "sunday": { /* Same structure */ }
-  }
-}
+      nutrition: {
+        total_kcal: targetCalories,
+        protein_g: proteinTarget,
+        meals_per_day: user.mealCount || 3,
+        fiber_g: 30,
+        meals: [
+          { 
+            name: "[AI: Name meal - e.g., Pre-Workout Meal, Breakfast, etc.]", 
+            timing: "[AI: SPECIFY based on training time and IF window]",
+            items: [
+              { food: "[AI: SELECT real food matching diet - e.g., Chicken breast, Paneer, Tofu]", qty: "[AI: CALCULATE quantity - e.g., 150g, 1 cup]", macros: "[AI: ESTIMATE - e.g., 0c/30p/3f]" },
+              { food: "[AI: SELECT complementary food]", qty: "[AI: CALCULATE quantity]", macros: "[AI: ESTIMATE macros]" }
+            ],
+            swaps: [
+              "[AI: Provide swap with similar macros - name specific food + quantity]",
+              "[AI: Budget-friendly alternative - specific food]",
+              "[AI: Quick/meal prep option - specific food]"
+            ]
+          },
+          { 
+            name: "[AI: Name meal 2]", 
+            timing: "[AI: SPECIFY timing]",
+            items: [
+              { food: "[AI: SELECT protein matching diet]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
+              { food: "[AI: SELECT carb source]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
+              { food: "[AI: SELECT vegetables]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" }
+            ],
+            swaps: [
+              "[AI: Different protein within diet constraints]",
+              "[AI: Carb swap - rice/quinoa/potato]",
+              "[AI: Veggie alternative]"
+            ]
+          },
+          { 
+            name: "[AI: Name meal 3]", 
+            timing: "[AI: SPECIFY timing]",
+            items: [
+              { food: "[AI: SELECT protein+fat source]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
+              { food: "[AI: SELECT fiber-rich carb]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" }
+            ],
+            swaps: [
+              "[AI: Fattier protein option]",
+              "[AI: Different prep method]",
+              "[AI: Batch cook friendly]"
+            ]
+          }
+        ],
+        hydration_l: Math.round(bodyweight * 0.033 * 10) / 10,
+        hydration_notes: `Base ${Math.round(bodyweight * 0.033)}L + ${isTraining ? '0.5-1L during training' : '0L (rest day)'} + climate adjustments`
+      },
+      recovery: {
+        mobility: [
+          isTraining ? 
+            `${focus}-specific stretches: target worked muscles (hip flexors, thoracic spine, etc.)` :
+            "Full body flow: gentle yoga, joint circles, breath work"
+        ],
+        sleep: [
+          `Target 7-9 hours (${isTraining ? 'prioritize tonight - muscle repair' : 'maintain consistency'})`,
+          "Actionable: No screens 1hr before bed, cool room (65-68°F), consistent time",
+          `${isNextTraining ? 'Tomorrow is training - ensure quality rest tonight' : 'Recovery continues - allow deep sleep cycles'}`
+        ],
+        steps: isTraining ? "8,000-10,000 (NEAT)" : "10,000-12,000 (active recovery)",
+        stress_control: [
+          "5-10min breathwork or meditation",
+          "Nature exposure if possible",
+          `${wasPrevTraining ? 'Celebrate progress from yesterday' : 'Prepare mentally for upcoming session'}`
+        ],
+        careNotes: isTraining ?
+          `Excellent work on ${focus} today! You challenged yourself with ${focus === 'Push' ? 'chest, shoulders, triceps' : focus === 'Pull' ? 'back, biceps, rear delts' : focus === 'Legs' ? 'quads, hamstrings, glutes' : 'full body patterns'}. Your ${user.goal.toLowerCase().replace('_', ' ')} goal is well-served by this stimulus. ${wasPrevTraining ? 'Note that you trained yesterday, so we managed volume appropriately today.' : 'You came in fresh, allowing quality work.'} ${isNextTraining ? 'Tomorrow continues the split, so prioritize protein and sleep tonight.' : 'Tomorrow is recovery - your body will rebuild stronger.'}` :
+          `Recovery day - your muscles are repairing from ${wasPrevTraining ? 'yesterday\'s ' + split[(prevDayIndex) % split.length] + ' session' : 'the training cycle'}. Light movement accelerates recovery without adding fatigue. ${isNextTraining ? 'Tomorrow you\'ll train ' + split[(nextDayIndex) % split.length] + ', so stay hydrated and mobile today.' : 'Another rest day tomorrow allows complete restoration.'} Remember: growth happens during recovery, not just training.`,
+        supplements: [
+          ...(isTraining ? ["Protein powder post-workout (if not hitting protein through food)"] : []),
+          "Creatine 5g daily (timing flexible)",
+          ...(isTraining ? ["Caffeine pre-workout (optional, 150-300mg if tolerance allows)"] : []),
+          ...(!isTraining ? ["Magnesium glycinate 200-400mg (evening, aids sleep)"] : []),
+          "Omega-3 1-2g daily (with meals, reduce inflammation)"
+        ].filter(s => !user.supplements?.some(us => s.toLowerCase().includes(us.toLowerCase())))
+      },
+      reason: "[AI: WRITE UNIQUE 3-5 SENTENCE REASONING - See autonomy instructions below. Must include: yesterday context, today decisions, tomorrow setup, user data citations, split justification. Be specific with YOUR chosen exercises and foods, not generic terms.]"
+    };
+  });
 
-Create the complete 7-day plan following this exact JSON structure.`;
+  const userRequest = JSON.stringify({
+    expectedWeeksToGoal: estimateWeeksToGoal(user),
+    days: exampleDays
+  }, null, 2);
 
-  return { systemPrompt, userRequest };
+  return { 
+    systemPrompt, 
+    userRequest: `${userRequest}
+
+CRITICAL INSTRUCTIONS FOR AI AUTONOMY:
+
+1. The above JSON is a STRUCTURAL REFERENCE ONLY - showing required fields and format
+2. DO NOT copy the example exercises, foods, or reasoning text
+3. YOU MUST autonomously decide:
+   - Which specific exercises based on user's equipment + goal + experience
+   - Exact rep ranges based on goal (strength: 5-8, hypertrophy: 8-12, endurance: 12-20)
+   - RIR/RPE based on intensity preference (${intensityLevel}/10)
+   - Real food items matching user's diet (${user.dietaryPrefs.join(', ')})
+   - Actual quantities that hit ${targetCalories}kcal and ${proteinTarget}g protein
+   - Equipment-filtered substitutions (only use ${user.equipment.join(', ')})
+   - Unique reasoning for each day that references YOUR exercise choices
+
+4. THINK DEEPLY about:
+   - What did I program yesterday? How does that affect today's muscle selection?
+   - Is this muscle group recovered enough for high volume?
+   - Does this exercise fit the time budget (${sessionCap}min)?
+   - Are these foods realistic and accessible?
+   - Does my reasoning explain the Yesterday→Today→Tomorrow logic?
+
+5. VARY your choices:
+   - Don't repeat the same exercises every day
+   - Rotate food items across meals and days
+   - Use different rep ranges across the week
+   - Adjust RIR based on accumulated fatigue
+
+6. CALCULATE intelligently:
+   - est_time_min must be realistic (warmup + sets × rest + cool-down)
+   - Macro totals must be ±5% of targets
+   - Substitutions must be truly equivalent alternatives
+
+7. BE SPECIFIC in reasoning:
+   - Name the actual exercises you chose (not "compound movement")
+   - State the actual muscles worked (not "upper body")
+   - Reference the user's actual data (equipment, meals/day, intensity)
+
+Example of GOOD reasoning:
+"Day 3 follows Pull training yesterday where we hit back/biceps with 18 total sets (RIR 2). Today's Leg workout uses barbell squats, Romanian deadlifts, and Bulgarian split squats (your gym equipment) for 42 minutes (under 45min cap). These compound movements target your muscle gain goal at intermediate level. Volume is high (20 sets) since legs are fresh, but RIR is 2-3 per your 6/10 intensity preference. Three meals (breakfast 10am per 16:8 IF window, lunch 2pm, dinner 8pm) distribute 2050kcal and 152g protein via chicken, rice, vegetables (non-veg diet). Tomorrow is recovery, so tonight's protein and 8hrs sleep are critical for quad/hamstring/glute repair."
+
+Example of BAD reasoning (don't do this):
+"This is a training day focusing on the split. Exercises match your goals. Nutrition hits targets."
+
+CREATE A COMPLETELY NEW, THOUGHTFUL PLAN. USE THE STRUCTURE BUT THINK INDEPENDENTLY.` 
+  };
 }
 
 /**
@@ -324,6 +642,9 @@ ADJUSTMENT RULES:
 - Great Recovery: Allow +1 set on primaries or slightly tighter RIR
 - Diet Adherence Issues: Keep same meals but adjust portions
  - If Special Request is present, explicitly incorporate it (e.g., focus area, time cap, joint-friendly swaps) without violating safety/time constraints
+
+RELEVANCE FILTER (CRITICAL):
+- Ignore any unrelated content in specialRequest or check-in notes (e.g., app/account/support requests, jokes, money, code, random Q&A, URLs, personal identifiers). Do NOT answer it. Only adjust the plan using relevant fitness/nutrition/recovery data.
 
 Return ONLY the adjusted plan in this exact JSON structure:`;
 
@@ -878,7 +1199,7 @@ function findPartialJSON(response: string): string | null {
 }
 
 /**
- * Validate plan structure with detailed error reporting
+ * NEW SIMPLIFIED VALIDATION - Check for complete data including quantities
  */
 function validatePlanStructure(plan: any): { isValid: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -893,7 +1214,7 @@ function validatePlanStructure(plan: any): { isValid: boolean; errors: string[] 
     return { isValid: false, errors };
   }
 
-  const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  const requiredDays = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
   for (const day of requiredDays) {
     if (!plan.days[day]) {
       errors.push(`Missing ${day} in plan`);
@@ -901,25 +1222,70 @@ function validatePlanStructure(plan: any): { isValid: boolean; errors: string[] 
     }
 
     const dayPlan = plan.days[day];
+    
+    // Check workout structure
     if (!dayPlan.workout) {
       errors.push(`Missing workout for ${day}`);
+    } else {
+      if (!dayPlan.workout.focus || !Array.isArray(dayPlan.workout.focus)) {
+        errors.push(`${day}: missing workout focus`);
+      }
+      if (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks)) {
+        errors.push(`${day}: missing workout blocks`);
+      }
     }
+    
+    // Check nutrition structure WITH quantity validation
     if (!dayPlan.nutrition) {
       errors.push(`Missing nutrition for ${day}`);
+    } else {
+      if (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals)) {
+        errors.push(`${day}: missing meals array`);
+      } else {
+        // Validate each meal has items with BOTH food AND qty
+        dayPlan.nutrition.meals.forEach((meal: any, idx: number) => {
+          if (!meal.name) {
+            errors.push(`${day}: meal ${idx} missing name`);
+          }
+          if (!meal.items || !Array.isArray(meal.items)) {
+            errors.push(`${day}: meal "${meal.name || idx}" missing items`);
+          } else {
+            meal.items.forEach((item: any, itemIdx: number) => {
+              if (!item.food) {
+                errors.push(`${day} ${meal.name} item ${itemIdx}: missing food name`);
+              }
+              if (!item.qty) {
+                errors.push(`${day} ${meal.name} item ${itemIdx}: missing quantity`);
+              }
+            });
+          }
+        });
+      }
+      
+      if (typeof dayPlan.nutrition.total_kcal !== 'number') {
+        errors.push(`${day}: missing or invalid total_kcal`);
+      }
+      if (typeof dayPlan.nutrition.protein_g !== 'number') {
+        errors.push(`${day}: missing or invalid protein_g`);
+      }
     }
+    
+    // Check recovery structure
     if (!dayPlan.recovery) {
       errors.push(`Missing recovery for ${day}`);
+    } else {
+      if (!dayPlan.recovery.mobility || !Array.isArray(dayPlan.recovery.mobility)) {
+        errors.push(`${day}: missing mobility array`);
+      }
+      if (!dayPlan.recovery.sleep || !Array.isArray(dayPlan.recovery.sleep)) {
+        errors.push(`${day}: missing sleep array`);
+      }
     }
+  }
 
-    // Check workout structure
-    if (dayPlan.workout && (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks))) {
-      errors.push(`Invalid workout blocks for ${day}`);
-    }
-
-    // Check nutrition structure
-    if (dayPlan.nutrition && (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals))) {
-      errors.push(`Invalid nutrition meals for ${day}`);
-    }
+  console.log(`✅ Validation complete: ${errors.length === 0 ? 'PASSED' : `FAILED with ${errors.length} errors`}`);
+  if (errors.length > 0 && errors.length <= 10) {
+    console.log('First errors:', errors.slice(0, 10));
   }
 
   return { isValid: errors.length === 0, errors };
@@ -934,7 +1300,7 @@ function repairPlanStructure(plan: any): any {
   }
 
   const repairedPlan = { ...plan };
-  const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  const requiredDays = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
 
   // Count how many days are missing
   const missingDays = requiredDays.filter(day => !repairedPlan.days[day]);
@@ -953,9 +1319,9 @@ function repairPlanStructure(plan: any): any {
 
     // Ensure workout structure
     if (!dayPlan.workout) {
-      dayPlan.workout = createMinimalWorkout();
+      dayPlan.workout = createMinimalWorkout(day, day === 'wednesday' || day === 'sunday');
     } else if (!dayPlan.workout.blocks || !Array.isArray(dayPlan.workout.blocks)) {
-      dayPlan.workout.blocks = [createMinimalWorkoutBlock()];
+      dayPlan.workout.blocks = [createMinimalWorkoutBlock(dayPlan.workout?.focus?.[0] || 'Full Body')];
     }
 
     // Ensure nutrition structure
@@ -967,7 +1333,9 @@ function repairPlanStructure(plan: any): any {
 
     // Ensure recovery structure
     if (!dayPlan.recovery) {
-      dayPlan.recovery = createMinimalRecovery();
+      const focus = dayPlan.workout?.focus?.[0] || 'General';
+      const isRestDay = day === 'wednesday' || day === 'sunday';
+      dayPlan.recovery = createMinimalRecovery(isRestDay, focus, day);
     }
   }
 
@@ -975,9 +1343,18 @@ function repairPlanStructure(plan: any): any {
 }
 
 function createMinimalDayPlan(day: string, existingDays?: any) {
-  // Determine if this should be a rest day or active day
+  // Determine provisional rest based on existing distribution (no fixed weekdays)
   const isWeekend = day === 'saturday' || day === 'sunday';
-  const isRestDay = day === 'wednesday' || day === 'sunday';
+  let isRestDay = false;
+  try {
+    // If existing days show most days as training, pick occasional recovery on weekends else none
+    if (existingDays) {
+      const values = Object.values(existingDays) as any[];
+      const trainingCount = values.filter(v => v?.workout && (v.workout.focus || []).join('').toLowerCase() !== 'recovery').length;
+      const recoveryCount = values.length - trainingCount;
+      isRestDay = recoveryCount < 2 ? (day === 'sunday') : false; // keep minimal recovery without forcing Wed
+    }
+  } catch {}
   
   // Try to extract patterns from existing days if available
   let targetCalories = 2000;
@@ -1001,11 +1378,16 @@ function createMinimalDayPlan(day: string, existingDays?: any) {
     }
   }
   
-  return {
-    workout: createMinimalWorkout(day, isRestDay),
+  const workout = createMinimalWorkout(day, isRestDay);
+  const focus = workout.focus?.[0] || 'General';
+  
+  const base = {
+    workout,
     nutrition: createMinimalNutrition(targetCalories, targetProtein),
-    recovery: createMinimalRecovery(isRestDay)
-  };
+    recovery: createMinimalRecovery(isRestDay, focus, day)
+  } as any;
+  
+  return base;
 }
 
 function createMinimalWorkout(day: string, isRestDay: boolean) {
@@ -1037,12 +1419,14 @@ function createMinimalWorkout(day: string, isRestDay: boolean) {
   const workoutFocus: Record<string, string[]> = {
     monday: ['Upper Body', 'Push'],
     tuesday: ['Lower Body', 'Legs'],
+    wednesday: ['Full Body'],
     thursday: ['Upper Body', 'Pull'],
     friday: ['Full Body', 'Conditioning'],
-    saturday: ['Core', 'Flexibility']
+    saturday: ['Core', 'Flexibility'],
+    sunday: ['Recovery']
   };
   
-  const focus = workoutFocus[day] || ['General Fitness'];
+  const focus = isRestDay ? ['Recovery'] : (workoutFocus[day] || ['General Fitness']);
   
   return {
     focus,
@@ -1107,17 +1491,17 @@ function createMinimalNutrition(calories: number = 2000, protein: number = 150) 
       {
         name: 'Lunch',
         items: [
-          { food: 'Grilled chicken breast', qty: '150g' },
-          { food: 'Brown rice', qty: '1 cup' },
-          { food: 'Mixed vegetables', qty: '2 cups' }
+          { food: 'Chicken breast / Paneer / Tofu', qty: '150-200g' },
+          { food: 'Brown rice / Quinoa / Roti', qty: '1 cup / 2 rotis' },
+          { food: 'Mixed vegetables (real items)', qty: '2 cups' }
         ]
       },
       {
         name: 'Dinner',
         items: [
-          { food: 'Lean protein', qty: '150g' },
-          { food: 'Sweet potato', qty: '1 medium' },
-          { food: 'Salad', qty: '2 cups' }
+          { food: 'Egg whites / Fish / Paneer / Tofu', qty: '150-200g' },
+          { food: 'Sweet potato / Rice', qty: '1 medium / 1 cup' },
+          { food: 'Salad (cucumber, tomato, greens)', qty: '2 cups' }
         ]
       }
     ],
@@ -1135,7 +1519,7 @@ function createMinimalMeal() {
   };
 }
 
-function createMinimalRecovery(isRestDay: boolean = false) {
+function createMinimalRecovery(isRestDay: boolean = false, focus: string = 'General', dayName: string = '') {
   if (isRestDay) {
     return {
       mobility: [
@@ -1147,9 +1531,107 @@ function createMinimalRecovery(isRestDay: boolean = false) {
         '8-9 hours recommended',
         'Focus on recovery and relaxation',
         'Avoid intense activities'
-      ]
+      ],
+      careNotes: 'Easy day. Focus on deep breathing, slow walks, sunlight exposure, and unwind before bed.',
+      supplements: ['Magnesium glycinate 200-400mg (evening)', 'Electrolytes if sweating']
     };
   }
+  
+  // Generate day-specific careNotes based on focus
+  const careNotesByFocus: Record<string, string[]> = {
+    'Push': [
+      'Chest and shoulders crushed it today! Ice those shoulders if feeling tight.',
+      'Push day done right! Your chest is going to thank you tomorrow—stay hydrated.',
+      'Strong pressing today! Make sure to stretch your pecs and front delts tonight.'
+    ],
+    'Pull': [
+      'Back day = best day! Your lats are getting wider with every rep.',
+      'Pull day complete! Focus on back stretches to keep those gains.',
+      'Great pulling work today! Your back is growing stronger—keep it up.'
+    ],
+    'Legs': [
+      'Leg day conquered! Tomorrow you walk with pride (and maybe a limp).',
+      'Quads and glutes got the work they needed today. Protein up and rest well!',
+      'Beast mode on legs today! Stay mobile and stretch those hamstrings tonight.'
+    ],
+    'Full Body': [
+      'Full body smashed! You hit everything today—time to refuel and recover.',
+      'Total body trained! Great balance of upper and lower work today.',
+      'Full body flow complete! Your entire system got the stimulus it needed.'
+    ],
+    'Upper Body': [
+      'Upper body looking solid! Keep those shoulders healthy with good stretching.',
+      'Arms, chest, and back worked! Nice balance today—recover smart.',
+      'Top half trained well! Remember to roll out those tight spots.'
+    ],
+    'Lower Body': [
+      'Lower body beast mode! Stairs are your enemy tomorrow, but gains are your friend.',
+      'Legs and glutes activated! Stay mobile and keep protein high tonight.',
+      'Lower half loaded up! Great work—now stretch and hydrate.'
+    ],
+    'Recovery': [
+      'Active recovery day! Movement heals—keep it light and feel great.',
+      'Recovery work done! Your body is thanking you for this easy day.',
+      'Smart recovery! Light movement keeps the blood flowing and muscles happy.'
+    ],
+    'Pump': [
+      'Pump work looking good! Those muscles are filled with blood and nutrients.',
+      'Hypertrophy focus today! Volume work done right—let it grow.',
+      'Pump session complete! High reps = high gains. Rest and repeat.'
+    ]
+  };
+
+  // Generate day-specific supplements based on focus
+  const supplementsByFocus: Record<string, string[]> = {
+    'Push': [
+      'Collagen 10g (post-workout) for joint health',
+      'Whey protein 25-30g (within 1hr)',
+      'Magnesium glycinate 200mg (evening)'
+    ],
+    'Pull': [
+      'Omega-3 2-3g (with meals) for back inflammation',
+      'Whey protein 25-30g (post-workout)',
+      'Vitamin D3 2000-4000 IU (morning)'
+    ],
+    'Legs': [
+      'BCAAs 5-10g (during/post workout)',
+      'Magnesium 400mg (evening) for muscle soreness',
+      'Creatine 5g (any time)'
+    ],
+    'Full Body': [
+      'Whey protein 25-30g (post-workout)',
+      'Omega-3 2g (with meals)',
+      'Zinc 15-30mg (evening)'
+    ],
+    'Upper Body': [
+      'Collagen 10g (post-workout)',
+      'Whey protein 25g (within 1hr)',
+      'Fish oil 2g (with meals)'
+    ],
+    'Lower Body': [
+      'Magnesium glycinate 300mg (evening)',
+      'BCAAs 5g (post-workout)',
+      'Tart cherry juice (before bed) for soreness'
+    ],
+    'Recovery': [
+      'Magnesium glycinate 200-400mg (evening)',
+      'Electrolytes (morning)',
+      'Turmeric 500mg (with meals) for inflammation'
+    ],
+    'Pump': [
+      'L-Citrulline 6-8g (pre-workout)',
+      'Whey protein 25-30g (post-workout)',
+      'Creatine 5g (any time)'
+    ]
+  };
+
+  const focusKey = Object.keys(careNotesByFocus).find(k => focus.includes(k)) || 'Full Body';
+  const careOptions = careNotesByFocus[focusKey];
+  const suppOptions = supplementsByFocus[focusKey];
+  
+  // Use hash of day name to consistently pick same option for same day (but different across days)
+  const dayHash = dayName ? dayName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) : 0;
+  const careNote = careOptions[dayHash % careOptions.length];
   
   return {
     mobility: [
@@ -1159,8 +1641,55 @@ function createMinimalRecovery(isRestDay: boolean = false) {
     sleep: [
       '7-8 hours minimum',
       'Consistent sleep schedule'
-    ]
+    ],
+    careNotes: careNote,
+    supplements: suppOptions
   };
+}
+
+// Ensure recovery extras present even if AI omits them
+function ensureRecoveryExtras(recovery: any, isRest: boolean, focus: string = 'General', dayName: string = ''): any {
+  const base = recovery || {};
+  const hasNotes = typeof base.careNotes === 'string' && base.careNotes.trim().length > 0;
+  const hasSupps = Array.isArray(base.supplements) && base.supplements.length > 0;
+  if (hasNotes && hasSupps) return base;
+  const fallback = createMinimalRecovery(isRest, focus, dayName);
+  const merged = {
+    ...base,
+    careNotes: hasNotes ? base.careNotes : fallback.careNotes,
+    supplements: hasSupps ? base.supplements : fallback.supplements,
+  } as any;
+  // Attach weekly-level supplements card metadata (current + add-ons) on first pass
+  if (!merged.supplementCard) {
+    merged.supplementCard = {
+      current: [],
+      addOns: [],
+    };
+  }
+  return merged;
+}
+
+// Generates a concise human reason explaining why this day's plan fits the user
+function buildDayReason(params: {
+  day: string;
+  focus: string;
+  user: User;
+  sessionLength: number;
+  equipment: string[];
+  primaryGoal: string;
+  personalGoals: string[];
+  specialRequests: string;
+}): string {
+  const { day, focus, user, sessionLength, equipment, primaryGoal, personalGoals, specialRequests } = params;
+  const dayLabel = day.charAt(0).toUpperCase() + day.slice(1);
+  const eq = equipment.join(', ') || 'Bodyweight';
+  const goals = (personalGoals || []).join(', ');
+  const sr = (specialRequests || '').trim();
+  const extras = [] as string[];
+  if (goals) extras.push(`keeps your goals (${goals}) front and center`);
+  if (sr) extras.push(`respects your request: ${sr}`);
+  const extraText = extras.length ? ` and ${extras.join(' and ')}` : '';
+  return `${dayLabel} focuses on ${focus} to accelerate your ${primaryGoal.toLowerCase().replace('_',' ')} goal. It’s built for ${sessionLength} min with your equipment (${eq})${extraText}. Recovery tips and supplements are tuned to today’s workload so you bounce back stronger.`;
 }
 
 /**
@@ -1306,38 +1835,99 @@ function repairDailyPlanStructure(plan: any): any {
 }
 
 /**
- * Adaptive Fallback System for Base Plan
+ * NEW SIMPLIFIED FALLBACK - Uses same logic as main generation
  */
 function generateAdaptiveBasePlan(user: User): WeeklyBasePlan {
-  console.log('🔄 Generating adaptive base plan fallback...');
+  console.log('🔄 Generating SIMPLIFIED fallback plan...');
   
   const targetCalories = user.dailyCalorieTarget || calculateTDEE(user);
   const proteinTarget = calculateProteinTarget(user);
-  const hasGym = user.equipment.includes('Gym');
-  const hasWeights = user.equipment.some(eq => ['Dumbbells', 'Barbell', 'Gym'].includes(eq));
-  
-  // Create adaptive workout split based on training days
-  const workoutSplit = createWorkoutSplit(user.trainingDays);
+  const split = getWorkoutSplit(user);
+  const schedule = computeTrainingSchedule(user.trainingDays || 3);
+  const dayNames = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
+  const dietary = user.dietaryPrefs.includes('Vegetarian') ? 'vegetarian' : 
+                  user.dietaryPrefs.includes('Eggitarian') ? 'eggitarian' : 'nonveg';
   
   const days: any = {};
-  const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   
   dayNames.forEach((day, index) => {
-    const isTrainingDay = index < user.trainingDays;
-    const focus = isTrainingDay ? workoutSplit[index % workoutSplit.length] : 'Recovery';
+    const isTraining = schedule[index];
+    const focus = isTraining ? split[index % split.length] : 'Recovery';
     
     days[day] = {
-      workout: createAdaptiveWorkout(focus, user.equipment, user.sessionLength || 45, isTrainingDay),
-      nutrition: createAdaptiveNutrition(targetCalories, proteinTarget, user.dietaryPrefs, user.mealCount || 3),
-      recovery: createAdaptiveRecovery(isTrainingDay)
+      workout: {
+        focus: [focus],
+        intensity: isTraining ? "Moderate" : "Low",
+        blocks: isTraining ? [
+          { name: "Warm-up", items: [{ exercise: "Dynamic stretching", sets: 1, reps: "5-8 min", RIR: 0 }] },
+          { name: "Main Training", items: [
+            { exercise: "Push-ups", sets: 3, reps: "8-12", RIR: 2 },
+            { exercise: "Bodyweight squats", sets: 3, reps: "12-15", RIR: 2 },
+            { exercise: "Plank", sets: 3, reps: "30-45 sec", RIR: 1 }
+          ]},
+          { name: "Cool-down", items: [{ exercise: "Static stretching", sets: 1, reps: "5-10 min", RIR: 0 }] }
+        ] : [
+          { name: "Recovery", items: [
+            { exercise: "Light walking", sets: 1, reps: "20-30 min", RIR: 0 },
+            { exercise: "Gentle stretching", sets: 1, reps: "10-15 min", RIR: 0 }
+          ]}
+        ],
+        notes: isTraining ? "Fallback training day - adjust exercises based on equipment" : "Recovery and light movement"
+      },
+      nutrition: {
+        total_kcal: targetCalories,
+        protein_g: proteinTarget,
+        meals_per_day: user.mealCount || 3,
+        meals: [
+          { 
+            name: "Breakfast", 
+            items: dietary === 'vegetarian' 
+              ? [{ food: "Oats", qty: "1/2 cup" }, { food: "Banana", qty: "1 medium" }, { food: "Almonds", qty: "10 pieces" }]
+              : dietary === 'eggitarian'
+              ? [{ food: "Eggs", qty: "2 whole" }, { food: "Whole wheat toast", qty: "2 slices" }, { food: "Orange juice", qty: "1 glass" }]
+              : [{ food: "Eggs", qty: "3 whole" }, { food: "Whole wheat toast", qty: "2 slices" }, { food: "Banana", qty: "1 medium" }]
+          },
+          { 
+            name: "Lunch", 
+            items: dietary === 'vegetarian'
+              ? [{ food: "Dal (lentils)", qty: "1 cup" }, { food: "Rice", qty: "1 cup" }, { food: "Mixed vegetables", qty: "2 cups" }]
+              : dietary === 'eggitarian'
+              ? [{ food: "Egg curry", qty: "2 eggs" }, { food: "Rice", qty: "1 cup" }, { food: "Salad", qty: "2 cups" }]
+              : [{ food: "Chicken breast", qty: "150g" }, { food: "Rice", qty: "1 cup" }, { food: "Vegetables", qty: "2 cups" }]
+          },
+          { 
+            name: "Dinner", 
+            items: dietary === 'vegetarian'
+              ? [{ food: "Paneer", qty: "100g" }, { food: "Roti", qty: "2 pieces" }, { food: "Salad", qty: "2 cups" }]
+              : dietary === 'eggitarian'
+              ? [{ food: "Egg whites", qty: "4 whites" }, { food: "Sweet potato", qty: "1 medium" }, { food: "Salad", qty: "2 cups" }]
+              : [{ food: "Fish", qty: "150g" }, { food: "Quinoa", qty: "1 cup" }, { food: "Salad", qty: "2 cups" }]
+          }
+        ],
+        hydration_l: 2.5
+      },
+      recovery: {
+        mobility: [isTraining ? "Post-workout stretching (10 min)" : "Full body mobility (15 min)"],
+        sleep: ["Aim for 7-9 hours", "Consistent bedtime"],
+        careNotes: isTraining 
+          ? `${focus} training completed today. Focus on recovery and nutrition to support muscle growth.`
+          : "Recovery day - prioritize rest, hydration, and light movement to prepare for your next training session.",
+        supplements: isTraining 
+          ? ["Protein powder (post-workout)", "Creatine (5g daily)"]
+          : ["Magnesium glycinate (evening)", "Omega-3 (with meals)"]
+      },
+      reason: `${day.charAt(0).toUpperCase() + day.slice(1)} is ${isTraining ? 'a training day' : 'a recovery day'} focusing on ${focus} to support your ${user.goal.toLowerCase().replace('_', ' ')} goal.`
     };
   });
+  
+  console.log('✅ Fallback plan generated with', Object.keys(days).length, 'days');
   
   return {
     id: Date.now().toString(),
     createdAt: new Date().toISOString(),
     days,
     isLocked: false,
+    expectedWeeksToGoal: estimateWeeksToGoal(user)
   };
 }
 
@@ -1454,8 +2044,8 @@ function calculateTDEE(user: User): number {
   const tdee = bmr * activityMultiplier;
 
   // Goal-based adjustments
-  if (user.goal === 'WEIGHT_LOSS') return Math.round(tdee * 0.85);
-  if (user.goal === 'MUSCLE_GAIN') return Math.round(tdee * 1.15);
+  if (user.goal === 'WEIGHT_LOSS') return Math.round(tdee * 0.75);
+  if (user.goal === 'MUSCLE_GAIN') return Math.round(tdee * 1.2);
   return Math.round(tdee);
 }
 
@@ -1466,15 +2056,128 @@ function calculateProteinTarget(user: User): number {
   return Math.round(weightInLbs * 0.9);
 }
 
+/**
+ * Compute daily hydration in liters based on baseline and workout intensity
+ * Baseline: 2.3–2.7L; add 0.3–0.6L depending on intensity and session length
+ */
+function computeHydrationLiters(user: User, workout: any): number {
+  // Baseline by sex (fallback 2.5L)
+  let baseline = user.sex === 'Female' ? 2.3 : 2.7;
+  if (!isFinite(baseline)) baseline = 2.5;
+
+  // Intensity: try explicit field; else infer from workout.intensity or blocks
+  const lvl = (user as any).workoutIntensityLevel as number | undefined;
+  const explicitIntensity = (workout?.intensity || '').toString().toLowerCase();
+  const blockCount = Array.isArray(workout?.blocks) ? workout.blocks.length : 0;
+
+  let add = 0.0;
+  if (typeof lvl === 'number') {
+    // 1..10 scale → +0.0..+0.6L
+    add = Math.min(0.6, Math.max(0, (lvl / 10) * 0.6));
+  } else if (explicitIntensity.includes('high')) {
+    add = 0.6;
+  } else if (explicitIntensity.includes('moderate')) {
+    add = 0.4;
+  } else if (explicitIntensity.includes('low')) {
+    add = 0.2;
+  } else {
+    // Heuristic by block count
+    add = blockCount >= 3 ? 0.5 : blockCount === 2 ? 0.35 : 0.2;
+  }
+
+  // Session length bonus
+  const sess = user.sessionLength ?? 45;
+  if (sess >= 75) add += 0.2;
+  else if (sess >= 60) add += 0.1;
+
+  // Clamp between 1.8L and 4.0L
+  const liters = Math.max(1.8, Math.min(4.0, Number((baseline + add).toFixed(1))));
+  return liters;
+}
+
+/**
+ * Estimate weeks to goal using simple heuristics
+ */
+function estimateWeeksToGoal(user: User): number {
+  // Optimistic default if insufficient data
+  const DEFAULT_WEEKS = 10;
+  if (!user.goalWeight || !user.weight) return DEFAULT_WEEKS;
+
+  const deltaKg = Math.abs(user.goalWeight - user.weight);
+
+  // Baseline optimistic weekly rates by goal (kg/week)
+  // "Too good to be true" but still within plausible bounds for short-term progress
+  let rate = 0.55; // generic optimistic default
+  if (user.goal === 'WEIGHT_LOSS') rate = 0.8;
+  if (user.goal === 'MUSCLE_GAIN') rate = 0.4;
+
+  // Build an optimism multiplier from user context
+  let multiplier = 1;
+
+  // Training frequency effect (more days → faster progress), bounded
+  const trainingDays = typeof user.trainingDays === 'number' ? user.trainingDays : 3;
+  multiplier *= 1 + Math.min(0.24, Math.max(-0.10, (trainingDays - 3) * 0.06));
+
+  // Workout intensity slider (centered at ~6)
+  const intensityLevel = typeof user.workoutIntensityLevel === 'number' ? user.workoutIntensityLevel : 6;
+  multiplier *= 1 + Math.max(-0.08, Math.min(0.12, (intensityLevel - 6) * 0.02));
+
+  // Age effects (younger trends slightly faster; older slightly slower)
+  if (typeof user.age === 'number') {
+    if (user.age >= 18 && user.age <= 35) multiplier *= 1.06;
+    else if (user.age >= 50) multiplier *= 0.96;
+  }
+
+  // Activity level baseline
+  switch (user.activityLevel) {
+    case 'Very Active':
+    case 'Extra Active':
+      multiplier *= 1.05; break;
+    case 'Sedentary':
+      multiplier *= 0.97; break;
+  }
+
+  // Muscle gain nuance: beginner gains are faster; slight male advantage
+  if (user.goal === 'MUSCLE_GAIN') {
+    if (user.trainingLevel === 'Beginner') multiplier *= 1.15;
+    else if (user.trainingLevel === 'Intermediate') multiplier *= 1.07;
+    if (user.sex === 'Male') multiplier *= 1.03;
+  }
+
+  // Early-phase momentum for larger weight-loss deltas
+  if (user.goal === 'WEIGHT_LOSS') {
+    if (deltaKg > 20) multiplier *= 1.15;
+    else if (deltaKg > 10) multiplier *= 1.08;
+  }
+
+  // Compose weekly rate and bound it to keep results somewhat realistic
+  let weeklyRate = rate * multiplier;
+  if (user.goal === 'WEIGHT_LOSS') {
+    weeklyRate = Math.max(0.5, Math.min(1.1, weeklyRate));
+  } else if (user.goal === 'MUSCLE_GAIN') {
+    weeklyRate = Math.max(0.25, Math.min(0.6, weeklyRate));
+  } else {
+    weeklyRate = Math.max(0.4, Math.min(0.9, weeklyRate));
+  }
+
+  let weeks = Math.ceil(deltaKg / weeklyRate);
+
+  // Extra optimism for tiny deltas
+  if (deltaKg <= 2) weeks = Math.max(3, Math.ceil(weeks * 0.7));
+
+  // Final clamp: optimistic lower bound but not absurd; shorter horizon than before
+  return Math.min(Math.max(weeks, 4), 40);
+}
+
 function createWorkoutSplit(trainingDays: number): string[] {
   const splits: { [key: number]: string[] } = {
-    1: ['Full Body'],
-    2: ['Upper Body', 'Lower Body'],
+    1: ['Full Body (Heavy Compounds)'],
+    2: ['Upper Strength', 'Lower Strength'],
     3: ['Push', 'Pull', 'Legs'],
-    4: ['Push', 'Pull', 'Legs', 'Upper Body'],
-    5: ['Push', 'Pull', 'Legs', 'Push', 'Pull'],
-    6: ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs'],
-    7: ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body', 'Full Body', 'Recovery']
+    4: ['Upper Strength', 'Lower Strength', 'Push', 'Pull'],
+    5: ['Push', 'Pull', 'Legs', 'Upper Body', 'Power'],
+    6: ['Squat', 'Bench', 'Deadlift', 'Overhead Press', 'Accessory Upper', 'Accessory Lower'],
+    7: ['Squat', 'Bench', 'Deadlift', 'Overhead Press', 'Upper Body', 'Lower Body', 'Recovery']
   };
   
   return splits[Math.min(trainingDays, 7)] || splits[3];
@@ -1502,29 +2205,8 @@ function createAdaptiveWorkout(focus: string, equipment: string[], sessionLength
   const hasWeights = equipment.some(eq => ['Dumbbells', 'Barbell'].includes(eq));
   const bodyweightOnly = equipment.length === 1 && equipment[0] === 'Bodyweight';
   
-  // Exercise database based on equipment
-  const exerciseDb: { [key: string]: string[] } = {
-    'Push': hasGym ? ['Bench Press', 'Shoulder Press', 'Dips'] : 
-            hasWeights ? ['Dumbbell Press', 'Shoulder Press', 'Push-ups'] :
-            ['Push-ups', 'Pike Push-ups', 'Tricep Dips'],
-    'Pull': hasGym ? ['Pull-ups', 'Rows', 'Lat Pulldown'] :
-            hasWeights ? ['Dumbbell Rows', 'Pull-ups', 'Reverse Flyes'] :
-            ['Pull-ups', 'Inverted Rows', 'Superman'],
-    'Legs': hasGym ? ['Squats', 'Deadlifts', 'Leg Press'] :
-            hasWeights ? ['Goblet Squats', 'Lunges', 'Romanian Deadlifts'] :
-            ['Bodyweight Squats', 'Lunges', 'Single-leg Deadlifts'],
-    'Upper Body': hasGym ? ['Bench Press', 'Rows', 'Curls'] :
-                  hasWeights ? ['Dumbbell Press', 'Rows', 'Curls'] :
-                  ['Push-ups', 'Pull-ups', 'Pike Push-ups'],
-    'Lower Body': hasGym ? ['Squats', 'Leg Curls', 'Calf Raises'] :
-                  hasWeights ? ['Squats', 'Lunges', 'Calf Raises'] :
-                  ['Squats', 'Lunges', 'Glute Bridges'],
-    'Full Body': hasGym ? ['Deadlifts', 'Squats', 'Pull-ups'] :
-                 hasWeights ? ['Thrusters', 'Rows', 'Squats'] :
-                 ['Burpees', 'Mountain Climbers', 'Jump Squats']
-  };
-  
-  const exercises = exerciseDb[focus] || exerciseDb['Full Body'];
+  // Use expanded exercise database
+  const exercises = getExercisesForFocus(focus, equipment);
   
   return {
     focus: [focus],
@@ -1582,12 +2264,20 @@ function createAdaptiveNutrition(calories: number, protein: number, dietaryPrefs
   if (isVegetarian) meals = mealTemplates.vegetarian;
   else if (isEggitarian) meals = mealTemplates.eggitarian;
   
-  // Adjust for meal count
-  if (mealCount > 3) {
-    meals.push({ name: 'Snack 1', items: [{ food: 'Mixed nuts and fruit', qty: '30g nuts + 1 medium fruit' }] });
-  }
-  if (mealCount > 4) {
-    meals.push({ name: 'Snack 2', items: [{ food: 'Protein shake', qty: '1 scoop with water' }] });
+  // Adjust for meal count (support 1..8)
+  const allSnacks = [
+    { name: 'Snack 1', items: [{ food: 'Mixed nuts and fruit', qty: '30g nuts + 1 fruit' }] },
+    { name: 'Snack 2', items: [{ food: 'Protein shake', qty: '1 scoop with water' }] },
+    { name: 'Snack 3', items: [{ food: 'Greek yogurt', qty: '200g' }] },
+    { name: 'Snack 4', items: [{ food: 'Cottage cheese + berries', qty: '150g + handful' }] },
+    { name: 'Snack 5', items: [{ food: 'Peanut butter toast', qty: '1 slice + 1 tbsp' }] },
+  ];
+  if (mealCount <= 0) mealCount = 1;
+  if (mealCount < 3) {
+    meals = meals.slice(0, mealCount);
+  } else if (mealCount > 3) {
+    const need = Math.min(mealCount - 3, allSnacks.length);
+    meals = [...meals, ...allSnacks.slice(0, need)];
   }
   
   return {
@@ -1630,16 +2320,71 @@ function applyUserConstraintsToWeeklyDays(user: User, days: Record<string, any>)
   const palette = buildWeeklyMealPalette(dietary);
   let paletteIndex = 0;
 
+  // Enforce user-selected split sequence for training days
+  const splitSeq = deriveWorkoutSplit(user);
+  let trainCursor = 0;
+  const isTrainingWorkout = (wk: any) => {
+    if (!wk) return false;
+    const focusText = Array.isArray(wk.focus) ? wk.focus.join(' ').toLowerCase() : String(wk.focus || '').toLowerCase();
+    if (focusText.includes('recovery') || focusText.includes('mobility')) return false;
+    return true;
+  };
+  // Compute even training distribution for exact trainingDays
+  const schedule = computeTrainingSchedule(user.trainingDays);
+
   for (const day of dayOrder) {
     const d = days[day] || {};
-    const workout = sanitizeWorkout(d.workout, avoid, prefer);
-    const nutrition = sanitizeNutrition(d.nutrition, dietary, palette[paletteIndex % palette.length]);
-    const recovery = d.recovery || createMinimalRecovery(day === 'wednesday' || day === 'sunday');
-    result[day] = { workout, nutrition, recovery };
+    // Select focus based on schedule and split
+    const idx = dayOrder.indexOf(day);
+    const isTraining = Boolean(schedule[idx]);
+    const desiredFocus = isTraining ? splitSeq[trainCursor % Math.max(splitSeq.length, 1)] : 'Recovery';
+    if (isTraining) trainCursor++;
+
+    let workout = sanitizeWorkout(d.workout, avoid, prefer);
+    workout = ensureWorkoutFocus(workout, desiredFocus);
+    workout = ensureWorkoutVolumeAndStructure(workout, desiredFocus, user.equipment, user.sessionLength || 45);
+    // Ensure intensity label and add goal-aligned conditioning when helpful
+    workout.intensity = workout.intensity || ensureIntensityLabel(user, isTraining);
+    workout = appendConditioningIfGoal(workout, user, isTraining, user.sessionLength || 45);
+
+    let nutrition = sanitizeNutrition(d.nutrition, dietary, palette[paletteIndex % palette.length]);
+    nutrition = ensureMealCount(nutrition, user.mealCount || 3);
+    const isRestDay = day === 'wednesday' || day === 'sunday';
+    const recoveryBase = d.recovery || createMinimalRecovery(isRestDay, desiredFocus, day);
+    const enriched = ensureRecoveryExtras(recoveryBase, isRestDay, desiredFocus, day);
+
+    // Build a friendly per-day reason if missing
+    const hasReason = typeof d.reason === 'string' && d.reason.trim().length > 0;
+    const reason = hasReason ? d.reason : buildDayReason({
+      day,
+      focus: desiredFocus,
+      user,
+      sessionLength: user.sessionLength || 45,
+      equipment: user.equipment,
+      primaryGoal: user.goal,
+      personalGoals: user.personalGoals || [],
+      specialRequests: user.specialRequests || ''
+    });
+    if (user.supplements && Array.isArray(user.supplements)) {
+      enriched.supplementCard = enriched.supplementCard || { current: [], addOns: [] };
+      enriched.supplementCard.current = user.supplements.slice(0, 8);
+    }
+    if (!enriched.supplementCard?.addOns || enriched.supplementCard.addOns.length === 0) {
+      const addOns: string[] = [];
+      addOns.push('Creatine monohydrate 5g daily (any time)');
+      addOns.push('Magnesium glycinate 200–400mg (evening)');
+      if (user.goal === 'WEIGHT_LOSS') addOns.push('Green tea extract (AM)');
+      if (user.goal === 'ENDURANCE') addOns.push('Electrolytes (during training)');
+      if (user.goal === 'MUSCLE_GAIN') addOns.push('Whey/Plant protein (post‑workout)');
+      enriched.supplementCard = enriched.supplementCard || { current: [], addOns: [] };
+      enriched.supplementCard.addOns = addOns.slice(0, 5);
+    }
+    result[day] = { workout, nutrition, recovery: enriched, reason };
     paletteIndex++;
   }
 
-  return result;
+  // Reduce repetition across the week (swap duplicates with alternatives)
+  return diversifyWorkoutsAcrossWeek(result, user.equipment);
 }
 
 function applyUserConstraintsToDailyPlan(user: User, plan: any, baseDay: any): any {
@@ -1724,6 +2469,11 @@ function sanitizeNutrition(nutrition: any, diet: 'vegetarian' | 'eggitarian' | '
     const sanitized = items.map((it: any) => {
       const nameLower = safeLower(it?.food || '');
       if (!nameLower) return it;
+      // Replace generic placeholders with specific foods
+      const specific = replaceGenericFoodPlaceholders(it.food, diet);
+      if (specific !== it.food) {
+        return { ...it, food: specific };
+      }
       const badToken = Array.from(forbidden).find(tok => nameLower.includes(tok));
       if (badToken) {
         const swap = vegSwaps.find(s => s.match.some(m => badToken.includes(m) || m.includes(badToken)));
@@ -1762,7 +2512,7 @@ function buildWeeklyMealPalette(diet: 'vegetarian' | 'eggitarian' | 'nonveg'): {
   }
   return [
     { name: 'Breakfast', items: [{ food: 'Greek yogurt + protein', qty: '200g + 1 scoop' }] },
-    { name: 'Lunch', items: [{ food: 'Chicken + rice + veg', qty: '150g + 1 cup + 200g' }] },
+    { name: 'Lunch', items: [{ food: 'Chicken / Fish + rice + veg', qty: '150g + 1 cup + 200g' }] },
     { name: 'Dinner', items: [{ food: 'Fish + quinoa + salad', qty: '150g + 150g + 200g' }] },
   ];
 }
@@ -1771,5 +2521,554 @@ function mergeMealTemplate(items: any[], templateItems: any[]): any[] {
   if (!items || items.length === 0) return templateItems.slice(0, 3);
   // Keep up to 3 items to reduce diversity and improve consistency
   return items.slice(0, Math.min(3, items.length));
+}
+
+// Map split id to label for profile/debug context
+function splitIdToLabel(id?: string): string {
+  const map: Record<string, string> = {
+    '1': 'Full Body (1 day)',
+    '2': 'Full Body + Pump (2 days)',
+    '3': 'Full Body (3 days)',
+    '4': 'Upper/Lower (4 days)',
+    '5': 'Push/Pull/Legs + Upper/Lower (5 days)',
+    '6': 'Push/Pull/Legs x2 (6 days)',
+    '7': 'PPL + Upper + Lower + Full + Recovery (7 days)',
+    // Common aliases/shorthand
+    'UL': 'Upper/Lower (4 days)',
+    'UL4': 'Upper/Lower (4 days)',
+    'PPL': 'Push/Pull/Legs (3 days)',
+    'PPL5': 'Push/Pull/Legs + Upper/Lower (5 days)',
+    'PPLx2': 'Push/Pull/Legs x2 (6 days)',
+    'FB': 'Full Body',
+    'FB2': 'Full Body + Pump (2 days)',
+    'FB3': 'Full Body (3 days)',
+    'auto': 'Auto by training days',
+    'Auto': 'Auto by training days',
+  };
+  return id && map[id] ? map[id] : 'Auto by training days';
+}
+
+// Advanced split catalogs (trimmed to 7-day schedule as needed)
+const STRENGTH_SPLITS: Record<number, string[]> = {
+  1: ['Full Body (Heavy Compounds)'],
+  2: ['Upper Strength', 'Lower Strength'],
+  3: ['Push (Power)', 'Pull (Power)', 'Legs (Power)'],
+  4: ['Upper Strength', 'Lower Strength', 'Speed & Power', 'Recovery'],
+  5: ['Power', 'Push', 'Pull', 'Legs', 'Recovery'],
+  6: ['Squat', 'Bench', 'Deadlift', 'Overhead Press', 'Accessory Work', 'Recovery'],
+  7: ['Squat', 'Bench', 'Deadlift', 'Overhead Press', 'Accessory Upper', 'Accessory Lower', 'Recovery'],
+  8: ['Squat (Heavy)', 'Bench (Heavy)', 'Deadlift (Heavy)', 'Overhead (Heavy)', 'Accessory Hypertrophy', 'Core', 'Recovery', 'Mobility'],
+  9: ['Upper Power', 'Lower Power', 'Explosive Training', 'Speed & Agility', 'Core Stability', 'Accessory Strength', 'Full Body', 'Technique', 'Recovery'],
+  10: ['Push (Strength)', 'Pull (Strength)', 'Legs (Strength)', 'Power', 'Core', 'Mobility', 'Recovery', 'Upper Power', 'Lower Power', 'Accessory'],
+  11: ['Squat Focus', 'Deadlift Focus', 'Bench Focus', 'Overhead Focus', 'Accessory 1', 'Accessory 2', 'Core', 'Mobility', 'Explosiveness', 'Recovery', 'Full Body'],
+  12: ['Power Clean', 'Snatch', 'Squat', 'Bench', 'Deadlift', 'Overhead Press', 'Accessory Strength', 'Accessory Hypertrophy', 'Core Stability', 'Mobility', 'Conditioning', 'Recovery'],
+  13: ['Push Power', 'Pull Power', 'Leg Power', 'Push Volume', 'Pull Volume', 'Leg Volume', 'Core', 'Grip & Stability', 'Accessory 1', 'Accessory 2', 'Speed', 'Mobility', 'Recovery'],
+  14: ['Heavy Squat', 'Heavy Bench', 'Heavy Deadlift', 'Speed Work', 'Accessory Hypertrophy', 'Core', 'Mobility', 'Power & Explosiveness', 'Technique', 'Conditioning', 'Recovery', 'Full Body', 'Upper Power', 'Lower Power'],
+  15: ['Squat', 'Bench', 'Deadlift', 'Overhead', 'Olympic Lift', 'Accessory Push', 'Accessory Pull', 'Grip Strength', 'Core', 'Explosive Work', 'Stability', 'Conditioning', 'Mobility', 'Speed', 'Recovery']
+};
+
+const ENDURANCE_SPLITS: Record<number, string[]> = {
+  1: ['Full Body Circuit'],
+  2: ['Upper Endurance', 'Lower Endurance'],
+  3: ['Cardio', 'Strength Endurance', 'Mobility'],
+  4: ['Run', 'Cross-Training', 'Full Body Circuit', 'Core & Mobility'],
+  5: ['Cardio', 'Strength Endurance', 'Run', 'Swim/Bike', 'Recovery'],
+  6: ['Run', 'Bike', 'Strength', 'Mobility', 'Plyometrics', 'Recovery'],
+  7: ['Cardio', 'Run', 'Swim', 'Strength Endurance', 'Core Stability', 'Mobility', 'Recovery'],
+  8: ['Run (Speed)', 'Run (Distance)', 'CrossFit WOD', 'Bike', 'Core Stability', 'Mobility', 'Strength Endurance', 'Recovery'],
+  9: ['Run', 'Swim', 'Bike', 'Row', 'Core', 'Mobility', 'Strength', 'Full Body Circuit', 'Recovery'],
+  10: ['Run', 'Swim', 'Bike', 'Strength', 'Mobility', 'Plyometrics', 'Core', 'Conditioning', 'Endurance Yoga', 'Recovery'],
+  11: ['Run (Intervals)', 'Bike (Intervals)', 'Swim (Endurance)', 'Row (Power)', 'Strength Endurance', 'Core', 'Mobility', 'Balance & Stability', 'Recovery', 'Cardio Mix', 'Stretch'],
+  12: ['Triathlon Prep', 'Run', 'Bike', 'Swim', 'Strength', 'Core', 'Mobility', 'Balance', 'Plyometrics', 'Cross-Training', 'Recovery', 'Stretch'],
+  13: ['Run', 'Swim', 'Bike', 'Row', 'Strength', 'Core', 'Mobility', 'Balance', 'HIIT', 'Functional Circuit', 'Recovery', 'Cardio Mix', 'Yoga'],
+  14: ['Run', 'Bike', 'Swim', 'Row', 'HIIT', 'Strength Endurance', 'Mobility', 'Core', 'Balance', 'Plyometrics', 'Full Body Circuit', 'Active Recovery', 'Stretch', 'Recovery'],
+  15: ['Run (Tempo)', 'Run (Long)', 'Bike', 'Swim', 'Strength', 'Mobility', 'Core', 'Balance', 'Plyometrics', 'Functional Training', 'CrossFit', 'Recovery', 'Stretch', 'Breathwork', 'Endurance Flow']
+};
+
+const FAT_LOSS_SPLITS: Record<number, string[]> = {
+  1: ['Full Body HIIT'],
+  2: ['Strength + Cardio', 'Mobility & Core'],
+  3: ['HIIT', 'Strength', 'Cardio'],
+  4: ['Push + Cardio', 'Pull + Core', 'Legs + Cardio', 'Active Recovery'],
+  5: ['HIIT', 'Strength', 'Cardio', 'Core', 'Mobility'],
+  6: ['Push + Cardio', 'Pull + Cardio', 'Legs + HIIT', 'Core', 'Mobility', 'Recovery'],
+  7: ['HIIT', 'Strength', 'Cardio', 'Core', 'Mobility', 'Full Body Burn', 'Recovery'],
+  8: ['HIIT', 'Strength Endurance', 'Cardio Intervals', 'Core Stability', 'Active Recovery', 'Mobility', 'Full Body Circuit', 'Recovery'],
+  9: ['HIIT', 'Cardio', 'Strength', 'Core', 'Mobility', 'Kickboxing', 'Tabata', 'Full Body Burn', 'Recovery'],
+  10: ['HIIT', 'Strength', 'Functional Cardio', 'Core', 'Mobility', 'Full Body Burn', 'Yoga Flow', 'Pilates', 'Cardio', 'Recovery'],
+  11: ['HIIT (AM)', 'Strength (PM)', 'Cardio', 'Core', 'Mobility', 'Plyometrics', 'Functional Burn', 'Tabata', 'Kickboxing', 'Yoga', 'Recovery'],
+  12: ['HIIT', 'Strength', 'Cardio', 'Core', 'Functional Circuit', 'Mobility', 'Pilates', 'Boxing', 'Plyometrics', 'Yoga', 'Active Recovery', 'Stretch'],
+  13: ['HIIT', 'Strength', 'Functional Burn', 'Cardio', 'Core', 'Plyometrics', 'Mobility', 'Kickboxing', 'Tabata', 'Balance Flow', 'Pilates', 'Yoga', 'Recovery'],
+  14: ['HIIT', 'Strength', 'Cardio', 'Core', 'Mobility', 'Kickboxing', 'Pilates', 'Functional Burn', 'Plyometrics', 'Tabata', 'Balance & Stretch', 'Yoga', 'Recovery', 'Active Flow'],
+  15: ['HIIT (Heavy)', 'HIIT (Light)', 'Strength', 'Functional Training', 'Cardio Mix', 'Core Stability', 'Mobility', 'Kickboxing', 'Pilates', 'Yoga Flow', 'Tabata', 'Plyometrics', 'Balance', 'Stretch', 'Recovery']
+};
+
+const FLEXIBILITY_SPLITS: Record<number, string[]> = {
+  1: ['Full Body Stretch & Breathwork'],
+  2: ['Upper Mobility', 'Lower Mobility'],
+  3: ['Yoga Flow', 'Mobility + Strength', 'Breathwork & Recovery'],
+  4: ['Upper Mobility', 'Lower Mobility', 'Balance Flow', 'Deep Stretch'],
+  5: ['Yoga Flow', 'Mobility', 'Pilates', 'Stretch Therapy', 'Breathwork'],
+  6: ['Upper Mobility', 'Lower Mobility', 'Yoga Flow', 'Core Stability', 'Stretch & Balance', 'Recovery'],
+  7: ['Yoga', 'Pilates', 'Mobility Flow', 'Core & Balance', 'Stretch Therapy', 'Breathwork', 'Recovery'],
+  8: ['Yoga Flow', 'Mobility', 'Pilates', 'Breathwork', 'Stretch Therapy', 'Balance Training', 'Recovery', 'Meditation'],
+  9: ['Yoga', 'Mobility', 'Stretch', 'Core & Balance', 'Pilates', 'Breathwork', 'Active Flexibility', 'Foam Rolling', 'Recovery'],
+  10: ['Yoga Flow', 'Pilates Core', 'Stretch Therapy', 'Mobility', 'Breathwork', 'Balance', 'Meditation', 'Core Stability', 'Restorative Yoga', 'Recovery'],
+  11: ['Morning Flow', 'Evening Flow', 'Yoga', 'Pilates', 'Stretch', 'Breathwork', 'Mobility', 'Balance', 'Meditation', 'Core', 'Recovery'],
+  12: ['Mobility', 'Yoga', 'Pilates', 'Stretch', 'Core', 'Balance', 'Breathwork', 'Meditation', 'Recovery', 'Restorative', 'Active Flow', 'Deep Stretch'],
+  13: ['Yoga Flow', 'Stretch', 'Core & Balance', 'Mobility', 'Pilates', 'Breathwork', 'Meditation', 'Recovery', 'Active Flow', 'Deep Stretch', 'Mobility Strength', 'Mindfulness', 'Flexibility'],
+  14: ['Yoga', 'Pilates', 'Stretch Therapy', 'Mobility', 'Core', 'Balance', 'Breathwork', 'Meditation', 'Foam Rolling', 'Restorative Flow', 'Active Recovery', 'Deep Stretch', 'Mobility Strength', 'Recovery'],
+  15: ['Yoga Flow', 'Pilates', 'Stretch', 'Mobility', 'Core', 'Balance', 'Breathwork', 'Meditation', 'Flexibility', 'Foam Rolling', 'Mobility Strength', 'Restorative Yoga', 'Active Flow', 'Stretch Therapy', 'Recovery']
+};
+
+function selectPrimarySecondaryGoals(user: User): { primary: 'strength'|'endurance'|'fat_loss'|'flexibility'; secondary?: 'strength'|'endurance'|'fat_loss'|'flexibility' } {
+  const goalMap: Record<string, 'strength'|'endurance'|'fat_loss'|'flexibility'> = {
+    'MUSCLE_GAIN': 'strength',
+    'WEIGHT_LOSS': 'fat_loss',
+    'ENDURANCE': 'endurance',
+    'FLEXIBILITY_MOBILITY': 'flexibility',
+    'GENERAL_FITNESS': 'strength'
+  };
+  const primary = goalMap[user.goal] || 'strength';
+  const pg = (user.personalGoals || []).join(' ').toLowerCase();
+  let secondary: any;
+  if (pg.includes('fat') || pg.includes('loss')) secondary = 'fat_loss';
+  if (pg.includes('endurance') || pg.includes('run') || pg.includes('cardio')) secondary = secondary || 'endurance';
+  if (pg.includes('flex') || pg.includes('mobility') || pg.includes('yoga')) secondary = secondary || 'flexibility';
+  // Avoid same as primary
+  if (secondary === primary) secondary = undefined;
+  return { primary, secondary };
+}
+
+function getCatalog(kind: 'strength'|'endurance'|'fat_loss'|'flexibility'): Record<number, string[]> {
+  if (kind === 'strength') return STRENGTH_SPLITS;
+  if (kind === 'endurance') return ENDURANCE_SPLITS;
+  if (kind === 'fat_loss') return FAT_LOSS_SPLITS;
+  return FLEXIBILITY_SPLITS;
+}
+
+function clampAndTake(arr: string[], n: number): string[] {
+  if (!Array.isArray(arr) || arr.length === 0) return [];
+  if (n <= arr.length) return arr.slice(0, n);
+  const out: string[] = [];
+  let i = 0;
+  while (out.length < n) { out.push(arr[i % arr.length]); i++; }
+  return out;
+}
+
+/**
+ * NEW SIMPLIFIED WORKOUT SPLIT - Single Source of Truth
+ * Deterministic split selection based on training level and frequency
+ */
+function getWorkoutSplit(user: User): string[] {
+  const days = Math.max(1, Math.min(user.trainingDays || 3, 7));
+  const level = user.trainingLevel || 'Beginner';
+  
+  console.log('🎯 Selecting workout split:', { level, days, userLevel: user.trainingLevel });
+  
+  // BEGINNER: Full body focus for movement pattern learning
+  if (level === 'Beginner') {
+    if (days === 1) return ['Full Body'];
+    if (days === 2) return ['Full Body', 'Full Body'];
+    if (days === 3) return ['Full Body', 'Full Body', 'Full Body'];
+    if (days === 4) return ['Upper Body', 'Lower Body', 'Upper Body', 'Lower Body'];
+    if (days === 5) return ['Full Body', 'Upper Body', 'Lower Body', 'Full Body', 'Core'];
+    if (days === 6) return ['Upper Body', 'Lower Body', 'Full Body', 'Upper Body', 'Lower Body', 'Core'];
+    return ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body', 'Full Body', 'Core'];
+  }
+  
+  // INTERMEDIATE: Split routines for volume distribution
+  if (level === 'Intermediate') {
+    if (days === 1) return ['Full Body'];
+    if (days === 2) return ['Upper Body', 'Lower Body'];
+    if (days === 3) return ['Push', 'Pull', 'Legs'];
+    if (days === 4) return ['Upper Body', 'Lower Body', 'Push', 'Pull'];
+    if (days === 5) return ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body'];
+    if (days === 6) return ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs'];
+    return ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body', 'Full Body', 'Core'];
+  }
+  
+  // PROFESSIONAL: Advanced splits with specialization
+  if (days === 1) return ['Full Body'];
+  if (days === 2) return ['Upper Body', 'Lower Body'];
+  if (days === 3) return ['Push', 'Pull', 'Legs'];
+  if (days === 4) return ['Push', 'Pull', 'Legs', 'Upper Body'];
+  if (days === 5) return ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body'];
+  if (days === 6) return ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs'];
+  return ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs', 'Core'];
+}
+
+// Keep old function for backward compatibility but redirect to new one
+function deriveWorkoutSplit(user: User): string[] {
+  return getWorkoutSplit(user);
+}
+
+// Ensure workout focus aligns with desired focus
+function ensureWorkoutFocus(workout: any, desiredFocus: string): any {
+  const clone = JSON.parse(JSON.stringify(workout || {}));
+  const isRecovery = desiredFocus === 'Recovery';
+  clone.focus = isRecovery ? ['Recovery'] : [desiredFocus];
+  return clone;
+}
+
+// Expanded exercise database per focus and equipment
+function getExercisesForFocus(focus: string, equipment: string[]): string[] {
+  const hasGym = equipment.includes('Gym');
+  const hasWeights = equipment.some(eq => ['Dumbbells', 'Barbell', 'Gym'].includes(eq));
+  const bw = equipment.length === 1 && equipment[0] === 'Bodyweight';
+
+  const byEquip = (gym: string[], weights: string[], body: string[]) =>
+    (hasGym ? gym : hasWeights ? weights : body);
+
+  const db: Record<string, string[]> = {
+    'Push': byEquip(
+      ['Barbell Bench Press','Incline DB Press','Overhead Press','Machine Chest Press','Dips','Cable Flyes','Triceps Pushdown','Lateral Raises','Skullcrushers','Smith Machine Bench Press','Decline Bench Press','Incline Machine Press','Machine Shoulder Press','Pec Deck','Cable Chest Press','Close-grip Bench Press','JM Press','Overhead Cable Triceps Extension','Rope Overhead Triceps Extension','Cable Lateral Raise','Machine Lateral Raise','Front Raise (Cable)','Reverse Pec Deck','Landmine Press','Chest Dip (weighted)','Seated Chest Press Machine','Arnold Press','Hex Press'],
+      ['DB Bench Press','Incline DB Press','DB Shoulder Press','Push-ups','Dips','DB Flyes','Triceps Extensions','Lateral Raises','Close-grip Push-ups','Flat DB Press','Decline DB Press','DB Arnold Press','DB Lateral Raise','DB Front Raise','Incline DB Flyes','Low-to-High DB Flyes','DB Hex Press','DB Skullcrushers','Overhead Triceps Extension (DB)','Triceps Kickbacks','DB Floor Press','Single-arm DB Shoulder Press','Seated DB Shoulder Press','Landmine Press','Close-grip Barbell Bench Press','Z Press (Barbell)'],
+      ['Push-ups','Pike Push-ups','Decline Push-ups','Dips (bench)','Diamond Push-ups','Pseudo Planche Push-ups','Triceps Dips','Shoulder Taps','Ring Push-ups','Ring Dips','Handstand Push-ups (wall)','Archer Push-ups','Clap Push-ups','Feet Elevated Push-ups','Wide-grip Push-ups','Hindu Push-ups','Dive Bomber Push-ups','Slow Eccentric Push-ups','One-arm Push-up (assisted)','Triceps Extensions (bench/bodyweight)','Decline Pike Push-ups']
+    ),
+    'Pull': byEquip(
+      ['Weighted Pull-ups','Lat Pulldown','Barbell Row','Seated Cable Row','Face Pulls','Rear Delt Flyes','Biceps Curls','Hammer Curls','T-Bar Row','Pendlay Row','Chest Supported Row (machine)','Cable Row (wide)','Cable Row (neutral)','Machine Row','Seal Row','Meadows Row','Assisted Pull-up Machine','Weighted Chin-ups','Straight-arm Pulldown','Cable Pullover','Rear Delt Machine','Reverse Pec Deck','Shrugs','Trap Bar Shrugs','Smith Machine Row','Cable High Row','Machine High Row'],
+      ['Pull-ups','1-Arm DB Row','Bent-over DB Row','Band Pulldown','Face Pulls','Rear Delt Flyes','DB Curls','Hammer Curls','Kroc Row','DB Pullover','DB Seal Row','DB Chest Supported Row','Barbell Row','Pendlay Row','EZ-Bar Curl','Barbell Curl','Zottman Curl','Reverse Curl','Spider Curl','Drag Curl','Band Pull-aparts','Band Row','Inverted Row (rings)'],
+      ['Pull-ups','Inverted Rows','Superman','Prone Y-T-W','Doorway Rows','Towel Curls','Reverse Snow Angels','Chin-ups','Neutral-grip Pull-ups','Archer Pull-ups','Negative Pull-ups','Australian Pull-ups','Towel Rows','Table Rows','Scapular Pull-ups','Static Pull-up Hold (top)','Prone W','Prone T','Prone Y Hold']
+    ),
+    'Legs': byEquip(
+      ['Back Squat','Romanian Deadlift','Leg Press','Walking Lunges','Leg Curl','Leg Extension','Calf Raise','Hip Thrust','Front Squat','Hack Squat','Pendulum Squat','Smith Machine Squat','Smith Machine Lunge','Machine Hip Thrust','Glute Ham Raise','Seated Leg Curl','Lying Leg Curl','Seated Calf Raise','Standing Calf Raise','Adductor Machine','Abductor Machine','Box Squat','Single-leg Leg Press','Sled Push/Drag','Belt Squat'],
+      ['Goblet Squat','Romanian Deadlift','DB Walking Lunges','DB Bulgarian Split Squat','Hip Thrust','Calf Raise','Glute Bridge','Barbell Back Squat','Front Squat','Conventional Deadlift','Sumo Deadlift','Good Morning','Barbell Hip Thrust','DB Step-ups','DB Reverse Lunge','DB Split Squat','DB SLDL','DB Cossack Squat','DB Suitcase Squat','Barbell Calf Raise','DB Calf Raise','DB Thruster (legs focus)'],
+      ['Bodyweight Squat','Walking Lunges','Jump Squats','Split Squats','Single-leg Hip Hinge','Glute Bridge','Calf Raise','Sissy Squats','Shrimp Squats','Pistol Squat (assisted)','Wall Sit','Cossack Squats','Reverse Lunges','Curtsy Lunges','Single-leg Glute Bridge','Lateral Lunges','Step-ups (bodyweight)','Hamstring Walkouts','Nordic Ham Curl (assisted)']
+    ),
+    'Upper Body': byEquip(
+      ['Bench Press','Chest Supported Row','Shoulder Press','Lat Pulldown','Incline DB Press','Cable Row','Curls','Lateral Raises','Overhead Press','Pull-ups','Seated Cable Row','Face Pulls','Rear Delt Flyes','Incline Machine Press','Machine Shoulder Press','Pec Deck','Straight-arm Pulldown','Triceps Pushdown','Preacher Curl','Reverse Pec Deck'],
+      ['DB Bench Press','DB Row','DB Shoulder Press','Band Pulldown','Incline DB Press','DB Row (seal)','Curls','Lateral Raises','Barbell Row','Pull-ups','EZ-Bar Curl','Hammer Curls','DB Arnold Press','DB Incline Flyes','DB Lateral Raise','DB Rear Delt Flyes','Overhead Triceps Extension (DB)','Close-grip Barbell Bench Press'],
+      ['Push-ups','Inverted Rows','Pike Push-ups','Prone Y-T-W','Doorway Rows','Diamond Push-ups','Plank Shoulder Taps','Pull-ups','Chin-ups','Ring Rows','Ring Push-ups','Handstand Push-ups (wall)','Archer Push-ups','Australian Rows']
+    ),
+    'Lower Body': byEquip(
+      ['Back Squat','Front Squat','Romanian Deadlift','Leg Press','Leg Curl','Leg Extension','Calf Raise','Hip Thrust','Hack Squat','Pendulum Squat','Smith Machine Lunge','Smith Machine RDL','GHR','Seated Calf Raise','Lying Leg Curl','Single-leg Leg Press','Adductor Machine','Abductor Machine','Box Squat','Hip Abduction (machine)'],
+      ['Goblet Squat','DB RDL','Walking Lunges','Bulgarian Split Squat','Hip Thrust','Calf Raise','Step-ups','Barbell Back Squat','Front Squat','Conventional Deadlift','Sumo Deadlift','Good Morning','DB Reverse Lunge','DB Lateral Lunge','DB Step-ups','Barbell Hip Thrust','DB SLDL','DB Cossack Squat'],
+      ['Bodyweight Squat','Split Squat','Step-ups','Walking Lunges','Single-leg Glute Bridge','Calf Raise','Jump Squats','Sissy Squats','Shrimp Squats','Pistol Squat (assisted)','Wall Sit','Reverse Lunges','Cossack Squats','Hamstring Walkouts']
+    ),
+    'Full Body': byEquip(
+      ['Deadlift','Front Squat','Bench Press','Pull-ups','Overhead Press','Row','Hip Thrust','Lunge','Clean and Press','Power Clean','Push Press','T-Bar Row','Lat Pulldown','Thruster (barbell)','Farmer Carry (heavy)','Sled Push/Drag','Carry Medley','Rower Sprints','Assault Bike Intervals'],
+      ['Thruster','DB Front Squat','DB Row','DB Press','Pull-ups','RDL','Lunge','Kettlebell Swing','DB Clean and Press','DB Snatch','DB Man Makers','KB Clean and Press','KB Swing','Suitcase Carry','Farmer Carry (DB)','KB Goblet Squat to Press','Renegade Row'],
+      ['Burpees','Jump Squats','Inverted Rows','Push-ups','Mountain Climbers','Hip Bridge','Walking Lunges','Bear Crawl','Plank to Push-up','Squat Thrusts','Broad Jumps','High Knees','Reverse Lunges','Hollow Body Hold + Supermans (alternating)','Lateral Bounds','Skater Jumps']
+    ),
+    'Pump': byEquip(
+      ['Incline DB Press','Cable Flyes','Lateral Raises','Triceps Pushdown','Preacher Curl','Face Pulls','Rear Delt Flyes','Cable Curl','Pec Deck','Cable Crossovers (high-to-low)','Cable Crossovers (low-to-high)','Cable Lateral Raise','Machine Lateral Raise','Machine Rear Delt','Rope Hammer Curl','EZ-Bar Preacher Curl','Overhead Cable Extension','Cable Concentration Curl'],
+      ['Incline DB Press','DB Flyes','Lateral Raises','Triceps Extensions','Hammer Curls','Rear Delt Flyes','Face Pulls','DB Concentration Curl','DB Preacher Curl (bench)','Incline DB Curl','Zottman Curl','DB Rear Delt Raise (incline)','DB Skullcrushers','DB Kickbacks','DB Around the World','DB Chest Squeeze Press'],
+      ['Push-ups (tempo)','Diamond Push-ups','Bodyweight Curls (towel)','Shoulder Taps','Rear Delt Raises (bodyweight)','Slow Eccentric Push-ups','Pike Push-ups (tempo)','Isometric Push-up Hold (mid)','Inverted Rows (tempo)','Doorway Rows (tempo)']
+    ),
+    'Power': byEquip(
+      ['Power Clean','Push Press','Snatch Pull','Box Jump','Medicine Ball Slam','Speed Deadlift','Speed Squat','Kettlebell Swing'],
+      ['DB Push Press','DB Power Clean','KB Swing','Box Jump','MB Slam','Jump Squat','Speed RDL','Broad Jump'],
+      ['Box Jump','Squat Jump','Broad Jump','Burpee to Jump','Tuck Jump','Plyo Push-ups','Med Ball Toss (if available)']
+    ),
+    'Athletic': byEquip(
+      ['Sled Push','Agility Ladder','Box Jump','Kettlebell Swing','Medicine Ball Toss','Lunge Variations','Row Sprints','Assault Bike'],
+      ['Agility Drills','KB Swing','DB Snatch','DB Clean','Box Jump','Lunge Variations','Jump Rope'],
+      ['Agility Steps','Jump Lunges','High Knees','Skater Jumps','Burpees','Bear Crawl','Mountain Climbers']
+    ),
+    'Core': byEquip(
+      ['Cable Woodchop','Hanging Leg Raise','Ab Wheel Rollout','Pallof Press','Weighted Plank','Decline Sit-up'],
+      ['Hanging Leg Raise','Ab Wheel Rollout','DB Side Bend','KB Windmill','Weighted Plank','Russian Twist'],
+      ['Plank','Side Plank','Hollow Body Hold','Leg Raises','Dead Bug','Mountain Climbers']
+    ),
+    'Glutes & Hamstrings': byEquip(
+      ['Hip Thrust','Romanian Deadlift','Good Morning','Glute Ham Raise','Cable Pull-through','Single-leg RDL','Seated Leg Curl'],
+      ['Barbell Hip Thrust','RDL','DB Hip Thrust','DB Single-leg RDL','DB Step-ups','B-Stance RDL','Nordic Curl (assisted)'],
+      ['Hip Bridge','Single-leg Hip Bridge','Hamstring Walkouts','Glute Kickbacks (band)','Step-ups','Reverse Lunge']
+    ),
+    'Shoulders & Arms': byEquip(
+      ['Overhead Press','Lateral Raise (machine)','Rear Delt Machine','Cable Lateral Raise','Cable Curl','Rope Pushdown','Preacher Curl'],
+      ['DB Shoulder Press','DB Lateral Raise','DB Rear Delt Raise','EZ-bar Curl','Skullcrushers','Hammer Curl','Cable Curl'],
+      ['Pike Push-ups','Diamond Push-ups','Inverted Rows (supinated)','Bodyweight Curls (towel)','Bench Dips','Push-up Plus']
+    ),
+    'Chest & Back': byEquip(
+      ['Bench Press','Incline Press','Lat Pulldown','Seated Cable Row','Chest Supported Row','Pullover','Face Pulls'],
+      ['DB Bench','DB Incline','Pull-ups','DB Row','DB Pullover','Band Pulldown','Face Pulls'],
+      ['Push-ups','Ring Rows','Inverted Rows','Prone Y-T-W','Doorway Rows','Superman']
+    ),
+    'Conditioning': byEquip(
+      ['Assault Bike','Row Intervals','SkiErg','Sled Push','Kettlebell Swing','Burpee Sprint'],
+      ['Jump Rope','KB Swing','DB Snatch','Burpee Intervals','Row (if available)','Shuttle Runs'],
+      ['Burpees','High Knees','Jumping Jacks','Mountain Climbers','Skater Jumps','Bear Crawl']
+    ),
+    'Squat': byEquip(
+      ['Back Squat','Front Squat','Safety Bar Squat','Box Squat','Hack Squat','Pendulum Squat','Leg Press'],
+      ['Goblet Squat','Front Squat','Barbell Back Squat','DB Squat','DB Step-ups','DB Split Squat'],
+      ['Bodyweight Squat','Jump Squat','Split Squat','Pistol Squat (assisted)','Wall Sit','Cossack Squat']
+    ),
+    'Bench': byEquip(
+      ['Bench Press','Incline Bench','Close-grip Bench','Machine Chest Press','Dips','Pec Deck'],
+      ['DB Bench','Incline DB Bench','Close-grip DB Press','DB Flyes','Dips'],
+      ['Push-ups','Feet Elevated Push-ups','Diamond Push-ups','Wide-grip Push-ups']
+    ),
+    'Deadlift': byEquip(
+      ['Conventional Deadlift','Sumo Deadlift','Romanian Deadlift','Trap Bar Deadlift','RDL (deficit)'],
+      ['RDL','Trap Bar Deadlift (if available)','DB RDL','DB Single-leg RDL'],
+      ['Hip Hinge Drill','Single-leg Hip Hinge','Glute Bridge','Hamstring Walkouts']
+    ),
+    'Overhead Press': byEquip(
+      ['Overhead Press','Push Press','Seated Shoulder Press (machine)','Z Press','Landmine Press'],
+      ['DB Shoulder Press','Arnold Press','Single-arm DB Press','Landmine Press (if available)'],
+      ['Pike Push-ups','Handstand Push-ups (wall)','Decline Pike Push-ups']
+    ),
+    'Upper Strength': byEquip(
+      ['Bench Press','Overhead Press','Weighted Pull-ups','Barbell Row','Chest Supported Row','Face Pulls'],
+      ['DB Bench','DB Shoulder Press','Pull-ups','DB Row','Band Pulldown','Face Pulls'],
+      ['Push-ups','Pike Push-ups','Ring Rows','Inverted Rows','Prone Y-T-W']
+    ),
+    'Lower Strength': byEquip(
+      ['Back Squat','Front Squat','Romanian Deadlift','Leg Press','Calf Raise','Hip Thrust'],
+      ['Barbell Back Squat','Front Squat','RDL','DB Lunge','DB Step-ups','DB Calf Raise'],
+      ['Bodyweight Squat','Lunges','Step-ups','Hip Bridge','Calf Raise']
+    ),
+    'Speed & Power': byEquip(
+      ['Power Clean','Snatch Pull','Push Press','Box Jump','Broad Jump','MB Slam','Sled Push'],
+      ['DB Push Press','DB Power Clean','KB Swing','Box Jump','Broad Jump','MB Slam'],
+      ['Box Jump','Broad Jump','Burpee to Jump','Tuck Jump','Plyo Push-ups']
+    ),
+    'Core Stability': byEquip(
+      ['Pallof Press','Cable Woodchop','Dead Bug (cable/press)','Weighted Plank','Anti-rotation Hold'],
+      ['DB Dead Bug (press)','KB Windmill','Weighted Plank','Side Plank with DB'],
+      ['Plank','Side Plank','Dead Bug','Bird Dog','Hollow Hold']
+    ),
+    'HIIT': byEquip(
+      ['Assault Bike Intervals','Row Sprints','SkiErg Sprints','KB Swing Sprints','Burpee Sprint EMOM'],
+      ['Jump Rope Intervals','KB Swing EMOM','Burpee EMOM','DB Thruster Intervals'],
+      ['Burpee Tabata','High Knees Tabata','Jumping Jacks EMOM','Mountain Climbers EMOM']
+    ),
+    'Full Body Circuit': byEquip(
+      ['Kettlebell Circuit','Row + Thruster + Pull-up','Sled Push + Carry','DB Complex','Battle Rope Circuit'],
+      ['DB Complex','KB Complex','Jump Rope + DB Snatch','DB Thruster + Row + Lunge'],
+      ['Bodyweight Circuit','Burpees + Squats + Push-ups','Bear Crawl + Lunges','Inverted Rows + Push-ups']
+    ),
+    'Mobility': byEquip(
+      ['Couch Stretch','Hip Flexor Stretch','Hamstring Stretch','Thoracic Rotation','Banded Dislocates','Ankle Dorsiflexion'],
+      ['Couch Stretch','Hip Airplanes (DB assist)','Banded Dislocates','Ankle Mobility Drills'],
+      ['Couch Stretch','Hip Flexor Stretch','90/90 Switches','World’s Greatest Stretch','Ankle Mobility']
+    ),
+    'Yoga': byEquip(
+      ['Sun Salutation A','Sun Salutation B','Warrior Flow','Triangle Pose','Bridge Pose','Pigeon Pose'],
+      ['Sun Salutation','Warrior Flow','Triangle Pose','Bridge','Pigeon'],
+      ['Sun Salutation','Warrior Flow','Triangle','Bridge','Pigeon']
+    ),
+    'Pilates': byEquip(
+      ['Hundred','Roll-Up','Single-Leg Stretch','Double-Leg Stretch','Shoulder Bridge','Side Kick Series'],
+      ['Hundred','Roll-Up','Single-Leg Stretch','Double-Leg Stretch','Shoulder Bridge','Side Kick'],
+      ['Hundred','Roll-Up','Single-Leg Stretch','Double-Leg Stretch','Shoulder Bridge','Side Kick']
+    )
+  };
+  return db[focus] || db['Full Body'];
+}
+
+function ensureWorkoutVolumeAndStructure(workout: any, focus: string, equipment: string[], sessionLengthMin: number, minExercises: number = 6, maxExercises: number = 7): any {
+  const clone = JSON.parse(JSON.stringify(workout || {}));
+  if (!Array.isArray(clone.blocks)) clone.blocks = [];
+
+  // Ensure Warm-up exists
+  const hasWarmup = clone.blocks.some((b: any) => (b.name || '').toLowerCase().includes('warm'));
+  if (!hasWarmup) {
+    clone.blocks.unshift({
+      name: 'Warm-up',
+      items: [
+        { exercise: 'Dynamic stretching', sets: 1, reps: '5-8 min', RIR: 0 },
+      ]
+    });
+  }
+
+  // Ensure Main block exists
+  let main = clone.blocks.find((b: any) => (b.name || '').toLowerCase().includes('main'));
+  if (!main) {
+    main = { name: 'Main Training', items: [] };
+    clone.blocks.push(main);
+  }
+  if (!Array.isArray(main.items)) main.items = [];
+
+  // Adjust min/max by session length
+  if (sessionLengthMin <= 35) {
+    minExercises = Math.max(5, minExercises - 1);
+    maxExercises = Math.max(minExercises, maxExercises - 1);
+  }
+  // Enforce strict maximum of 7 exercises regardless of session length
+  maxExercises = Math.min(7, maxExercises);
+
+  // Build unique list of exercises with sufficient volume
+  const existingNames = new Set<string>(main.items.map((it: any) => String(it.exercise || '').toLowerCase()));
+  const candidates = getExercisesForFocus(focus, equipment);
+  for (const ex of candidates) {
+    if (main.items.length >= maxExercises) break;
+    const key = ex.toLowerCase();
+    if (existingNames.has(key)) continue;
+    main.items.push({ exercise: ex, sets: 3, reps: '8-12', RIR: 2 });
+    existingNames.add(key);
+  }
+
+  // If still below minimum, add accessory/core-friendly that match focus
+  while (main.items.length < minExercises) {
+    const fallback = candidates[(main.items.length) % candidates.length] || 'Accessory movement';
+    main.items.push({ exercise: fallback, sets: 3, reps: '10-15', RIR: 2 });
+  }
+
+  // Ensure Cool-down exists
+  const hasCooldown = clone.blocks.some((b: any) => (b.name || '').toLowerCase().includes('cool'));
+  if (!hasCooldown) {
+    clone.blocks.push({
+      name: 'Cool-down',
+      items: [
+        { exercise: 'Static stretching', sets: 1, reps: '5-10 min', RIR: 0 }
+      ]
+    });
+  }
+
+  // Guard against core-only content on Full Body
+  const coreKeywords = ['plank','crunch','mountain climber','sit-up','leg raise'];
+  if (focus === 'Full Body') {
+    const mainBlock = clone.blocks.find((b: any) => (b.name || '').toLowerCase().includes('main'));
+    if (mainBlock && Array.isArray(mainBlock.items)) {
+      const coreCount = mainBlock.items.filter((it: any) => coreKeywords.some(k => String(it.exercise || '').toLowerCase().includes(k))).length;
+      if (coreCount >= Math.max(2, Math.floor(mainBlock.items.length * 0.4))) {
+        const alts = getExercisesForFocus('Full Body', equipment);
+        for (const alt of alts) {
+          if (mainBlock.items.length === 0) break;
+          if (coreCount < Math.floor(mainBlock.items.length * 0.4)) break;
+          const idx = mainBlock.items.findIndex((it: any) => coreKeywords.some(k => String(it.exercise || '').toLowerCase().includes(k)));
+          if (idx !== -1) {
+            mainBlock.items[idx] = { exercise: alt, sets: 3, reps: '8-12', RIR: 2 };
+          }
+        }
+      }
+    }
+  }
+
+  return clone;
+}
+
+function diversifyWorkoutsAcrossWeek(week: Record<string, any>, equipment: string[]): Record<string, any> {
+  const usedByName = new Map<string, number>();
+  const capPerWeek = 2; // do not repeat the exact same move more than twice
+  const out: Record<string, any> = {};
+  for (const day of ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']) {
+    const d = JSON.parse(JSON.stringify(week[day] || {}));
+    const main = d?.workout?.blocks?.find((b: any) => (b.name || '').toLowerCase().includes('main'));
+    if (main && Array.isArray(main.items)) {
+      main.items = main.items.map((it: any) => {
+        const name = String(it.exercise || '');
+        const key = name.toLowerCase();
+        const count = usedByName.get(key) || 0;
+        if (count >= capPerWeek) {
+          // swap to an alternative from the same focus
+          const focus = Array.isArray(d.workout?.focus) ? d.workout.focus[0] : 'Full Body';
+          const alts = getExercisesForFocus(focus, equipment);
+          const alt = alts.find(a => (usedByName.get(a.toLowerCase()) || 0) < capPerWeek) || name;
+          usedByName.set(alt.toLowerCase(), (usedByName.get(alt.toLowerCase()) || 0) + 1);
+          return { ...it, exercise: alt };
+        }
+        usedByName.set(key, count + 1);
+        return it;
+      });
+      // Reassign updated items back
+      const idx = d.workout.blocks.findIndex((b: any) => (b.name || '').toLowerCase().includes('main'));
+      if (idx !== -1) d.workout.blocks[idx].items = main.items;
+    }
+    out[day] = d;
+  }
+  return out;
+}
+
+function replaceGenericFoodPlaceholders(food: string, diet: 'vegetarian' | 'eggitarian' | 'nonveg'): string {
+  const f = food.trim();
+  const lower = f.toLowerCase();
+  const proteinVeg = ['Paneer', 'Tofu', 'Greek yogurt'];
+  const proteinEgg = ['Egg whites', 'Whole eggs', 'Greek yogurt'];
+  const proteinNon = ['Chicken breast', 'Fish', 'Egg whites'];
+  const carbOpts = ['Brown rice', 'Quinoa', 'Whole wheat roti', 'Oats'];
+  const vegOpts = ['Mixed vegetables', 'Salad (cucumber, tomato, greens)', 'Stir-fry vegetables'];
+
+  const pick = (arr: string[]) => arr[0];
+
+  if (/(^|\b)(lean\s*protein|quality\s*protein)(\b|$)/i.test(lower)) {
+    if (diet === 'vegetarian') return pick(proteinVeg);
+    if (diet === 'eggitarian') return pick(proteinEgg);
+    return pick(proteinNon);
+  }
+  if (/(^|\b)(complex\s*carb|complex\s*carbs)(\b|$)/i.test(lower)) {
+    return pick(carbOpts);
+  }
+  if (/(^|\b)(vegetable|vegetables|veggies|salad)(\b|$)/i.test(lower)) {
+    return pick(vegOpts);
+  }
+  return food;
+}
+
+// Compute a boolean array for a 7-day schedule with evenly spaced training flags
+function computeTrainingSchedule(trainingDays: number): boolean[] {
+  const days = 7;
+  const result = Array(days).fill(false);
+  const n = Math.max(0, Math.min(trainingDays, 7));
+  if (n === 0) return result;
+  const step = days / n;
+  let pos = 0.0;
+  for (let i = 0; i < n; i++) {
+    const idx = Math.min(6, Math.round(pos));
+    result[idx] = true;
+    pos += step;
+  }
+  // Ensure exact count
+  let count = result.filter(Boolean).length;
+  let j = 0;
+  while (count < n && j < days) {
+    if (!result[j]) { result[j] = true; count++; }
+    j++;
+  }
+  while (count > n && j >= 0) {
+    if (result[j]) { result[j] = false; count--; }
+    j--;
+  }
+  return result;
+}
+
+function ensureIntensityLabel(user: User, isTraining: boolean): string {
+  if (!isTraining) return 'Low';
+  if (user.workoutIntensity === 'Ego lifts') return 'High';
+  if (user.workoutIntensity === 'Recovery focused') return 'Low';
+  const lvl = (user as any).workoutIntensityLevel as number | undefined;
+  if (typeof lvl === 'number') {
+    if (lvl >= 8) return 'High';
+    if (lvl >= 5) return 'Moderate';
+    return 'Low';
+  }
+  return 'Moderate';
+}
+
+function appendConditioningIfGoal(workout: any, user: User, isTraining: boolean, sessionLengthMin: number): any {
+  if (!isTraining) return workout;
+  const goal = user.goal;
+  const clone = JSON.parse(JSON.stringify(workout || {}));
+  if (!Array.isArray(clone.blocks)) clone.blocks = [];
+  const canAdd = sessionLengthMin >= 40; // don't overload very short sessions
+  if (!canAdd) return clone;
+  if (goal === 'WEIGHT_LOSS' || goal === 'ENDURANCE') {
+    // Add brief conditioning/steps finisher
+    clone.blocks.push({
+      name: 'Conditioning/Steps',
+      items: [
+        { exercise: 'Incline walk / Bike / Row', sets: 1, reps: '10-15 min', RIR: 0 }
+      ]
+    });
+  }
+  return clone;
+}
+
+function ensureMealCount(nutrition: any, mealCount: number): any {
+  const clone = JSON.parse(JSON.stringify(nutrition || {}));
+  if (!Array.isArray(clone.meals)) clone.meals = [];
+  const current = clone.meals.length;
+  if (mealCount <= 0) mealCount = 1;
+  if (current > mealCount) {
+    clone.meals = clone.meals.slice(0, mealCount);
+  } else if (current < mealCount) {
+    const snack = { name: 'Snack', items: [{ food: 'Greek yogurt / Nuts / Protein shake', qty: '1 serving' }] };
+    while (clone.meals.length < mealCount) clone.meals.push(snack);
+  }
+  return clone;
 }
 

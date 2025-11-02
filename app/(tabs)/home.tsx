@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useCallback, useState } from 'react';
+import React, { useEffect, useMemo, useCallback, useState, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { Activity, TrendingUp, Dumbbell, Plus } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -17,21 +18,11 @@ import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription
 export default function HomeScreen() {
   const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate } = useUserStore();
   const auth = useAuth();
-  const { data: profile } = useProfile();
+  const { data: profile, isLoading: isProfileLoading } = useProfile();
   const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
   const insets = useSafeAreaInsets();
 
-  // Handle case where auth context isn't ready yet
-  if (!auth) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <ActivityIndicator size="large" color={theme.color.accent.primary} />
-        </View>
-      </View>
-    );
-  }
-
+  // Never early-return before all hooks are called; treat missing auth as loading in UI
   const session = auth?.session ?? null;
 
   // Always call hooks before any conditional returns
@@ -126,19 +117,65 @@ export default function HomeScreen() {
     router.push('/snap-food');
   }, []);
 
+  // Determine onboarding and subscription status using both local store and backend profile
+  const onboardingCompleteFlag = Boolean(user?.onboardingComplete) || Boolean(profile?.onboarding_complete);
+  const subscriptionActive = Boolean(profile?.subscription_active);
+
   useEffect(() => {
-    if (!isLoading && (user === null || (user && !user.onboardingComplete))) {
+    // Wait for both local store and profile to hydrate before deciding
+    if (isLoading || isProfileLoading) {
+      console.log('[Home] Still loading data...');
+      return;
+    }
+    
+    console.log('[Home] Onboarding check:', {
+      localOnboarded: user?.onboardingComplete,
+      profileOnboarded: profile?.onboarding_complete,
+      finalOnboarded: onboardingCompleteFlag,
+      subscriptionActive,
+    });
+    
+    if (!onboardingCompleteFlag && !subscriptionActive) {
+      console.log('[Home] User not onboarded, redirecting to onboarding');
       router.replace('/onboarding');
     }
-  }, [isLoading, user]);
+  }, [isLoading, isProfileLoading, onboardingCompleteFlag, subscriptionActive]);
 
-  if (isLoading || !user || !user.onboardingComplete) {
-    return (
-      <View style={styles.container}>
-        <Text>Loading...</Text>
-      </View>
-    );
-  }
+  // Delayed paywall gate after Home is opened (5s), to avoid interrupting login/launch
+  const paywallCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      // Only run when not hydrating and onboarding isn't redirecting
+      const isReadyForGate = !isLoading && !isProfileLoading && !!auth;
+      if (!isReadyForGate) return;
+      // Clear any existing timer before scheduling a new one
+      if (paywallCheckTimerRef.current) {
+        try { clearTimeout(paywallCheckTimerRef.current); } catch {}
+        paywallCheckTimerRef.current = null;
+      }
+      paywallCheckTimerRef.current = setTimeout(async () => {
+        try {
+          const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
+          const entitled = await hasActiveSubscription();
+          if (!entitled) {
+            router.replace({ pathname: '/paywall', params: { next: '/(tabs)/home', blocking: 'true' } as any });
+          }
+        } catch (e) {
+          // On error, do nothing to avoid interrupting the session unnecessarily
+        }
+      }, 5000);
+      return () => {
+        if (paywallCheckTimerRef.current) {
+          try { clearTimeout(paywallCheckTimerRef.current); } catch {}
+          paywallCheckTimerRef.current = null;
+        }
+      };
+    }, [isLoading, isProfileLoading, auth?.session?.user?.id])
+  );
+
+  // Flags for UI states; do not early-return to keep hook order consistent
+  const isHydrating = isLoading || isProfileLoading || !auth;
+  const shouldHoldForOnboardingRedirect = !isHydrating && !onboardingCompleteFlag && !subscriptionActive;
 
   const handleCheckin = () => {
     router.push('/checkin');
@@ -183,13 +220,37 @@ export default function HomeScreen() {
   const workoutCardTitle = workoutComplete ? 'Workout Completed' : 'Start Workout';
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
-      <View style={[styles.safeArea, { paddingTop: insets.top }]}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+    <View style={[styles.container, { backgroundColor: theme.color.bg }]}> 
+      <View style={[styles.safeArea, { paddingTop: insets.top }]}> 
+        {isHydrating || shouldHoldForOnboardingRedirect ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color={theme.color.accent.primary} />
+          </View>
+        ) : (
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <View style={styles.header}>
             <Text style={styles.greeting}>{getGreeting()},</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={styles.userName} testID="home-greeting-name">{(profile?.name ?? session?.user?.user_metadata?.name ?? user?.name ?? session?.user?.email ?? '—').split(' ')[0]}! 👋</Text>
+              <Text style={styles.userName} testID="home-greeting-name">
+                {(() => {
+                  const displayName = (profile?.name ?? session?.user?.user_metadata?.name ?? user?.name ?? session?.user?.email ?? '—').split(' ')[0];
+                  console.log('[Home] Display name sources:', {
+                    profileName: profile?.name,
+                    sessionMetadataName: session?.user?.user_metadata?.name,
+                    localUserName: user?.name,
+                    sessionEmail: session?.user?.email,
+                    finalDisplayName: displayName,
+                  });
+                  return displayName;
+                })()}! 👋
+              </Text>
               {subscriptionBadge && (
                 <View style={[styles.badge, subscriptionBadge === 'Elite' ? styles.eliteBadge : styles.trialBadge]}>
                   <Text style={[styles.badgeText, subscriptionBadge === 'Elite' ? styles.eliteText : styles.trialText]}>{subscriptionBadge}</Text>
@@ -334,6 +395,7 @@ export default function HomeScreen() {
             </View>
           </View>
         </ScrollView>
+        )}
       </View>
     </View>
   );

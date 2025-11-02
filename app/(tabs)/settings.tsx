@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Image, Modal, Switch, Platform, SafeAreaView, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, Switch, Platform, SafeAreaView, ActivityIndicator } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
 // Dynamic import of print/sharing to avoid build errors when modules are unavailable
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react-native';
+import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp, Bell, Pill } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { useUserStore } from '@/hooks/useUserStore';
 import { GOALS } from '@/constants/fitness';
@@ -11,6 +12,13 @@ import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
 import { getSubscriptionTier } from '@/utils/subscription-helpers';
+import { 
+  scheduleWorkoutReminder,
+  scheduleDailyCheckInReminder,
+  scheduleDailyCheckInReminderFromString,
+  cancelNotificationsByType
+} from '@/utils/notifications';
+import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notification-storage';
 
 export default function SettingsScreen() {
   const { user, checkins, plans, clearAllData, getRecentCheckins, getWeightData, getWeightProgress, syncLocalToBackend } = useUserStore();
@@ -21,6 +29,7 @@ export default function SettingsScreen() {
   const [showWeeklyCallsModal, setShowWeeklyCallsModal] = useState(false);
   const [notifyWhenAvailable, setNotifyWhenAvailable] = useState(false);
   const [showFaqs, setShowFaqs] = useState(false);
+  const [allNotificationsEnabled, setAllNotificationsEnabled] = useState(true);
 
   // Handle case where auth context isn't ready yet
   if (!auth) {
@@ -66,6 +75,16 @@ export default function SettingsScreen() {
       answer: "Clearing data permanently deletes your profile, check-ins, plans, and progress history. This action cannot be undone, so make sure to export your data first if you want to keep it."
     }
   ];
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const prefs = await getNotificationPreferences();
+        const allOn = !!(prefs.workoutRemindersEnabled && prefs.checkInRemindersEnabled && prefs.milestonesEnabled);
+        setAllNotificationsEnabled(allOn);
+      } catch {}
+    })();
+  }, []);
 
   // Real subscription status via RevenueCat
   const [subscriptionInfo, setSubscriptionInfo] = useState<{ status: 'trial' | 'elite' | 'none'; label: string }>({ status: 'trial', label: 'Trial' });
@@ -299,7 +318,14 @@ export default function SettingsScreen() {
   return (
     <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
       <View style={[styles.safeArea, { paddingTop: insets.top }]}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <View style={styles.header}>
             <Text style={styles.title}>Settings</Text>
             <Text style={styles.subtitle}>Manage your Liftor experience</Text>
@@ -308,9 +334,10 @@ export default function SettingsScreen() {
           <Card style={styles.profileCard}>
             <View style={styles.profileHeader}>
               {session?.user?.user_metadata?.avatar_url ? (
-                <Image
+                <ExpoImage
                   source={{ uri: session.user.user_metadata.avatar_url as string }}
                   style={styles.avatarSmall}
+                  contentFit="cover"
                 />
               ) : (
                 <User color={theme.color.accent.primary} size={24} />
@@ -427,6 +454,51 @@ export default function SettingsScreen() {
             </View>
           </Card>
 
+          <Card style={styles.settingCard}>
+            <View style={styles.settingHeader}>
+              <Bell color={theme.color.accent.blue} size={24} />
+              <Text style={styles.settingTitle}>Notifications</Text>
+            </View>
+
+            <View style={[styles.notificationToggleContainer, styles.notificationRow]}>
+              <View style={styles.notificationToggleLeft}>
+                <Text style={styles.notificationToggleLabel}>Enable Notifications</Text>
+                <Text style={styles.notificationSubtext}>
+                  {`Includes workout reminders${user?.preferredTrainingTime ? ` (10 min before ${user.preferredTrainingTime})` : ''} and daily check-in alerts ${user?.checkInReminderTime ? `(${user.checkInReminderTime})` : '(set your time in Edit Profile)'}.`}
+                </Text>
+              </View>
+              <Switch
+                value={allNotificationsEnabled}
+                onValueChange={async (value) => {
+                  setAllNotificationsEnabled(value);
+                  const prefs = await getNotificationPreferences();
+                  await saveNotificationPreferences({ 
+                    ...prefs, 
+                    workoutRemindersEnabled: value, 
+                    checkInRemindersEnabled: value, 
+                    milestonesEnabled: value 
+                  });
+                  if (value) {
+                    if (user?.preferredTrainingTime) {
+                      await scheduleWorkoutReminder(user.preferredTrainingTime);
+                    }
+                    if (user?.checkInReminderTime) {
+                      await scheduleDailyCheckInReminderFromString(user.checkInReminderTime);
+                    }
+                  } else {
+                    await cancelNotificationsByType('workout_reminder');
+                    await cancelNotificationsByType('checkin_reminder');
+                  }
+                }}
+                trackColor={{ 
+                  false: theme.color.line, 
+                  true: theme.color.accent.primary + '40' 
+                }}
+                thumbColor={allNotificationsEnabled ? theme.color.accent.primary : theme.color.muted}
+              />
+            </View>
+          </Card>
+
           <Card style={styles.faqCard}>
             <TouchableOpacity
               style={styles.faqToggleButton}
@@ -458,6 +530,20 @@ export default function SettingsScreen() {
                 ))}
               </View>
             )}
+          </Card>
+
+          <Card style={styles.actionsCard}>
+            <Text style={styles.actionsTitle}>Health & Nutrition</Text>
+            <TouchableOpacity 
+              style={styles.actionButton}
+              onPress={() => router.push('/supplements')}
+            >
+              <View style={styles.actionButtonLeft}>
+                <Pill color={theme.color.ink} size={20} />
+                <Text style={styles.actionButtonText}>View Supplements</Text>
+              </View>
+              <ChevronRight color={theme.color.muted} size={20} />
+            </TouchableOpacity>
           </Card>
 
           <Card style={styles.actionsCard}>
@@ -542,7 +628,7 @@ export default function SettingsScreen() {
         accessible={true}
         accessibilityLabel="Weekly Calls Information Modal"
       >
-        <View style={styles.modalOverlay}>
+        <View style={styles.modalOverlay} pointerEvents="box-none">
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View style={styles.modalTitleContainer}>
@@ -878,6 +964,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: theme.color.ink,
     fontWeight: '500',
+  },
+  notificationSubtext: {
+    fontSize: 12,
+    color: theme.color.muted,
+    marginTop: 4,
+  },
+  notificationRow: {
+    alignItems: 'center',
+  },
+  notificationToggleLeft: {
+    flex: 1,
+    paddingRight: theme.space.sm,
   },
   modalButton: {
     backgroundColor: theme.color.accent.primary,

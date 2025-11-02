@@ -1,26 +1,65 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { ArrowLeft, Settings, Save, Calendar } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { useUserStore } from '@/hooks/useUserStore';
-import { GOALS } from '@/constants/fitness';
+import { GOALS, TRAINING_LEVELS } from '@/constants/fitness';
 import { router } from 'expo-router';
 import { theme } from '@/constants/colors';
-import type { User, Equipment, DietaryPref, WorkoutIntensity } from '@/types/user';
+import type { User, Equipment, DietaryPref, WorkoutIntensity, TrainingLevel } from '@/types/user';
+import Slider from '@react-native-community/slider';
 import { useAuth } from '@/hooks/useAuth';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
 
-const WORKOUT_SPLITS = [
-  { id: '3', label: 'Full Body (3 days)', description: 'Complete body workout 3x per week' },
-  { id: '4', label: 'Upper/Lower (4 days)', description: 'Alternating upper and lower body' },
-  { id: '5', label: 'Push/Pull/Legs + Upper/Lower (5 days)', description: 'PPL with additional upper/lower' },
-  { id: '6', label: 'Push/Pull/Legs x2 (6 days)', description: 'PPL routine twice per week' },
-  { id: '2', label: 'Full Body + Pump (2 days)', description: 'Basic full body with pump session' },
-];
+// Simple vertical wheel component (alarm-like) with snap-to-item behavior
+function ScrollWheel({ data, index, onChange }: { data: string[]; index: number; onChange: (i: number) => void }) {
+  const ITEM_HEIGHT = 44;
+  const scrollRef = useRef<ScrollView>(null);
+  const topBottomPad = ITEM_HEIGHT * 2; // to center selected item
+
+  useEffect(() => {
+    try {
+      scrollRef.current?.scrollTo({ y: index * ITEM_HEIGHT, animated: true });
+    } catch {}
+  }, [index]);
+
+  const onEnd = (e: any) => {
+    const y = e?.nativeEvent?.contentOffset?.y || 0;
+    const i = Math.max(0, Math.min(data.length - 1, Math.round(y / ITEM_HEIGHT)));
+    if (i !== index) onChange(i);
+  };
+
+  return (
+    <View style={styles.wheel}>
+      <ScrollView
+        ref={scrollRef}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={ITEM_HEIGHT}
+        decelerationRate="fast"
+        onMomentumScrollEnd={onEnd}
+        onScrollEndDrag={onEnd}
+        nestedScrollEnabled
+        contentContainerStyle={{ paddingVertical: topBottomPad }}
+      >
+        {data.map((item, i) => (
+          <View key={`${item}-${i}`} style={styles.wheelItem}>
+            <Text style={[styles.wheelItemText, i === index && styles.wheelItemSelected]}>{item}</Text>
+          </View>
+        ))}
+      </ScrollView>
+      <View pointerEvents="none" style={styles.wheelOverlay} />
+    </View>
+  );
+}
+
+// Placeholder for potential future reuse; currently unused visual wrapper
+function ScrollWheelComponent() { return null; }
+
 
 const TRAINING_TIMES = [
   'Early Morning (5-7 AM)',
@@ -63,6 +102,29 @@ export default function ProgramSettingsScreen() {
   const [initialSnapshot, setInitialSnapshot] = useState<Partial<User> | null>(null);
   const navigation = useNavigation();
 
+  // --- Alarm-style time picker state for Daily Check-in ---
+  const HOURS = useMemo(() => Array.from({ length: 12 }, (_, i) => String(i + 1)), []);
+  const MINUTES = useMemo(() => Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')), []);
+  const PERIODS = ['AM', 'PM'] as const;
+  const parseTimeParts = useCallback((time: string | undefined | null) => {
+    const str = (time || '9:00 AM').toUpperCase().trim();
+    const isPM = str.includes('PM');
+    const isAM = str.includes('AM');
+    const t = str.replace(/AM|PM/gi, '').trim();
+    const [hStr, mStr = '0'] = t.split(':');
+    let h = parseInt(hStr || '9', 10);
+    const m = Math.min(59, Math.max(0, parseInt(mStr || '0', 10)));
+    if (Number.isNaN(h)) h = 9;
+    // Normalize hour to 1-12 for wheel
+    if (h === 0) h = 12;
+    if (h > 12) h = h - 12;
+    const p = isPM ? 'PM' : 'AM';
+    return { hour12: h, minute: m, period: p as 'AM' | 'PM' };
+  }, []);
+  const [hourIndex, setHourIndex] = useState(8); // 9 AM default (index 8)
+  const [minuteIndex, setMinuteIndex] = useState(0);
+  const [periodIndex, setPeriodIndex] = useState(0);
+
   // Handle case where auth context isn't ready yet
   if (!auth) {
     return (
@@ -104,9 +166,11 @@ export default function ProgramSettingsScreen() {
         alcoholFrequency: user.alcoholFrequency || '',
         stressBaseline: user.stressBaseline || 5,
         sleepQualityBaseline: user.sleepQualityBaseline || 7,
-        preferredWorkoutSplit: user.preferredWorkoutSplit || '',
         specialRequests: user.specialRequests || '',
         workoutIntensity: user.workoutIntensity || 'Optimal',
+        workoutIntensityLevel: user.workoutIntensityLevel || 6,
+        trainingLevel: user.trainingLevel || 'Beginner',
+        checkInReminderTime: user.checkInReminderTime || '9:00 AM',
       });
       // Capture initial snapshot for dirty checks
       setInitialSnapshot({
@@ -134,12 +198,21 @@ export default function ProgramSettingsScreen() {
         alcoholFrequency: user.alcoholFrequency || '',
         stressBaseline: user.stressBaseline || 5,
         sleepQualityBaseline: user.sleepQualityBaseline || 7,
-        preferredWorkoutSplit: user.preferredWorkoutSplit || '',
         specialRequests: user.specialRequests || '',
         workoutIntensity: user.workoutIntensity || 'Optimal',
+        workoutIntensityLevel: user.workoutIntensityLevel || 6,
+        trainingLevel: user.trainingLevel || 'Beginner',
+        checkInReminderTime: user.checkInReminderTime || '9:00 AM',
       });
+      // Initialize wheel indices from existing value
+      try {
+        const parts = parseTimeParts(user.checkInReminderTime || '9:00 AM');
+        setHourIndex(Math.max(0, HOURS.indexOf(String(parts.hour12))));
+        setMinuteIndex(Math.max(0, MINUTES.indexOf(String(parts.minute).padStart(2, '0'))));
+        setPeriodIndex(parts.period === 'PM' ? 1 : 0);
+      } catch {}
     }
-  }, [user]);
+  }, [user, parseTimeParts, HOURS, MINUTES]);
 
   // Normalize and compare to detect unsaved changes
   const normalizeForm = (data: Partial<User> = {}) => {
@@ -188,6 +261,11 @@ export default function ProgramSettingsScreen() {
     try {
       const updatedUser = { ...user, ...formData };
       await updateUser(updatedUser);
+      // Reschedule daily check-in reminder if time changed
+      try {
+        const { scheduleDailyCheckInReminderFromString } = await import('@/utils/notifications');
+        await scheduleDailyCheckInReminderFromString(updatedUser.checkInReminderTime || '9:00 AM');
+      } catch {}
       // Best-effort: persist preferences to Supabase profiles
       try {
         if (session?.user?.id) {
@@ -196,7 +274,11 @@ export default function ProgramSettingsScreen() {
             .update({ 
               goal_weight: typeof formData.goalWeight === 'number' ? Math.round(formData.goalWeight) : formData.goalWeight ?? null,
               dietary_notes: formData.dietaryNotes || null,
-              workout_intensity: formData.workoutIntensity || null
+              workout_intensity: formData.workoutIntensity || null,
+              workout_intensity_level: formData.workoutIntensityLevel || null,
+              training_level: formData.trainingLevel || null,
+              // Store the chosen check-in reminder time (if column exists, otherwise ignored by PostgREST)
+              checkin_reminder_time: updatedUser.checkInReminderTime || null
             })
             .eq('id', session.user.id);
         }
@@ -238,7 +320,7 @@ export default function ProgramSettingsScreen() {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
+    <KeyboardDismissView style={[styles.container, { backgroundColor: theme.color.bg }]}>
       <View style={[styles.safeArea, { paddingTop: insets.top }]}>
         <View style={styles.header}>
           <TouchableOpacity 
@@ -252,6 +334,8 @@ export default function ProgramSettingsScreen() {
         </View>
 
         <ScrollView contentContainerStyle={styles.scrollContent}>
+          {/* Inline component: vertical scroll wheel */}
+          <ScrollWheelComponent />
           {/* Basic Settings */}
           <Card style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
@@ -374,29 +458,81 @@ export default function ProgramSettingsScreen() {
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.fieldLabel}>Preferred Workout Split</Text>
-              <View style={styles.chipContainer}>
-                {WORKOUT_SPLITS.map((split) => (
-                  <Chip
-                    key={split.id}
-                    label={split.label}
-                    selected={formData.preferredWorkoutSplit === split.id}
-                    onPress={() => updateFormField('preferredWorkoutSplit', split.id)}
+              <Text style={styles.fieldLabel}>Daily Check-in Reminder Time</Text>
+              <Text style={styles.fieldDescription}>Drag the wheels like an alarm clock.</Text>
+              <View style={styles.timePickerRow}>
+                <ScrollWheel
+                  data={HOURS}
+                  index={hourIndex}
+                  onChange={(i) => {
+                    setHourIndex(i);
+                    const val = `${HOURS[i]}:${MINUTES[minuteIndex]} ${PERIODS[periodIndex]}`;
+                    updateFormField('checkInReminderTime', val);
+                  }}
+                />
+                <Text style={styles.timeColon}>:</Text>
+                <ScrollWheel
+                  data={MINUTES}
+                  index={minuteIndex}
+                  onChange={(i) => {
+                    setMinuteIndex(i);
+                    const val = `${HOURS[hourIndex]}:${MINUTES[i]} ${PERIODS[periodIndex]}`;
+                    updateFormField('checkInReminderTime', val);
+                  }}
+                />
+                <ScrollWheel
+                  data={[...PERIODS] as unknown as string[]}
+                  index={periodIndex}
+                  onChange={(i) => {
+                    setPeriodIndex(i);
+                    const val = `${HOURS[hourIndex]}:${MINUTES[minuteIndex]} ${PERIODS[i]}`;
+                    updateFormField('checkInReminderTime', val);
+                  }}
+                />
+              </View>
+              <Text style={styles.currentTimePreview}>Selected: {formData.checkInReminderTime || `${HOURS[hourIndex]}:${MINUTES[minuteIndex]} ${PERIODS[periodIndex]}`}</Text>
+            </View>
 
-                  />
-                ))}
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Workout Intensity</Text>
+              <Text style={styles.fieldDescription}>
+                How hard do you want to push in each workout? 1 is very light effort, 10 is maximum intensity. We'll estimate your fitness level automatically.
+              </Text>
+              <View style={styles.sliderContainer}>
+                <Text style={styles.sliderValue}>
+                  {formData.workoutIntensityLevel || 6}/10
+                  {(formData.workoutIntensityLevel || 6) <= 3 ? ' (Light)' : (formData.workoutIntensityLevel || 6) <= 6 ? ' (Moderate)' : ' (High Intensity)'}
+                </Text>
+                <Slider
+                  style={styles.slider}
+                  minimumValue={1}
+                  maximumValue={10}
+                  step={1}
+                  value={formData.workoutIntensityLevel || 6}
+                  onValueChange={(value) => updateFormField('workoutIntensityLevel', value)}
+                  minimumTrackTintColor={theme.color.accent.primary}
+                  maximumTrackTintColor={theme.color.line}
+                  thumbTintColor={theme.color.accent.primary}
+                />
+                <View style={styles.sliderLabels}>
+                  <Text style={styles.sliderLabelText}>1 (Very Light)</Text>
+                  <Text style={styles.sliderLabelText}>10 (Max Effort)</Text>
+                </View>
               </View>
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.fieldLabel}>Workout Intensity Preference</Text>
+              <Text style={styles.fieldLabel}>Training Level</Text>
+              <Text style={styles.fieldDescription}>
+                Your training experience helps us set appropriate volume and progression.
+              </Text>
               <View style={styles.chipContainer}>
-                {WORKOUT_INTENSITY_OPTIONS.map((intensity) => (
+                {TRAINING_LEVELS.map((level) => (
                   <Chip
-                    key={intensity.id}
-                    label={intensity.label}
-                    selected={formData.workoutIntensity === intensity.id}
-                    onPress={() => updateFormField('workoutIntensity', intensity.id)}
+                    key={level.id}
+                    label={level.label}
+                    selected={formData.trainingLevel === level.id}
+                    onPress={() => updateFormField('trainingLevel', level.id)}
                   />
                 ))}
               </View>
@@ -468,16 +604,25 @@ export default function ProgramSettingsScreen() {
 
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Meals per Day</Text>
-              <View style={styles.chipContainer}>
-                {MEAL_COUNTS.map((count) => (
-                  <Chip
-                    key={count}
-                    label={`${count} meals`}
-                    selected={formData.mealCount === count}
-                    onPress={() => updateFormField('mealCount', count)}
-
-                  />
-                ))}
+              <View style={styles.sliderContainer}>
+                <Text style={styles.sliderValue}>
+                  {formData.mealCount || 4} {(formData.mealCount || 4) === 1 ? 'meal' : 'meals'}
+                </Text>
+                <Slider
+                  style={styles.slider}
+                  minimumValue={1}
+                  maximumValue={8}
+                  step={1}
+                  value={formData.mealCount || 4}
+                  onValueChange={(value) => updateFormField('mealCount', value)}
+                  minimumTrackTintColor={theme.color.accent.primary}
+                  maximumTrackTintColor={theme.color.line}
+                  thumbTintColor={theme.color.accent.primary}
+                />
+                <View style={styles.sliderLabels}>
+                  <Text style={styles.sliderLabelText}>1</Text>
+                  <Text style={styles.sliderLabelText}>8</Text>
+                </View>
               </View>
             </View>
           </Card>
@@ -506,7 +651,7 @@ export default function ProgramSettingsScreen() {
               onPress={handleSavePreferences}
               style={[styles.saveButton, styles.prettyButton]}
               textStyle={styles.prettyButtonText}
-              icon={<Save color={theme.color.bg} size={20} />}
+              icon={<Save color={theme.color.ink} size={20} />}
             />
           </View>
 
@@ -533,7 +678,7 @@ export default function ProgramSettingsScreen() {
           )}
         </ScrollView>
       </View>
-    </View>
+    </KeyboardDismissView>
   );
 }
 
@@ -604,6 +749,56 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
   },
 
+  // Time picker styles
+  timePickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.space.md,
+  },
+  timeColon: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.ink,
+  },
+  currentTimePreview: {
+    marginTop: theme.space.sm,
+    color: theme.color.muted,
+    fontSize: theme.size.label,
+  },
+  wheel: {
+    width: 72,
+    height: 44 * 5,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.color.card,
+    overflow: 'hidden',
+  },
+  wheelItem: {
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wheelItemText: {
+    fontSize: 16,
+    color: theme.color.muted,
+  },
+  wheelItemSelected: {
+    color: theme.color.ink,
+    fontWeight: '600',
+  },
+  wheelOverlay: {
+    position: 'absolute',
+    top: (44 * 5) / 2 - 22,
+    left: 0,
+    right: 0,
+    height: 44,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: theme.color.accent.primary + '40',
+  },
+
   textInput: {
     borderWidth: 1,
     borderColor: theme.color.line,
@@ -670,5 +865,30 @@ const styles = StyleSheet.create({
     color: theme.color.bg,
     fontSize: theme.size.label,
     fontWeight: '600',
+  },
+  sliderContainer: {
+    marginTop: theme.space.sm,
+    marginBottom: theme.space.md,
+  },
+  slider: {
+    width: '100%',
+    height: 40,
+  },
+  sliderValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.ink,
+    textAlign: 'center',
+    marginBottom: theme.space.sm,
+  },
+  sliderLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.space.xs,
+  },
+  sliderLabelText: {
+    fontSize: 11,
+    color: theme.color.muted,
+    fontWeight: '500',
   },
 });

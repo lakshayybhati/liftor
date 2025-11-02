@@ -20,6 +20,9 @@
         "NSCameraUsageDescription": "Allow $(PRODUCT_NAME) to access your camera",
         "NSMicrophoneUsageDescription": "Allow $(PRODUCT_NAME) to access your microphone",
         "NSPhotoLibraryUsageDescription": "Allow $(PRODUCT_NAME) to access your photos",
+        "UIBackgroundModes": [
+          "remote-notification"
+        ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false,
           "NSAllowsLocalNetworking": true,
@@ -59,6 +62,7 @@
       },
       "package": "app.liftor",
       "versionCode": 1,
+      "useNextNotificationsApi": true,
       "permissions": [
         "android.permission.VIBRATE",
         "android.permission.CAMERA",
@@ -104,8 +108,22 @@
         {
           "photosPermission": "The app accesses your photos to let you share them with your friends."
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#E22118",
+          "sounds": [],
+          "mode": "production"
+        }
       ]
     ],
+    "notification": {
+      "icon": "./assets/images/icon.png",
+      "color": "#E22118",
+      "androidMode": "default"
+    },
     "extra": {
       "EXPO_PUBLIC_REVENUECAT_IOS_API_KEY": "appl_CfuHeBCwQmEZeYiYLvtHInhIQVs",
       "EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY": "goog_txuAMppyVuWBJpJAtpWcwrhMxYl",

@@ -6,6 +6,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
 import { theme } from '@/constants/colors';
+import { Dumbbell, Apple, Heart, Calendar } from 'lucide-react-native';
 import { generateWeeklyBasePlan } from '@/services/documented-ai-service';
 import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
@@ -37,6 +38,12 @@ export default function GeneratingBasePlanScreen() {
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
   const navigation = useNavigation();
+  const [showFeaturePreview, setShowFeaturePreview] = useState(false);
+  const featureFade = useMemo(() => new Animated.Value(0), []);
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [navLocked, setNavLocked] = useState(true);
+  const navLockedRef = useRef(true);
+  const unlockNavigation = () => { navLockedRef.current = false; setNavLocked(false); };
 
   const generatePlan = useCallback(async () => {
     try {
@@ -104,6 +111,8 @@ export default function GeneratingBasePlanScreen() {
       const basePlan = await generateWeeklyBasePlan(user);
       const generationTime = Date.now() - startTime;
       clearTimeout(slowTimer);
+      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
+      setShowFeaturePreview(false);
       
       // Log successful generation
       await logPlanGenerationAttempt('base', true, null, {
@@ -131,17 +140,11 @@ export default function GeneratingBasePlanScreen() {
       // React state updates are asynchronous and batched
       console.log('[GenerateBasePlan] ⏳ Waiting for state propagation...');
       
-      // Navigation approach - Direct to home for Expo reliability
+      // Navigation approach - Always go to plan-preview
       setTimeout(async () => {
         try {
-          // For Expo development, go directly to home where plan is available
-          if (__DEV__) {
-            console.log('[GenerateBasePlan] 🏠 Expo Dev: Navigating directly to home');
-            router.replace('/(tabs)/home');
-            return;
-          }
-          
-          // For production, try plan-preview first
+          unlockNavigation();
+          // Try plan-preview first
           console.log('[GenerateBasePlan] 🚀 Attempting navigation to plan-preview');
           router.push('/plan-preview');
           console.log('[GenerateBasePlan] ✅ Navigation push executed');
@@ -154,10 +157,11 @@ export default function GeneratingBasePlanScreen() {
         } catch (navError) {
           console.error('[GenerateBasePlan] ❌ Navigation error:', navError);
           
-          // Fallback: Try direct navigation to home as last resort
+          // Fallback: Try direct navigation to plan-preview as last resort
           setTimeout(() => {
-            console.log('[GenerateBasePlan] 🏠 Fallback: navigating to home');
-            router.replace('/(tabs)/home');
+            console.log('[GenerateBasePlan] 🔁 Fallback: navigating to plan-preview');
+            unlockNavigation();
+            try { router.replace('/plan-preview'); } catch {}
           }, 100);
         }
       }, 1500); // Increased to 1500ms for better reliability
@@ -212,28 +216,25 @@ export default function GeneratingBasePlanScreen() {
       
       // Set generating to false first
       setIsGenerating(false);
+      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
+      setShowFeaturePreview(false);
       
       // Wait for state to propagate before navigating
       console.log('[GenerateBasePlan] ⏳ Waiting for state propagation (fallback)...');
       setTimeout(() => {
-        // For Expo dev, go directly to home
-        if (__DEV__) {
-          console.log('[GenerateBasePlan] 🏠 Expo Dev (fallback): Navigating directly to home');
-          router.replace('/(tabs)/home');
-          return;
-        }
-        
         console.log('[GenerateBasePlan] 🚀 Navigating to plan-preview (fallback)');
         
         // Try push first, then replace
         try {
+          unlockNavigation();
           router.push('/plan-preview');
           setTimeout(() => {
             router.replace('/plan-preview');
           }, 500);
         } catch (e) {
           console.error('[GenerateBasePlan] Fallback navigation error:', e);
-          router.replace('/(tabs)/home');
+          unlockNavigation();
+          try { router.replace('/plan-preview'); } catch {}
         }
       }, 1500);
     }
@@ -243,6 +244,12 @@ export default function GeneratingBasePlanScreen() {
   const createEmergencyFallbackPlan = (): WeeklyBasePlan => {
     const targetCalories = user?.dailyCalorieTarget || 2000;
     const targetProtein = user?.weight ? Math.round(user.weight * 2.2 * 0.9) : 150;
+    const trainingDays = user?.trainingDays ?? 3;
+    const diet: ('vegetarian' | 'eggitarian' | 'nonveg') = user?.dietaryPrefs?.includes('Vegetarian')
+      ? 'vegetarian'
+      : user?.dietaryPrefs?.includes('Eggitarian')
+        ? 'eggitarian'
+        : 'nonveg';
     
     const createDayPlan = (focus: string, isRest: boolean = false) => ({
       workout: {
@@ -275,24 +282,24 @@ export default function GeneratingBasePlanScreen() {
             {
               name: 'Breakfast',
               items: [
-              { food: 'High-protein breakfast', qty: '1 serving' },
-              { food: 'Complex carbs', qty: '1 serving' }
+              { food: diet === 'vegetarian' ? 'Oats + plant protein' : diet === 'eggitarian' ? 'Eggs + toast' : 'Greek yogurt + protein', qty: diet === 'eggitarian' ? '3 eggs + 2 slices' : '1 serving' },
+              { food: 'Fruit', qty: '1 piece' }
               ]
             },
             {
               name: 'Lunch',
               items: [
-              { food: 'Lean protein', qty: '150g' },
-              { food: 'Whole grains', qty: '1 cup' },
-              { food: 'Vegetables', qty: '2 cups' }
+              { food: diet === 'vegetarian' ? 'Paneer/Tofu' : diet === 'eggitarian' ? 'Eggs' : 'Chicken/Fish', qty: '150-200g' },
+              { food: 'Rice/Quinoa/Roti', qty: '1 cup / 2 rotis' },
+              { food: 'Mixed vegetables', qty: '2 cups' }
               ]
             },
             {
               name: 'Dinner',
               items: [
-              { food: 'Quality protein', qty: '150g' },
-              { food: 'Complex carbs', qty: '1 cup' },
-              { food: 'Salad', qty: '2 cups' }
+              { food: diet === 'vegetarian' ? 'Paneer/Tofu' : diet === 'eggitarian' ? 'Egg whites' : 'Fish/Egg whites', qty: '150-200g' },
+              { food: 'Sweet potato/Rice', qty: '1 medium / 1 cup' },
+              { food: 'Salad (cucumber, tomato, greens)', qty: '2 cups' }
             ]
           }
         ],
@@ -300,22 +307,31 @@ export default function GeneratingBasePlanScreen() {
       },
       recovery: {
         mobility: ['Stretching routine', 'Focus on tight areas'],
-        sleep: ['7-8 hours recommended', 'Consistent bedtime']
+        sleep: ['7-8 hours recommended', 'Consistent bedtime'],
+        careNotes: isRest ? 'Gentle day. Prioritize walks, sunlight, and breath work.' : 'Hydrate and add 10-min walk post-meal to aid recovery.',
+        supplements: ['Magnesium (evening)', 'Omega‑3 (with meals)']
+      }
+    });
+
+    // Distribute training days first, remaining days as recovery, no fixed weekdays
+    const order = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    const focuses = ['Upper Body','Lower Body','Full Body','Push','Pull','Legs','Core'];
+    let trainIdx = 0;
+    const days: any = {};
+    order.forEach((d, i) => {
+      if (trainIdx < trainingDays) {
+        const focus = focuses[trainIdx % focuses.length];
+        days[d] = createDayPlan(focus, false);
+        trainIdx++;
+      } else {
+        days[d] = createDayPlan('Recovery', true);
       }
     });
 
     return {
         id: Date.now().toString(),
         createdAt: new Date().toISOString(),
-        days: {
-        monday: createDayPlan('Upper Body'),
-        tuesday: createDayPlan('Lower Body'),
-        wednesday: createDayPlan('Rest/Recovery', true),
-        thursday: createDayPlan('Upper Body'),
-        friday: createDayPlan('Lower Body'),
-        saturday: createDayPlan('Full Body'),
-        sunday: createDayPlan('Rest/Recovery', true)
-        },
+        days,
         isLocked: false,
       };
   };
@@ -343,24 +359,28 @@ export default function GeneratingBasePlanScreen() {
 
     generatePlan();
 
-    return () => clearInterval(messageInterval);
+    // Start 30s timer to reveal feature preview overlay
+    previewTimerRef.current = setTimeout(() => {
+      setShowFeaturePreview(true);
+      Animated.timing(featureFade, { toValue: 1, duration: 450, useNativeDriver: true }).start();
+    }, 30000);
+
+    return () => {
+      clearInterval(messageInterval);
+      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
+    };
   }, []);
 
   // Ensure back/gesture takes user to home, not check-in or previous steps
   useEffect(() => {
     const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
-      e.preventDefault();
-      // Defer navigation to avoid update during render
-      setTimeout(() => {
-        router.replace('/(tabs)/home');
-      }, 0);
+      if (navLockedRef.current) {
+        e.preventDefault();
+        return;
+      }
     });
     const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
-      // Defer navigation to avoid update during render
-      setTimeout(() => {
-        router.replace('/(tabs)/home');
-      }, 0);
-      return true;
+      return navLockedRef.current; // true => block
     });
     return () => {
       try { unsubBeforeRemove(); } catch {}
@@ -376,6 +396,7 @@ export default function GeneratingBasePlanScreen() {
       <Stack.Screen 
         options={{ 
           headerShown: false,
+          gestureEnabled: false,
         }} 
       />
       
@@ -403,6 +424,48 @@ export default function GeneratingBasePlanScreen() {
             </View>
           </View>
         </View>
+
+        {/* Timed Feature Preview Overlay (shows after 30s) */}
+        {showFeaturePreview && (
+          <Animated.View style={[styles.previewOverlay, { opacity: featureFade }]}> 
+            <View style={styles.previewCardContainer}>
+              <Text style={styles.previewTitle}>Almost there… here’s a quick peek</Text>
+              <View style={styles.previewGrid}>
+                <View style={styles.previewCard}>
+                  <View style={styles.previewHeaderRow}>
+                    <Dumbbell size={20} color={theme.color.accent.primary} />
+                    <Text style={styles.previewHeaderText}>Workout</Text>
+                  </View>
+                  <Text style={styles.previewLine}>• Upper Body focus</Text>
+                  <Text style={styles.previewLine}>• 3×8–12 Main Lifts</Text>
+                  <Text style={styles.previewLine}>• Warm-up & Cool‑down</Text>
+                </View>
+                <View style={styles.previewCard}>
+                  <View style={styles.previewHeaderRow}>
+                    <Apple size={20} color={theme.color.accent.green} />
+                    <Text style={styles.previewHeaderText}>Nutrition</Text>
+                  </View>
+                  <Text style={styles.previewLine}>Calories matched to your goal</Text>
+                  <Text style={styles.previewLine}>Balanced meals for the day</Text>
+                  <Text style={styles.previewLine}>Hydration reminders</Text>
+                </View>
+                <View style={styles.previewCard}>
+                  <View style={styles.previewHeaderRow}>
+                    <Heart size={20} color={theme.color.accent.blue} />
+                    <Text style={styles.previewHeaderText}>Recovery</Text>
+                  </View>
+                  <Text style={styles.previewLine}>Mobility work</Text>
+                  <Text style={styles.previewLine}>Sleep guidance</Text>
+                  <Text style={styles.previewLine}>Light activity tips</Text>
+                </View>
+              </View>
+              <View style={styles.previewFooterRow}>
+                <Calendar size={18} color={theme.color.muted} />
+                <Text style={styles.previewFooterText}>Your 7‑day base plan will appear here soon</Text>
+              </View>
+            </View>
+          </Animated.View>
+        )}
       </SafeAreaView>
     </LinearGradient>
   );
@@ -483,5 +546,69 @@ const styles = StyleSheet.create({
   },
   dot3: {
     opacity: 1,
+  },
+  previewOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: theme.color.bg + 'F2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  previewCardContainer: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: theme.color.card,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    padding: 18,
+  },
+  previewTitle: {
+    textAlign: 'center',
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.ink,
+    marginBottom: 12,
+  },
+  previewGrid: {
+    gap: 10,
+  },
+  previewCard: {
+    backgroundColor: theme.color.bg,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    padding: 12,
+  },
+  previewHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  previewHeaderText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: theme.color.ink,
+  },
+  previewLine: {
+    fontSize: 12,
+    color: theme.color.muted,
+    marginBottom: 2,
+  },
+  previewFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 10,
+    justifyContent: 'center',
+  },
+  previewFooterText: {
+    fontSize: 12,
+    color: theme.color.muted,
   },
 });

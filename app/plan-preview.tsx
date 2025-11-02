@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert, Modal, BackHandler, Keyboard, TouchableWithoutFeedback } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { router, Stack } from 'expo-router';
-import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send } from 'lucide-react-native';
+import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send, ChevronLeft } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
+import { useNavigation } from '@react-navigation/native';
 // 10s paywall logic removed per request
 
 const DAYS_OF_WEEK = [
@@ -19,7 +21,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function PlanPreviewScreen() {
-  const { basePlans, getCurrentBasePlan, updateBasePlanDay, isLoading: storeLoading, loadUserData } = useUserStore();
+  const { user, basePlans, getCurrentBasePlan, updateBasePlanDay, addBasePlan, isLoading: storeLoading, loadUserData } = useUserStore();
   const [selectedDay, setSelectedDay] = useState<string>('monday');
   const [isLocked, setIsLocked] = useState(false);
   const [confettiAnim] = useState(new Animated.Value(0));
@@ -30,12 +32,36 @@ export default function PlanPreviewScreen() {
   const [forceReloadAttempts, setForceReloadAttempts] = useState(0);
   const [expandedWorkout, setExpandedWorkout] = useState(false);
   const [expandedNutrition, setExpandedNutrition] = useState(false);
+  const [showPlanEditModal, setShowPlanEditModal] = useState(false);
+  const [planEditText, setPlanEditText] = useState('');
+  const [isSubmittingWholePlan, setIsSubmittingWholePlan] = useState(false);
+  const wholePlanProgressAnim = useRef(new Animated.Value(0)).current;
+  const navigation = useNavigation();
   
   // Reset expansion when day changes
   useEffect(() => {
     setExpandedWorkout(false);
     setExpandedNutrition(false);
   }, [selectedDay]);
+
+  // Ensure back gestures/buttons go to Home instead of loading screens
+  useEffect(() => {
+    const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
+      const actionType = e?.data?.action?.type;
+      if (actionType === 'GO_BACK' || actionType === 'POP') {
+        e.preventDefault();
+        router.replace('/(tabs)/home');
+      }
+    });
+    const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+      router.replace('/(tabs)/home');
+      return true;
+    });
+    return () => {
+      try { unsubBeforeRemove(); } catch {}
+      try { backSub.remove(); } catch {}
+    };
+  }, [navigation]);
   
   // Removed paywall timer & navigation refs
 
@@ -68,6 +94,62 @@ export default function PlanPreviewScreen() {
 
     return plan;
   }, [basePlans, getCurrentBasePlan]);
+  
+  // Aggregate all supplements from the weekly plan
+  const weeklySupplementsData = useMemo(() => {
+    const currentPlan = getCurrentBasePlan();
+    if (!currentPlan?.days) {
+      return {
+        allSupplements: [] as string[],
+        dailySupplements: {} as Record<string, string[]>,
+        userSupplements: [] as string[],
+        recommendedSupplements: [] as string[]
+      };
+    }
+
+    const allSuppsSet = new Set<string>();
+    const dailySupps: Record<string, string[]> = {};
+    const userSuppsSet = new Set<string>();
+    const recommendedSuppsSet = new Set<string>();
+
+    const dayKeys = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+    
+    dayKeys.forEach((day) => {
+      const dayData = currentPlan.days[day];
+      if (!dayData?.recovery) return;
+
+      // Get daily supplements
+      const daySupplements = dayData.recovery.supplements || [];
+      if (daySupplements.length > 0) {
+        dailySupps[day] = daySupplements;
+      }
+      
+      // Add to overall set
+      daySupplements.forEach((supp: string) => allSuppsSet.add(supp));
+
+      // Get user's current supplements (only need to check once)
+      if (dayData.recovery.supplementCard?.current) {
+        dayData.recovery.supplementCard.current.forEach((supp: string) => {
+          userSuppsSet.add(supp);
+        });
+      }
+
+      // Get recommended add-ons
+      if (dayData.recovery.supplementCard?.addOns) {
+        dayData.recovery.supplementCard.addOns.forEach((supp: string) => {
+          recommendedSuppsSet.add(supp);
+        });
+      }
+    });
+
+    return {
+      allSupplements: Array.from(allSuppsSet),
+      dailySupplements: dailySupps,
+      userSupplements: Array.from(userSuppsSet),
+      recommendedSupplements: Array.from(recommendedSuppsSet)
+    };
+  }, [getCurrentBasePlan]);
+  
   const [isCheckingPlan, setIsCheckingPlan] = useState(true);
   const [hasShownConfetti, setHasShownConfetti] = useState(false);
 
@@ -226,9 +308,9 @@ export default function PlanPreviewScreen() {
     
     // Start progress animation
     progressAnim.setValue(0);
-    Animated.timing(progressAnim, {
+      Animated.timing(progressAnim, {
       toValue: 1,
-      duration: 3000, // 3 seconds for the progress bar
+        duration: 12000, // Slow down more per request
       useNativeDriver: false,
     }).start();
     
@@ -319,6 +401,41 @@ Please modify the plan based on their request and return ONLY the updated day da
       setIsSubmittingEdit(false);
       // Reset progress animation
       progressAnim.setValue(0);
+    }
+  };
+
+  const handleSubmitWholePlan = async () => {
+    try {
+      setIsSubmittingWholePlan(true);
+      wholePlanProgressAnim.setValue(0);
+      Animated.timing(wholePlanProgressAnim, {
+        toValue: 1,
+        duration: 8000, // Slow the whole-plan progress bar
+        useNativeDriver: false,
+      }).start();
+
+      // Lazy-load the AI generator to keep bundle light
+      const { generateWeeklyBasePlan } = await import('@/services/documented-ai-service');
+
+      // Compose special requests with user input (without mutating profile)
+      const combinedRequest = `${user?.specialRequests ? user.specialRequests + ' | ' : ''}User requested changes: ${planEditText || 'Rebuild my weekly base plan'}`;
+      const modifiedUser = { ...(user as any), specialRequests: combinedRequest } as any;
+
+      const newPlan = await generateWeeklyBasePlan(modifiedUser);
+      await addBasePlan(newPlan);
+
+      Alert.alert('Base Plan Updated', 'Your weekly base plan was regenerated successfully.', [
+        { text: 'OK', onPress: () => setShowPlanEditModal(false) }
+      ]);
+      setPlanEditText('');
+      // Reset selection to monday for clarity
+      setSelectedDay('monday');
+    } catch (e) {
+      console.error('[PlanPreview] Whole-plan edit failed:', e);
+      Alert.alert('Error', 'We could not update your base plan. Please try again.');
+    } finally {
+      setIsSubmittingWholePlan(false);
+      wholePlanProgressAnim.setValue(0);
     }
   };
 
@@ -436,7 +553,7 @@ Please modify the plan based on their request and return ONLY the updated day da
           <View key={index} style={styles.mealPreview}>
             <Text style={styles.mealName}>{meal.name || 'Meal'}</Text>
             <Text style={styles.mealItems}>
-              {(meal.items || []).map(item => item.food).join(', ')}
+              {(meal.items || []).map(item => `${item?.food || 'Item'}${item?.qty ? ` (${item.qty})` : ''}`).join(', ')}
             </Text>
           </View>
         ))}
@@ -451,6 +568,66 @@ Please modify the plan based on their request and return ONLY the updated day da
           </TouchableOpacity>
         )}
       </Card>
+    );
+  };
+
+  // Calculate expected weeks to reach goal
+  const calculateExpectedWeeks = () => {
+    if (!user) return null;
+    
+    // Weight-based goals
+    if (user.goal === 'WEIGHT_LOSS' || user.goal === 'MUSCLE_GAIN') {
+      const currentWeight = user.weight;
+      const goalWeight = user.goalWeight;
+      
+      if (!currentWeight || !goalWeight) return null;
+      
+      const weightDiff = Math.abs(currentWeight - goalWeight);
+      
+      // Healthy rate: 0.5-1kg per week for weight loss, 0.25-0.5kg per week for muscle gain
+      const weeklyRate = user.goal === 'WEIGHT_LOSS' ? 0.75 : 0.35;
+      const weeks = Math.ceil(weightDiff / weeklyRate);
+      
+      return {
+        weeks,
+        text: user.goal === 'WEIGHT_LOSS' 
+          ? `reach your target weight of ${goalWeight}kg`
+          : `build ${weightDiff.toFixed(1)}kg of muscle`
+      };
+    }
+    
+    // Fitness goals (fixed timeline based on commitment level)
+    const trainingDays = user.trainingDays || 3;
+    if (user.goal === 'ENDURANCE') {
+      const weeks = trainingDays >= 5 ? 8 : trainingDays >= 4 ? 10 : 12;
+      return { weeks, text: 'significantly boost your endurance' };
+    }
+    
+    if (user.goal === 'FLEXIBILITY_MOBILITY') {
+      const weeks = trainingDays >= 5 ? 6 : trainingDays >= 4 ? 8 : 10;
+      return { weeks, text: 'see major improvements in mobility' };
+    }
+    
+    // General fitness
+    const weeks = trainingDays >= 5 ? 8 : trainingDays >= 4 ? 10 : 12;
+    return { weeks, text: 'feel noticeably fitter and stronger' };
+  };
+
+  const renderTimelineBadge = () => {
+    const timeline = calculateExpectedWeeks();
+    if (!timeline) return null;
+    
+    return (
+      <View style={styles.timelineContainer}>
+        <View style={styles.timelinePill}>
+          <Text style={styles.timelinePillText}>EXPECTED TIMELINE</Text>
+        </View>
+        <View style={styles.timelineBubble}>
+          <Text style={styles.timelineText}>
+            {timeline.weeks} {timeline.weeks === 1 ? 'week' : 'weeks'} to {timeline.text}
+          </Text>
+        </View>
+      </View>
     );
   };
 
@@ -475,17 +652,142 @@ Please modify the plan based on their request and return ONLY the updated day da
             <Text key={index} style={styles.recoveryItem}>• {item}</Text>
           ))}
         </View>
+        {selectedDayData.recovery.careNotes && (
+          <View style={styles.careCard}>
+            <Text style={styles.careNotesText}>{selectedDayData.recovery.careNotes}</Text>
+          </View>
+        )}
+      </Card>
+    );
+  };
+
+  const renderReasonCard = () => {
+    const reason = selectedDayData?.reason || selectedDayData?.recovery?.careNotes;
+    if (!reason) return null;
+    return (
+      <Card style={styles.reasonCard}>
+        <Text style={styles.reasonTitle}>🤔 Reason</Text>
+        <Text style={styles.reasonText}>{reason}</Text>
+      </Card>
+    );
+  };
+
+  // New comprehensive supplement card showing ALL supplements from the weekly plan
+  const renderSupplementsCard = () => {
+    const { allSupplements, dailySupplements, userSupplements, recommendedSupplements } = weeklySupplementsData;
+    
+    if (allSupplements.length === 0 && userSupplements.length === 0 && recommendedSupplements.length === 0) {
+      return null;
+    }
+
+    const dayLabels: Record<string, string> = {
+      monday: 'Mon',
+      tuesday: 'Tue',
+      wednesday: 'Wed',
+      thursday: 'Thu',
+      friday: 'Fri',
+      saturday: 'Sat',
+      sunday: 'Sun'
+    };
+
+    return (
+      <Card style={styles.supplementCard}>
+        <View style={styles.previewHeader}>
+          <Text style={styles.supplementCardTitle}>💊 Complete Supplement Guide</Text>
+        </View>
+        
+        {/* Overview Stats */}
+        <View style={styles.supplementStatsRow}>
+          <View style={styles.supplementStat}>
+            <Text style={styles.supplementStatValue}>{allSupplements.length}</Text>
+            <Text style={styles.supplementStatLabel}>Total</Text>
+          </View>
+          <View style={styles.supplementStat}>
+            <Text style={styles.supplementStatValue}>{userSupplements.length}</Text>
+            <Text style={styles.supplementStatLabel}>Current</Text>
+          </View>
+          <View style={styles.supplementStat}>
+            <Text style={styles.supplementStatValue}>{recommendedSupplements.length}</Text>
+            <Text style={styles.supplementStatLabel}>Recommended</Text>
+          </View>
+        </View>
+
+        {/* User's Current Supplements */}
+        {userSupplements.length > 0 && (
+          <View style={styles.supplementSection}>
+            <Text style={styles.supplementSectionTitle}>Currently Taking</Text>
+            {userSupplements.map((supp, index) => (
+              <Text key={`current-${index}`} style={styles.supplementItem}>• {supp}</Text>
+            ))}
+          </View>
+        )}
+
+        {/* Recommended Add-ons */}
+        {recommendedSupplements.length > 0 && (
+          <View style={styles.supplementSection}>
+            <Text style={styles.supplementSectionTitle}>Add-ons We Recommend</Text>
+            {recommendedSupplements.map((supp, index) => (
+              <Text key={`recommended-${index}`} style={styles.supplementItem}>• {supp}</Text>
+            ))}
+          </View>
+        )}
+
+        {/* Daily Breakdown */}
+        {Object.keys(dailySupplements).length > 0 && (
+          <View style={styles.supplementSection}>
+            <Text style={styles.supplementSectionTitle}>Daily Schedule</Text>
+            {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day) => {
+              const supps = dailySupplements[day];
+              if (!supps || supps.length === 0) return null;
+              
+              return (
+                <View key={day} style={styles.dailySupplementRow}>
+                  <View style={styles.dayLabelBadge}>
+                    <Text style={styles.dayLabelText}>{dayLabels[day]}</Text>
+                  </View>
+                  <View style={styles.dailySupplementList}>
+                    {supps.map((supp, idx) => (
+                      <Text key={`${day}-${idx}`} style={styles.dailySupplementText}>
+                        {idx === 0 ? '• ' : '  '}{supp}
+                      </Text>
+                    ))}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
       </Card>
     );
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardDismissView style={styles.container}>
       <Stack.Screen 
         options={{ 
-          title: 'Your 7-Day Plan',
+          title: 'Your Base Plan',
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => router.replace('/(tabs)/home')}
+              accessibilityRole="button"
+              accessibilityLabel="Go to Home"
+              style={{ paddingHorizontal: 8 }}
+            >
+              <ChevronLeft size={20} color={theme.color.accent.primary} />
+            </TouchableOpacity>
+          ),
+          headerRight: () => (
+            <TouchableOpacity
+              onPress={() => setShowPlanEditModal(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Edit base plan"
+              style={{ paddingHorizontal: 8 }}
+            >
+              <Edit3 size={20} color={theme.color.accent.primary} />
+            </TouchableOpacity>
+          ),
         }} 
       />
       
@@ -503,19 +805,30 @@ Please modify the plan based on their request and return ONLY the updated day da
             }],
           },
         ]}
+        pointerEvents="none"
       >
         <Text style={styles.confettiText}>🎉 Your Plan is Ready! 🎉</Text>
       </Animated.View>
       
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        <ScrollView 
+          style={styles.scrollView} 
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           {/* Header */}
           <View style={styles.header}>
             <Calendar size={32} color={theme.color.accent.primary} />
-            <Text style={styles.headerTitle}>Your 7-Day Base Plan</Text>
+            <Text style={styles.headerTitle}>Your Base Plan</Text>
             <Text style={styles.headerSubtitle}>
               This is your foundation plan that will be adjusted daily based on your check-ins
             </Text>
+            
+            {/* Expected Timeline - Moved inside header */}
+            {renderTimelineBadge()}
           </View>
 
           {/* Day Selector */}
@@ -524,6 +837,8 @@ Please modify the plan based on their request and return ONLY the updated day da
             showsHorizontalScrollIndicator={false}
             style={styles.daySelector}
             contentContainerStyle={styles.daySelectorContent}
+            nestedScrollEnabled={true}
+            scrollEventThrottle={16}
           >
             {DAYS_OF_WEEK.map(renderDayCard)}
           </ScrollView>
@@ -537,6 +852,8 @@ Please modify the plan based on their request and return ONLY the updated day da
             {renderWorkoutPreview()}
             {renderNutritionPreview()}
             {renderRecoveryPreview()}
+            {renderSupplementsCard()}
+            {renderReasonCard()}
           </View>
 
           {/* Edit Day Section */}
@@ -563,6 +880,14 @@ Please modify the plan based on their request and return ONLY the updated day da
                   numberOfLines={4}
                   textAlignVertical="top"
                   editable={!isSubmittingEdit}
+                  returnKeyType="send"
+                  blurOnSubmit
+                  onSubmitEditing={() => {
+                    if (!isSubmittingEdit && editText.trim()) {
+                      Keyboard.dismiss();
+                      handleSubmitEdit();
+                    }
+                  }}
                 />
                 
                 {/* Loading Progress Bar */}
@@ -651,6 +976,75 @@ Please modify the plan based on their request and return ONLY the updated day da
           </Card>
         </ScrollView>
 
+        {/* Whole-Plan Edit Modal */}
+        <Modal visible={showPlanEditModal} transparent animationType="fade" onRequestClose={() => setShowPlanEditModal(false)}>
+          <View style={styles.editModalOverlay}>
+            <View style={styles.editModalCard}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: theme.space.sm }}>
+                <Edit3 size={20} color={theme.color.accent.primary} />
+                <Text style={[styles.editTitle, { marginLeft: theme.space.xs }]}>Edit Your Base Plan</Text>
+              </View>
+              <Text style={styles.editDescription}>Describe how you want your entire 7-day plan to change. We’ll regenerate a new weekly plan that matches your request.</Text>
+
+              <TextInput
+                style={styles.planEditInput}
+                placeholder="e.g., Make workouts 30 minutes, focus on legs and core, 4 meals/day, vegetarian meals only, higher protein."
+                placeholderTextColor={theme.color.muted}
+                value={planEditText}
+                onChangeText={setPlanEditText}
+                multiline
+                numberOfLines={5}
+                textAlignVertical="top"
+                editable={!isSubmittingWholePlan}
+                returnKeyType="send"
+                blurOnSubmit
+                onSubmitEditing={() => {
+                  if (!isSubmittingWholePlan && (planEditText || '').trim()) {
+                    Keyboard.dismiss();
+                    handleSubmitWholePlan();
+                  }
+                }}
+              />
+
+              {isSubmittingWholePlan && (
+                <View style={styles.progressContainer}>
+                  <Text style={styles.progressText}>Updating your base plan…</Text>
+                  <View style={styles.progressBarBackground}>
+                    <Animated.View 
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: wholePlanProgressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.progressSubtext}>This usually takes a few seconds</Text>
+                </View>
+              )}
+
+              {!isSubmittingWholePlan && (
+                <View style={styles.editActions}>
+                  <Button
+                    title="Cancel"
+                    onPress={() => setShowPlanEditModal(false)}
+                    variant="outline"
+                    size="small"
+                    style={styles.cancelButton}
+                  />
+                  <Button
+                    title="Apply Changes"
+                    onPress={handleSubmitWholePlan}
+                    size="small"
+                    style={styles.applyButton}
+                    icon={<Send size={16} color="#FFFFFF" />}
+                  />
+                </View>
+              )}
+            </View>
+          </View>
+        </Modal>
+
         {/* Bottom Action */}
         <View style={styles.bottomAction}>
           <Button
@@ -661,7 +1055,7 @@ Please modify the plan based on their request and return ONLY the updated day da
           />
         </View>
       </SafeAreaView>
-    </View>
+    </KeyboardDismissView>
   );
 }
 
@@ -877,9 +1271,128 @@ const styles = StyleSheet.create({
     marginBottom: 2,
     lineHeight: 16,
   },
+  careCard: {
+    marginTop: theme.space.sm,
+    backgroundColor: theme.color.accent.blue + '10',
+    borderWidth: 1,
+    borderColor: theme.color.accent.blue + '20',
+    borderRadius: theme.radius.md,
+    padding: theme.space.sm,
+  },
+  careNotesText: {
+    fontSize: 12,
+    color: theme.color.ink,
+    lineHeight: 16,
+  },
+  careSuppHeader: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.color.ink,
+    marginBottom: 2,
+  },
+  careSuppItem: {
+    fontSize: 12,
+    color: theme.color.muted,
+  },
+  supplementCard: {
+    marginTop: theme.space.md,
+    padding: theme.space.lg,
+  },
+  supplementCardTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.ink,
+  },
+  supplementStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: theme.space.md,
+    marginBottom: theme.space.lg,
+    paddingVertical: theme.space.sm,
+    backgroundColor: theme.color.luxe.orchid + '20',
+    borderRadius: theme.radius.md,
+  },
+  supplementStat: {
+    alignItems: 'center',
+  },
+  supplementStatValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: theme.color.luxe.orchid,
+  },
+  supplementStatLabel: {
+    fontSize: 11,
+    color: theme.color.muted,
+    marginTop: 2,
+  },
+  supplementSection: {
+    marginTop: theme.space.md,
+    paddingTop: theme.space.md,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.line,
+  },
+  supplementSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.color.ink,
+    marginBottom: theme.space.sm,
+  },
+  supplementItem: {
+    fontSize: 13,
+    color: theme.color.muted,
+    marginBottom: 4,
+    lineHeight: 18,
+  },
+  dailySupplementRow: {
+    flexDirection: 'row',
+    marginBottom: theme.space.sm,
+    alignItems: 'flex-start',
+  },
+  dayLabelBadge: {
+    backgroundColor: theme.color.accent.primary,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginRight: theme.space.sm,
+    minWidth: 36,
+    alignItems: 'center',
+  },
+  dayLabelText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  dailySupplementList: {
+    flex: 1,
+    paddingTop: 2,
+  },
+  dailySupplementText: {
+    fontSize: 12,
+    color: theme.color.muted,
+    lineHeight: 18,
+  },
   lockCard: {
     margin: theme.space.lg,
     alignItems: 'center',
+  },
+  reasonCard: {
+    marginTop: theme.space.md,
+    padding: theme.space.md,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: theme.radius.lg,
+    borderColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+  },
+  reasonTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: theme.color.ink,
+    marginBottom: theme.space.xs,
+  },
+  reasonText: {
+    fontSize: 14,
+    color: theme.color.muted,
+    lineHeight: 20,
   },
   lockHeader: {
     flexDirection: 'row',
@@ -933,6 +1446,17 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: theme.space.lg,
+  },
+  planEditInput: {
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+    fontSize: 14,
+    color: theme.color.ink,
+    backgroundColor: theme.color.bg,
+    minHeight: 120,
+    marginBottom: theme.space.md,
   },
   editInputContainer: {
     width: '100%',
@@ -993,5 +1517,51 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: theme.color.muted,
     textAlign: 'center',
+  },
+  timelineContainer: {
+    marginTop: theme.space.lg,
+    alignSelf: 'stretch',
+  },
+  timelinePill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2F80ED',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  timelinePillText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  timelineBubble: {
+    marginTop: 6,
+    backgroundColor: '#0F3D2E',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  timelineText: {
+    color: '#E9F6EC',
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '600',
+  },
+  editModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: theme.space.lg,
+  },
+  editModalCard: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: theme.color.bg,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    padding: theme.space.lg,
   },
 });

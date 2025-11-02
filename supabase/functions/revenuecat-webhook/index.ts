@@ -98,6 +98,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const rcSecretKey = Deno.env.get('REVENUECAT_SECRET_API_KEY') || '';
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    const resendApiKey = Deno.env.get('RESEND_API_KEY') || '';
+    const resendFrom = Deno.env.get('RESEND_FROM') || 'Liftor <support@liftor.app>';
 
     if (!supabaseUrl || !supabaseServiceKey) {
       return new Response(JSON.stringify({ error: 'Server not configured' }), { status: 500 });
@@ -154,6 +156,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey, { auth: { persistSession: false } });
 
+    // Fetch existing profile flags to detect cancellation state transitions
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('email,name,subscription_will_renew,subscription_active')
+      .eq('id', appUserId)
+      .maybeSingle();
+
     // Idempotency short-circuit: if event_key exists, return early
     if (eventFingerprint) {
       const { data: existing } = await supabase
@@ -187,6 +196,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     if (error) {
       return new Response(JSON.stringify({ error: 'Supabase update failed', detail: error.message }), { status: 500 });
+    }
+
+    // If user turned off auto-renew (or became inactive), send a positive farewell email once
+    const turnedOffAutoRenew = (existingProfile?.subscription_will_renew ?? null) !== false && willRenew === false;
+    const becameInactive = existingProfile?.subscription_active === true && subscriptionActive === false;
+    const shouldSendCancelEmail = !!(resendApiKey && (turnedOffAutoRenew || becameInactive));
+
+    if (shouldSendCancelEmail && existingProfile?.email) {
+      try {
+        const to = existingProfile.email;
+        const name = existingProfile.name || 'Athlete';
+        const subject = "We believe in you — see you soon";
+        const text = `Hey ${name},\n\nOur journey was filled with feedback and lessons. We hope you achieve your goals — we’re constantly improving. If there’s anything we can do better, just reply and tell us.\n\nIf you need any help, we’re here for you. You can resubscribe anytime.\n\nYours truly,\nLiftor`;
+        const html = `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height:1.6; color:#0b0b0b">
+            <h2>You’ve got this.</h2>
+            <p>Hey ${name},</p>
+            <p>Our journey was filled with feedback and lessons. We hope you achieve your goals — we’re constantly improving. If there’s anything we can do better, just reply and tell us.</p>
+            <p>If you need any help, we’re here for you. You can resubscribe anytime.</p>
+            <p style="margin-top:24px">— Yours truly, <strong>Liftor</strong></p>
+          </div>`;
+
+        await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${resendApiKey}`,
+          },
+          body: JSON.stringify({ from: resendFrom, to, subject, text, html }),
+        }).then(() => {}).catch(() => {});
+      } catch {
+        // best-effort only
+      }
     }
 
     return new Response(

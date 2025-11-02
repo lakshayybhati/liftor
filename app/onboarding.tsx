@@ -10,8 +10,11 @@ import {
   useWindowDimensions,
   Animated,
   Alert,
-  ActivityIndicator
+  ActivityIndicator,
+  Switch
 } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
+import Slider from '@react-native-community/slider';
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Button } from '@/components/ui/Button';
@@ -36,15 +39,14 @@ import {
   MEAL_COUNTS,
   CAFFEINE_FREQUENCY,
   ALCOHOL_FREQUENCY,
-  WORKOUT_SPLITS
+  WORKOUT_SPLITS,
+  TRAINING_LEVELS
 } from '@/constants/fitness';
-import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel, WorkoutIntensity } from '@/types/user';
+import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel, WorkoutIntensity, TrainingLevel } from '@/types/user';
 import { theme } from '@/constants/colors';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import { Power, Info } from 'lucide-react-native';
-import { BlurView } from 'expo-blur';
-import Svg, { Line } from 'react-native-svg';
 import { confirmNumericWithinRange, NumberSpecs, confirmCaloriesWithBaseline } from '@/utils/number-guards';
 
 
@@ -97,20 +99,6 @@ const LabelWithInfo = ({
   </View>
 );
 
-// Scroll hint component with glass effect using BlurView
-const ScrollHintOverlay = ({ onPress }: { onPress: () => void }) => {
-  return (
-    <TouchableOpacity style={styles.scrollHintOverlay} activeOpacity={0.8} onPress={onPress}>
-      <BlurView intensity={20} tint="light" style={styles.glassCircle}>
-        <Svg width={28} height={28} viewBox="0 0 24 24">
-          <Line x1="12" y1="4" x2="12" y2="18" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-          <Line x1="12" y1="18" x2="7" y2="13" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-          <Line x1="12" y1="18" x2="17" y2="13" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-        </Svg>
-      </BlurView>
-    </TouchableOpacity>
-  );
-};
 
 export default function OnboardingScreen() {
   const { updateUser } = useUserStore();
@@ -119,7 +107,9 @@ export default function OnboardingScreen() {
   const isSmallScreen = screenWidth < 380;
   const [step, setStep] = useState(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const { updateProfile } = useProfile();
+  const { updateProfile, refetch: refetchProfile } = useProfile();
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Handle case where auth context isn't ready yet
   if (!auth) {
@@ -166,15 +156,15 @@ export default function OnboardingScreen() {
   const [travelDays, setTravelDays] = useState(0);
   const [fastingWindow, setFastingWindow] = useState('No Fasting');
   const [mealCount, setMealCount] = useState(4);
+  const [intensityLevel, setIntensityLevel] = useState(6);
   const [injuries, setInjuries] = useState('');
   const [stepTarget, setStepTarget] = useState(8000);
   const [stepTargetInput, setStepTargetInput] = useState('8000');
-  const [preferredWorkoutSplit, setPreferredWorkoutSplit] = useState('');
   const [specialRequests, setSpecialRequests] = useState('');
   const [goalWeight, setGoalWeight] = useState('');
   const [workoutIntensity, setWorkoutIntensity] = useState<WorkoutIntensity>('Optimal');
-  const innerScrollRef = useRef<ScrollView | null>(null);
-  const [showScrollHint, setShowScrollHint] = useState(false);
+  const [trainingLevel, setTrainingLevel] = useState<TrainingLevel>('Beginner');
+  const [includeReasoning, setIncludeReasoning] = useState(true);
   
   // Removed VMN transcription per requirements
 
@@ -193,22 +183,6 @@ export default function OnboardingScreen() {
       }),
     ]).start();
   }, [step, fadeAnim]);
-
-  useEffect(() => {
-    // Show hint initially for steps with inner scrollviews
-    setShowScrollHint([3, 5, 6].includes(step));
-  }, [step]);
-
-  const handleInnerScrollEvent = (e: any) => {
-    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-    const paddingToBottom = 20;
-    const atBottom = layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom;
-    setShowScrollHint(!atBottom);
-  };
-
-  const handleScrollToEnd = () => {
-    innerScrollRef.current?.scrollToEnd({ animated: true });
-  };
 
   // Calculate calories when body stats change (only if user hasn't manually overridden)
   useEffect(() => {
@@ -283,14 +257,6 @@ export default function OnboardingScreen() {
     );
   };
 
-  // Auto-select workout split based on training days
-  useEffect(() => {
-    const matchingSplit = WORKOUT_SPLITS.find(split => split.days === trainingDays);
-    if (matchingSplit && !preferredWorkoutSplit) {
-      setPreferredWorkoutSplit(matchingSplit.split);
-    }
-  }, [trainingDays, preferredWorkoutSplit]);
-
   // Validation logic for required fields
   const getRequiredFieldsForStep = (stepIndex: number): { isValid: boolean; missingFields: string[] } => {
     const missingFields: string[] = [];
@@ -319,11 +285,20 @@ export default function OnboardingScreen() {
         if (!trainingDays || trainingDays < 1) missingFields.push('Training Days');
         break;
         
-      case 5: // Supplements & personal needs (optional)
-        // All fields in this step are optional
+      case 5: // Supplements & personal needs
+        if (personalGoals.length === 0) missingFields.push('Personal Goals');
         break;
         
       case 6: // Specifics
+        if (preferredExercises.length === 0) missingFields.push('Preferred Exercises');
+        if (avoidExercises.length === 0) missingFields.push('Exercises to Avoid');
+        if (!preferredTrainingTime) missingFields.push('Preferred Training Time');
+        if (!sessionLength || sessionLength <= 0) missingFields.push('Session Length');
+        if (!Number.isFinite(travelDays)) missingFields.push('Travel Days');
+        if (!Number.isFinite(stepTarget)) missingFields.push('Step Target');
+        if (!fastingWindow) missingFields.push('Fasting Window');
+        if (!mealCount || mealCount < 1) missingFields.push('Meals Per Day');
+        if (!trainingLevel) missingFields.push('Training Level');
         if (!goalWeight || !goalWeight.trim()) missingFields.push('Goal Weight');
         break;
         
@@ -341,17 +316,36 @@ export default function OnboardingScreen() {
   const currentStepValidation = getRequiredFieldsForStep(step);
   const canProceed = currentStepValidation.isValid;
   
-  // Create stacked required label (each word on new line) for compact layout
-  const stackedRequiredLabel = !canProceed && currentStepValidation.missingFields.length > 0
-    ? ['Required:', ...currentStepValidation.missingFields].join(' ').split(' ').join('\n')
-    : '';
+  // Generic guidance instead of listing all missing fields
+  const stackedRequiredLabel = !canProceed ? 'Fill\nall\nfields' : '';
 
   const handleComplete = async () => {
+    // Prevent multiple simultaneous saves
+    if (isSaving) return;
+    
+    setIsSaving(true);
+    setSaveError(null);
+    
     const mappedDietaryPrefs = dietaryPrefs.length > 0 ? dietaryPrefs : ['Non-veg' as DietaryPref];
+
+    // Get user's name from session metadata (set during signup) or email
+    const sessionUserName = auth?.session?.user?.user_metadata?.name as string | undefined;
+    const userEmail = auth?.session?.user?.email || '';
+    const emailLocalPart = userEmail.split('@')[0] || '';
+    
+    // Fallback chain: form name → session name → email local-part → 'User'
+    const resolvedName = (name?.trim() || sessionUserName?.trim() || emailLocalPart || 'User');
+    
+    console.log('[Onboarding] Name resolution:', {
+      formName: name?.trim() || null,
+      sessionName: sessionUserName?.trim() || null,
+      emailLocalPart: emailLocalPart || null,
+      resolvedName,
+    });
 
     const userData = {
       id: Date.now().toString(),
-      name: name || 'User',
+      name: resolvedName,
       goal,
       equipment,
       dietaryPrefs: mappedDietaryPrefs.length > 0 ? mappedDietaryPrefs : ['Non-veg' as DietaryPref],
@@ -378,60 +372,130 @@ export default function OnboardingScreen() {
       mealCount: mealCount || undefined,
       injuries: injuries || undefined,
       stepTarget: stepTarget || undefined,
-      preferredWorkoutSplit: preferredWorkoutSplit || undefined,
       specialRequests: specialRequests || undefined,
       goalWeight: goalWeight ? parseFloat(goalWeight) : undefined,
       workoutIntensity: workoutIntensity || undefined,
+      workoutIntensityLevel: intensityLevel || undefined,
+      trainingLevel: trainingLevel || undefined,
     };
 
-    try {
-      await updateUser(userData);
-    } catch (e) {
-      console.log('[Onboarding] local store update error', e);
+    // Validate email from auth session (already extracted above)
+    if (!userEmail) {
+      console.error('[Onboarding] No user email found in session');
+      setIsSaving(false);
+      setSaveError('User email not found. Please log in again.');
+      Alert.alert(
+        'Session Error',
+        'Your session is invalid. Please log in again.',
+        [{ text: 'OK', onPress: () => router.replace('/auth/login') }]
+      );
+      return;
     }
 
-    try {
-      await updateProfile({
-        name: (name || 'User'),
-        goal: goal as any,
-        equipment: equipment,
-        dietary_prefs: mappedDietaryPrefs as any,
-        dietary_notes: dietaryNotes || null,
-        training_days: trainingDays,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        onboarding_complete: true,
-        age: age ? parseInt(age) : null,
-        sex: sex || null,
-        height: height ? parseFloat(height) : null,
-        weight: weight ? parseFloat(weight) : null,
-        activity_level: activityLevel as any,
-        daily_calorie_target: dailyCalorieTarget ? parseInt(dailyCalorieTarget) : null,
-        supplements: supplements,
-        supplement_notes: supplementNotes || null,
-        personal_goals: personalGoals,
-        perceived_lacks: perceivedLacks,
-        preferred_exercises: preferredExercises,
-        avoid_exercises: avoidExercises,
-        preferred_training_time: preferredTrainingTime || null,
-        session_length: sessionLength,
-        travel_days: travelDays,
-        fasting_window: fastingWindow !== 'No Fasting' ? fastingWindow : null,
-        meal_count: mealCount,
-        injuries: injuries || null,
-        step_target: stepTarget,
-        preferred_workout_split: preferredWorkoutSplit || null,
-        special_requests: specialRequests || null,
-        goal_weight: goalWeight ? parseFloat(goalWeight) : null,
-        workout_intensity: workoutIntensity || null,
-      });
-      console.log('[Onboarding] Profile synced to Supabase');
-    } catch (e) {
-      console.log('[Onboarding] profile sync error', e);
-    }
+    // Prepare profile data
+    const profileData = {
+      email: userEmail,
+      name: resolvedName,
+      goal: goal as any,
+      equipment: equipment,
+      dietary_prefs: mappedDietaryPrefs as any,
+      dietary_notes: dietaryNotes || null,
+      training_days: trainingDays,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      onboarding_complete: true,
+      age: age ? parseInt(age) : null,
+      sex: sex || null,
+      height: height ? parseFloat(height) : null,
+      weight: weight ? parseFloat(weight) : null,
+      activity_level: activityLevel as any,
+      daily_calorie_target: dailyCalorieTarget ? parseInt(dailyCalorieTarget) : null,
+      supplements: supplements,
+      supplement_notes: supplementNotes || null,
+      personal_goals: personalGoals,
+      perceived_lacks: perceivedLacks,
+      preferred_exercises: preferredExercises,
+      avoid_exercises: avoidExercises,
+      preferred_training_time: preferredTrainingTime || null,
+      session_length: sessionLength,
+      travel_days: travelDays,
+      fasting_window: fastingWindow !== 'No Fasting' ? fastingWindow : null,
+      meal_count: mealCount,
+      injuries: injuries || null,
+      step_target: stepTarget,
+      special_requests: specialRequests || null,
+      goal_weight: goalWeight ? parseFloat(goalWeight) : null,
+      workout_intensity: workoutIntensity || null,
+    };
 
-    // After onboarding, go directly to base plan generation
-    // Paywall will be shown 10 seconds after the plan is ready
-    router.replace('/generating-base-plan');
+    // Helper function to save with retry logic
+    const saveWithRetry = async (maxRetries = 3): Promise<boolean> => {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          console.log(`[Onboarding] Save attempt ${attempt}/${maxRetries}`);
+          
+          // Save to database first (most critical)
+          await updateProfile(profileData);
+          console.log('[Onboarding] ✅ Profile synced to Supabase');
+          
+          // Force refetch to ensure cache is up to date
+          await refetchProfile();
+          console.log('[Onboarding] ✅ Profile cache refreshed');
+          
+          // Update local store (this is less critical, can fail without blocking)
+          try {
+            await updateUser(userData);
+            console.log('[Onboarding] ✅ Local store updated');
+          } catch (localError) {
+            console.warn('[Onboarding] Local store update failed (non-critical):', localError);
+          }
+          
+          return true; // Success!
+          
+        } catch (error: any) {
+          console.error(`[Onboarding] Save attempt ${attempt} failed:`, error);
+          
+          // If this isn't the last attempt, wait before retrying
+          if (attempt < maxRetries) {
+            const delay = attempt * 1000; // Progressive delay: 1s, 2s, 3s
+            console.log(`[Onboarding] Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          } else {
+            // Last attempt failed
+            const errorMessage = error?.message || 'Unknown error';
+            console.error('[Onboarding] All save attempts failed:', errorMessage);
+            setSaveError(`Failed to save your profile: ${errorMessage}`);
+            return false;
+          }
+        }
+      }
+      return false;
+    };
+
+    // Attempt to save with retries
+    const success = await saveWithRetry(3);
+    
+    if (success) {
+      // Only proceed if save was successful
+      console.log('[Onboarding] ✅ Onboarding complete, proceeding to plan generation');
+      router.replace('/generating-base-plan');
+    } else {
+      // Save failed - show error and stay on page
+      setIsSaving(false);
+      Alert.alert(
+        'Save Failed',
+        'We couldn\'t save your profile. Please check your internet connection and try again.',
+        [
+          {
+            text: 'Retry',
+            onPress: () => handleComplete(),
+          },
+          {
+            text: 'Cancel',
+            style: 'cancel',
+          },
+        ]
+      );
+    }
   };
 
   const handleSignOutPress = () => {
@@ -557,14 +621,7 @@ export default function OnboardingScreen() {
     {
       title: "Let's calculate your daily calories",
       content: (
-        <View style={{ flex: 1, position: 'relative' }}>
-          <ScrollView 
-            style={styles.bodyStatsContainer} 
-            showsVerticalScrollIndicator={false}
-            ref={(ref) => { if (step === 3) innerScrollRef.current = ref; }}
-            onScroll={handleInnerScrollEvent}
-            scrollEventThrottle={32}
-          >
+        <View>
           <View style={styles.statsRow}>
             <View style={styles.statInput}>
               <LabelWithInfo
@@ -738,8 +795,6 @@ export default function OnboardingScreen() {
               </TouchableOpacity>
               <Text style={styles.calorieHint}>Tap to adjust if needed</Text>
             </View>
-          </ScrollView>
-          {step === 3 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
@@ -749,6 +804,7 @@ export default function OnboardingScreen() {
         <View>
           <LabelWithInfo
             label="Training Days"
+            required
             infoText="We build your weekly plan around how many days you can train."
           />
           <View style={styles.daysContainer}>
@@ -780,14 +836,7 @@ export default function OnboardingScreen() {
     {
       title: "Supplements & personal needs (optional)",
       content: (
-        <View style={{ flex: 1, position: 'relative' }}>
-          <ScrollView 
-            style={styles.supplementsContainer} 
-            showsVerticalScrollIndicator={false}
-            ref={(ref) => { if (step === 5) innerScrollRef.current = ref; }}
-            onScroll={handleInnerScrollEvent}
-            scrollEventThrottle={32}
-          >
+        <View>
           <LabelWithInfo
             label="Current supplements"
             infoText="Knowing your supplements helps us avoid duplicate advice and optimize recovery."
@@ -818,6 +867,7 @@ export default function OnboardingScreen() {
           <View style={{ marginTop: theme.space.lg }}>
             <LabelWithInfo
               label="Personal goals"
+              required
               infoText="Your personal goals guide coaching tone and focus areas."
               labelStyle={styles.sectionLabel}
             />
@@ -852,24 +902,16 @@ export default function OnboardingScreen() {
               />
             ))}
           </View>
-          </ScrollView>
-          {step === 5 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
     {
       title: "Let's get specific about your journey",
       content: (
-        <View style={{ flex: 1, position: 'relative' }}>
-          <ScrollView 
-            style={styles.specificsContainer} 
-            showsVerticalScrollIndicator={false}
-            ref={(ref) => { if (step === 6) innerScrollRef.current = ref; }}
-            onScroll={handleInnerScrollEvent}
-            scrollEventThrottle={32}
-          >
+        <View>
           <LabelWithInfo
             label="Exercises you prefer"
+            required
             infoText="We’ll prioritize exercises you enjoy to boost consistency."
             labelStyle={styles.sectionLabel}
           />
@@ -887,6 +929,7 @@ export default function OnboardingScreen() {
 
           <LabelWithInfo
             label="Exercises to avoid"
+            required
             infoText="We’ll avoid these to reduce injury risk and frustration."
             labelStyle={styles.sectionLabel}
           />
@@ -906,6 +949,7 @@ export default function OnboardingScreen() {
             <View style={styles.inputHalf}>
               <LabelWithInfo
                 label="Preferred training time"
+                required
                 infoText="We’ll schedule workouts when you tend to have the most energy."
               />
               <View style={styles.timeChips}>
@@ -931,6 +975,7 @@ export default function OnboardingScreen() {
             <View style={styles.inputHalf}>
               <LabelWithInfo
                 label="Session length"
+                required
                 infoText="Pick the typical time you can dedicate to a session."
               />
               <View style={styles.sessionLengthContainer}>
@@ -959,6 +1004,7 @@ export default function OnboardingScreen() {
             <View style={styles.inputHalf}>
               <LabelWithInfo
                 label="Travel days/month"
+                required
                 infoText="We’ll plan more flexible training for frequent travel."
               />
               <TextInput
@@ -978,6 +1024,7 @@ export default function OnboardingScreen() {
             <View style={styles.inputHalf}>
               <LabelWithInfo
                 label="Step target"
+                required
                 infoText="Daily steps support recovery and calorie balance."
               />
               <TextInput
@@ -1043,6 +1090,7 @@ export default function OnboardingScreen() {
           <View style={{ marginTop: theme.space.lg }}>
             <LabelWithInfo
               label="Fasting window"
+              required
               infoText="If you fast, we’ll time meals and training accordingly."
               labelStyle={styles.sectionLabel}
             />
@@ -1061,27 +1109,27 @@ export default function OnboardingScreen() {
 
           <LabelWithInfo
             label="Meals per day"
-            infoText="Choose what’s realistic; we’ll balance macros across meals."
+            required
+            infoText="Choose what's realistic; we'll balance macros across meals."
             labelStyle={styles.sectionLabel}
           />
-          <View style={styles.mealCountContainer}>
-            {MEAL_COUNTS.map((count) => (
-              <TouchableOpacity
-                key={count.value}
-                style={[
-                  styles.mealOption,
-                  mealCount === count.value && styles.selectedMeal,
-                ]}
-                onPress={() => setMealCount(count.value)}
-              >
-                <Text style={[
-                  styles.mealText,
-                  mealCount === count.value && styles.selectedMealText,
-                ]}>
-                  {count.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+          <View style={styles.sliderContainer}>
+            <Text style={styles.sliderValue}>{mealCount} {mealCount === 1 ? 'meal' : 'meals'}</Text>
+            <Slider
+              style={styles.slider}
+              minimumValue={1}
+              maximumValue={8}
+              step={1}
+              value={mealCount}
+              onValueChange={setMealCount}
+              minimumTrackTintColor={theme.color.accent.primary}
+              maximumTrackTintColor={theme.color.line}
+              thumbTintColor={theme.color.accent.primary}
+            />
+            <View style={styles.sliderLabels}>
+              <Text style={styles.sliderLabelText}>1</Text>
+              <Text style={styles.sliderLabelText}>8</Text>
+            </View>
           </View>
 
           <View style={styles.inputContainer}>
@@ -1102,19 +1150,64 @@ export default function OnboardingScreen() {
 
           <View style={{ marginTop: theme.space.lg }}>
             <LabelWithInfo
-              label="Workout Intensity Preference"
-              infoText="We’ll tune training difficulty and recovery based on your preference."
+              label="Workout Intensity"
+              required
+              infoText="How hard do you want to push in each workout? 1 is very light effort, 10 is maximum intensity. We'll estimate your fitness level automatically."
               labelStyle={styles.sectionLabel}
             />
-            <View style={styles.chipsContainer}>
-              {(['Optimal', 'Ego lifts', 'Recovery focused'] as WorkoutIntensity[]).map((intensity) => (
-                <Chip
-                  key={intensity}
-                  label={intensity}
-                  selected={workoutIntensity === intensity}
-                  onPress={() => setWorkoutIntensity(intensity)}
-                  color={theme.color.accent.primary}
-                />
+            <View style={styles.sliderContainer}>
+              <Text style={styles.sliderValue}>
+                {intensityLevel}/10 
+                {intensityLevel <= 3 ? ' (Light)' : intensityLevel <= 6 ? ' (Moderate)' : ' (High Intensity)'}
+              </Text>
+              <Slider
+                style={styles.slider}
+                minimumValue={1}
+                maximumValue={10}
+                step={1}
+                value={intensityLevel}
+                onValueChange={setIntensityLevel}
+                minimumTrackTintColor={theme.color.accent.primary}
+                maximumTrackTintColor={theme.color.line}
+                thumbTintColor={theme.color.accent.primary}
+              />
+              <View style={styles.sliderLabels}>
+                <Text style={styles.sliderLabelText}>1 (Very Light)</Text>
+                <Text style={styles.sliderLabelText}>10 (Max Effort)</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={{ marginTop: theme.space.lg }}>
+            <LabelWithInfo
+              label="Training Level"
+              required
+              infoText="Your training experience helps us set appropriate volume and progression."
+              labelStyle={styles.sectionLabel}
+            />
+            <View style={styles.optionsContainer}>
+              {TRAINING_LEVELS.map((level) => (
+                <TouchableOpacity
+                  key={level.id}
+                  style={[
+                    styles.goalOption,
+                    trainingLevel === level.id && styles.selectedGoal,
+                  ]}
+                  onPress={() => setTrainingLevel(level.id as TrainingLevel)}
+                >
+                  <Text style={[
+                    styles.goalTitle,
+                    trainingLevel === level.id && styles.selectedGoalText,
+                  ]}>
+                    {level.label}
+                  </Text>
+                  <Text style={[
+                    styles.goalDescription,
+                    trainingLevel === level.id && styles.selectedGoalText,
+                  ]}>
+                    {level.description}
+                  </Text>
+                </TouchableOpacity>
               ))}
             </View>
           </View>
@@ -1134,15 +1227,13 @@ export default function OnboardingScreen() {
               numberOfLines={3}
             />
           </View>
-          </ScrollView>
-          {step === 6 && showScrollHint && <ScrollHintOverlay onPress={handleScrollToEnd} />}
         </View>
       ),
     },
   ];
 
   return (
-    <View style={styles.container}>
+    <KeyboardDismissView style={styles.container}>
       <LinearGradient
         colors={['#FF5C5C', '#FF4444', '#FF2222', '#1A1A1A', '#0C0C0D']}
         style={styles.gradient}
@@ -1156,7 +1247,14 @@ export default function OnboardingScreen() {
             <Power color={theme.color.ink} size={20} />
           </TouchableOpacity>
         </View>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <View style={styles.header}>
             <Text style={styles.welcomeText}>Welcome to</Text>
             <Text style={styles.appName}>Liftor</Text>
@@ -1182,6 +1280,28 @@ export default function OnboardingScreen() {
               <Text style={styles.stepTitle}>{steps[step].title}</Text>
               {steps[step].content}
 
+              {step === steps.length - 1 && (
+                <View style={styles.toggleRow}>
+                  <View style={styles.toggleLabelContainer}>
+                    <Text style={styles.toggleLabel}>Quality Boost</Text>
+                    <Text style={styles.toggleSubLabel}>(Extra checks for smarter choices and sequencing.)</Text>
+                  </View>
+                  <Switch
+                    value={includeReasoning}
+                    onValueChange={setIncludeReasoning}
+                    trackColor={{ false: theme.color.line, true: theme.color.accent.primary }}
+                    thumbColor={theme.color.bg}
+                  />
+                </View>
+              )}
+
+              {/* Error message display */}
+              {saveError && (
+                <View style={styles.errorContainer}>
+                  <Text style={styles.errorText}>{saveError}</Text>
+                </View>
+              )}
+
               <View style={[
                 styles.buttonContainer,
                 (step === 0 && !isSmallScreen) ? styles.firstStepButtonContainer : undefined,
@@ -1192,19 +1312,22 @@ export default function OnboardingScreen() {
                     title="Back"
                     onPress={() => setStep(step - 1)}
                     variant="outline"
+                    disabled={isSaving}
                     style={[styles.backButton, ((step === 1 || step === 2) ? styles.alignedButton : undefined)]}
                   />
                 )}
                 <Button
                   title={
-                    !canProceed && currentStepValidation.missingFields.length > 0
+                    isSaving
+                      ? "Saving..."
+                      : !canProceed && currentStepValidation.missingFields.length > 0
                       ? stackedRequiredLabel
                       : step === steps.length - 1 
                         ? "Build My Journey" 
                         : "Next"
                   }
                   onPress={step === steps.length - 1 ? handleComplete : () => setStep(step + 1)}
-                  disabled={!canProceed}
+                  disabled={!canProceed || isSaving}
                   style={[
                     styles.nextButton,
                     (step === 0 && !isSmallScreen) ? styles.firstStepNextButton : undefined,
@@ -1218,7 +1341,7 @@ export default function OnboardingScreen() {
           </Animated.View>
         </ScrollView>
       </SafeAreaView>
-    </View>
+    </KeyboardDismissView>
   );
 }
 
@@ -1358,9 +1481,6 @@ const styles = StyleSheet.create({
     minHeight: 80,
     textAlignVertical: 'top',
   },
-  bodyStatsContainer: {
-    maxHeight: 400,
-  },
   statsRow: {
     flexDirection: 'row',
     gap: theme.space.md,
@@ -1499,14 +1619,24 @@ const styles = StyleSheet.create({
   selectedDayText: {
     color: theme.color.bg,
   },
-  supplementsContainer: {
-    maxHeight: 350,
-  },
   sectionLabel: {
     fontSize: 16,
     fontWeight: '600',
     color: theme.color.ink,
     marginBottom: theme.space.sm,
+  },
+  errorContainer: {
+    backgroundColor: '#fee2e2',
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+    marginHorizontal: theme.space.sm,
+    marginTop: theme.space.md,
+  },
+  errorText: {
+    color: '#dc2626',
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   buttonContainer: {
     flexDirection: 'row',
@@ -1543,37 +1673,6 @@ const styles = StyleSheet.create({
   },
   fadeWrapper: {
     flex: 1,
-  },
-  scrollHintOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 80,
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  glassCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.35)',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 8,
-    },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 10,
-  },
-  // New styles for specifics step
-  specificsContainer: {
-    maxHeight: 400,
   },
   inputRow: {
     flexDirection: 'row',
@@ -1673,6 +1772,33 @@ const styles = StyleSheet.create({
     marginTop: theme.space.xs,
     fontWeight: '500',
   },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    backgroundColor: theme.color.card,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.md,
+    marginTop: theme.space.md,
+  },
+  toggleLabelContainer: {
+    flex: 1,
+    marginRight: theme.space.md,
+  },
+  toggleLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.color.ink,
+    marginBottom: 2,
+  },
+  toggleSubLabel: {
+    fontSize: 12,
+    fontWeight: '400',
+    color: theme.color.muted,
+  },
   disabledButton: {
     opacity: 0.6,
   },
@@ -1690,5 +1816,30 @@ const styles = StyleSheet.create({
     padding: 4,
     marginLeft: -6,
     marginTop: -10,
+  },
+  sliderContainer: {
+    marginBottom: theme.space.lg,
+    paddingHorizontal: theme.space.sm,
+  },
+  slider: {
+    width: '100%',
+    height: 40,
+  },
+  sliderValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: theme.color.ink,
+    textAlign: 'center',
+    marginBottom: theme.space.sm,
+  },
+  sliderLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.space.xs,
+  },
+  sliderLabelText: {
+    fontSize: 12,
+    color: theme.color.muted,
+    fontWeight: '500',
   },
 });

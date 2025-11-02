@@ -35,7 +35,7 @@ export default function ErrorBoundary({ error, retry }: ErrorProps) {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <Stack.Screen options={{ title: 'Error', headerShown: false }} />
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content} keyboardDismissMode="on-drag">
         <View style={styles.iconContainer}>
           <AlertCircle color={theme.color.accent.primary} size={64} />
         </View>
@@ -50,7 +50,7 @@ export default function ErrorBoundary({ error, retry }: ErrorProps) {
         {showStack && (
           <View style={styles.stackContainer}>
             <Text style={styles.stackTitle}>Error Details (Development):</Text>
-            <ScrollView style={styles.stackScroll} horizontal>
+            <ScrollView style={styles.stackScroll} horizontal keyboardDismissMode="on-drag">
               <Text style={styles.stackText}>{errorStack}</Text>
             </ScrollView>
           </View>

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, TextInput, Alert } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { router, Stack } from 'expo-router';
 import { ChevronLeft, Info } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
@@ -62,30 +63,6 @@ export default function CheckinScreen() {
   };
 
   const handleSubmit = async () => {
-    // Check if user has subscription before allowing plan generation
-    try {
-      const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
-      const entitled = await hasActiveSubscription();
-      
-      // Get base plans to check if user has completed onboarding
-      const hasBasePlan = basePlans && basePlans.length > 0;
-      
-      // If user has base plan but no subscription, block access
-      if (hasBasePlan && !entitled) {
-        Alert.alert(
-          'Subscription Required',
-          'Please subscribe to continue generating daily plans.',
-          [{ 
-            text: 'Subscribe', 
-            onPress: () => router.push({ pathname: '/paywall', params: { next: '/checkin', blocking: 'true' } as any })
-          }]
-        );
-        return;
-      }
-    } catch (err) {
-      console.warn('[Checkin] Could not verify subscription:', err);
-    }
-    
     // Validate required fields
     const missing: string[] = [];
     if (!checkinData.moodCharacter) missing.push('Mood');
@@ -627,7 +604,7 @@ export default function CheckinScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardDismissView style={styles.container}>
       <Stack.Screen 
         options={{ 
           title: 'Check-in time',
@@ -646,7 +623,14 @@ export default function CheckinScreen() {
       />
       
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <View style={styles.header}>
             <Text style={styles.title}>How are you today?</Text>
             <Text style={styles.subtitle}>
@@ -678,7 +662,7 @@ export default function CheckinScreen() {
           />
         </ScrollView>
       </SafeAreaView>
-    </View>
+    </KeyboardDismissView>
   );
 }
 

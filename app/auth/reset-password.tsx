@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, TextInput, Alert } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { Stack, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button } from '@/components/ui/Button';
@@ -38,7 +39,7 @@ export default function ResetPasswordScreen() {
         return;
       }
       Alert.alert('Success', 'Your password has been updated.', [
-        { text: 'OK', onPress: () => { router.replace('/home'); } }
+        { text: 'OK', onPress: () => { router.replace('/'); } }
       ]);
     } catch (e: any) {
       setError(e?.message || 'Unexpected error updating password.');
@@ -50,7 +51,7 @@ export default function ResetPasswordScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <Stack.Screen options={{ title: 'Set New Password', headerShown: true }} />
-      <View style={styles.container}>
+      <KeyboardDismissView style={styles.container}>
         <Text style={styles.title}>Set a new password</Text>
         <Text style={styles.subtitle}>Enter and confirm your new password to complete the reset.</Text>
 
@@ -89,7 +90,7 @@ export default function ResetPasswordScreen() {
           onPress={onSubmit}
           disabled={!canSubmit || submitting}
         />
-      </View>
+      </KeyboardDismissView>
     </SafeAreaView>
   );
 }

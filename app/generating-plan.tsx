@@ -33,6 +33,9 @@ export default function GeneratingPlanScreen() {
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
   const navigation = useNavigation();
+  const [navLocked] = useState(true);
+  const navLockedRef = useRef(true);
+  const unlockNavigation = () => { navLockedRef.current = false; };
 
   const generatePlan = useCallback(async () => {
     try {
@@ -114,6 +117,7 @@ export default function GeneratingPlanScreen() {
       
       setTimeout(() => {
         try {
+          unlockNavigation();
           // Use push + replace combo for all environments (dev and production)
           // This is more reliable than replace alone
           console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation');
@@ -130,11 +134,13 @@ export default function GeneratingPlanScreen() {
           setTimeout(() => {
             console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
             try {
+              unlockNavigation();
               router.push('/plan');
               setTimeout(() => router.replace('/plan'), 300);
             } catch (fallbackError) {
               // Fallback 2: Navigate to home as last resort
               console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+              unlockNavigation();
               router.replace('/(tabs)/home');
             }
           }, 100);
@@ -211,6 +217,7 @@ export default function GeneratingPlanScreen() {
         try {
           // Use push + replace combo for all environments (dev and production)
           console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation (fallback)');
+          unlockNavigation();
           router.push('/plan?celebrate=1');
           setTimeout(() => {
             console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace (fallback)');
@@ -222,11 +229,13 @@ export default function GeneratingPlanScreen() {
           setTimeout(() => {
             console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
             try {
+              unlockNavigation();
               router.push('/plan');
               setTimeout(() => router.replace('/plan'), 300);
             } catch (fallbackError) {
               // Fallback 2: Navigate to home as last resort
               console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+              unlockNavigation();
               router.replace('/(tabs)/home');
             }
           }, 100);
@@ -357,21 +366,16 @@ export default function GeneratingPlanScreen() {
     return () => clearInterval(messageInterval);
   }, []);
 
-  // Ensure back/gesture takes user to home, not check-in
+  // Lock hardware back and gestures until plan is generated
   useEffect(() => {
     const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
-      e.preventDefault();
-      // Defer navigation to avoid update during render
-      setTimeout(() => {
-        router.replace('/(tabs)/home');
-      }, 0);
+      if (navLockedRef.current) {
+        e.preventDefault();
+        return;
+      }
     });
     const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
-      // Defer navigation to avoid update during render
-      setTimeout(() => {
-        router.replace('/(tabs)/home');
-      }, 0);
-      return true;
+      return navLockedRef.current; // Block while locked
     });
     return () => {
       try { unsubBeforeRemove(); } catch {}
@@ -387,6 +391,7 @@ export default function GeneratingPlanScreen() {
       <Stack.Screen 
         options={{ 
           headerShown: false,
+          gestureEnabled: false,
         }} 
       />
       

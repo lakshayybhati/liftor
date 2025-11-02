@@ -5,7 +5,7 @@ import Purchases, { PurchasesOffering, PurchasesPackage } from 'react-native-pur
 import Constants from 'expo-constants';
 import { theme } from '@/constants/colors';
 import { Card } from '@/components/ui/Card';
-import { hasActiveSubscription } from '@/utils/subscription-helpers';
+import { hasActiveSubscription, isSubscriptionBypassEnabled, enableSubscriptionBypass } from '@/utils/subscription-helpers';
 import { restorePurchases } from '@/utils/subscription-helpers';
 import { Sparkles, Gauge, Camera, HeartPulse, X } from 'lucide-react-native';
 import { useProfile } from '@/hooks/useProfile';
@@ -20,6 +20,7 @@ export default function PaywallScreen() {
   const [selected, setSelected] = useState<PurchasesPackage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isPurchasing, setIsPurchasing] = useState<boolean>(false);
+  const [bypassEnabled, setBypassEnabled] = useState<boolean>(false);
   // USD hints and debug panel removed for production-ready paywall
 
   const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
@@ -70,6 +71,16 @@ export default function PaywallScreen() {
   useEffect(() => {
     loadOfferings();
   }, [loadOfferings]);
+
+  // Load bypass state (dev-only)
+  useEffect(() => {
+    (async () => {
+      try {
+        const on = await isSubscriptionBypassEnabled();
+        setBypassEnabled(on);
+      } catch {}
+    })();
+  }, []);
 
   // Prevent back navigation in blocking mode
   useEffect(() => {
@@ -162,7 +173,7 @@ export default function PaywallScreen() {
     <View style={[styles.container, { backgroundColor: theme.color.bg }]}> 
       <Stack.Screen options={{ headerShown: false }} />
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardDismissMode="on-drag">
         {/* Close button - only show if not in blocking mode */}
         {!isBlockingMode && (
           <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
@@ -279,7 +290,25 @@ export default function PaywallScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Debug panel removed for production */}
+        {/* Dev-only unlock for Expo */}
+        {Constants.appOwnership === 'expo' && (
+          <View style={styles.utilityRow}>
+            <TouchableOpacity
+              onPress={async () => {
+                try {
+                  await enableSubscriptionBypass();
+                  setBypassEnabled(true);
+                  navigateNext();
+                } catch {}
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Unlock in Expo"
+              style={[styles.debugBtn]}
+            >
+              <Text style={styles.debugBtnText}>{bypassEnabled ? 'Unlocked (Expo)' : 'Unlock (Expo)'}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </ScrollView>
     </View>
   );

@@ -141,6 +141,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         // Make profile creation non-blocking to prevent auth state issues
         ensureProfileExists(newSession.user.id, newSession.user.email, newSession.user.user_metadata?.name)
           .catch(error => console.warn('[Auth] Profile ensure failed after sign-in:', error));
+        // Do not navigate here; let app/index.tsx handle redirects to avoid remount loops
       }
     });
 
@@ -182,7 +183,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
           if (type === 'recovery') {
             router.replace('/auth/reset-password');
           } else {
-            router.replace('/home');
+            router.replace('/');
           }
         } else {
           router.replace('/auth/login');

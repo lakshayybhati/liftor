@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
+import { useNavigation } from '@react-navigation/native';
 
 type PlanTab = 'workout' | 'nutrition' | 'recovery' | 'motivation';
 
@@ -54,6 +55,7 @@ export default function PlanScreen() {
   const [showConfetti, setShowConfetti] = useState(celebrate === '1');
   const [confettiAnim] = useState(new Animated.Value(0));
   const [isWaitingForPlan, setIsWaitingForPlan] = useState(false);
+  const navigation = useNavigation();
 
   // Set initial tab from URL parameter
   useEffect(() => {
@@ -65,11 +67,25 @@ export default function PlanScreen() {
   // Override hardware back to go home instead of previous (e.g., check-in)
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      router.replace('/home');
+      router.replace('/(tabs)/home');
       return true;
     });
     return () => sub.remove();
   }, []);
+
+  // Intercept gesture/back to avoid returning to generating screen
+  useEffect(() => {
+    const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
+      const actionType = e?.data?.action?.type;
+      if (actionType === 'GO_BACK' || actionType === 'POP') {
+        e.preventDefault();
+        router.replace('/(tabs)/home');
+      }
+    });
+    return () => {
+      try { unsubBeforeRemove(); } catch {}
+    };
+  }, [navigation]);
 
   // Animate confetti banner in → hold → out, then auto-dismiss
   useEffect(() => {
@@ -202,8 +218,8 @@ export default function PlanScreen() {
       carbs: totals.carbs + food.carbs,
     }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
   }, [dayExtras]);
-  const manualEntries = useMemo(() => dayExtras.filter((f: any) => !f.imageUri), [dayExtras]);
-  const snapEntries = useMemo(() => dayExtras.filter((f: any) => !!f.imageUri), [dayExtras]);
+  const manualEntries = useMemo(() => dayExtras.filter((f: any) => (f.source ? f.source === 'manual' : !f.imagePath)), [dayExtras]);
+  const snapEntries = useMemo(() => dayExtras.filter((f: any) => (f.source ? f.source === 'snap' : !!f.imagePath)), [dayExtras]);
   
   const currentCalories = completedMealTotals.calories + extraTotals.calories;
   const currentProtein = completedMealTotals.protein + extraTotals.protein;
@@ -286,18 +302,32 @@ export default function PlanScreen() {
 
   const renderWorkout = () => {
     if (!plan?.workout) {
-      return (
-        <ScrollView style={styles.tabContent}>
-          <Card style={styles.headerCard}>
-            <Text style={styles.headerTitle}>No Workout Plan</Text>
-            <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
-          </Card>
-        </ScrollView>
-      );
+    return (
+      <ScrollView 
+        style={styles.tabContent}
+        showsVerticalScrollIndicator={false}
+        bounces={true}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        <Card style={styles.headerCard}>
+          <Text style={styles.headerTitle}>No Workout Plan</Text>
+          <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
+        </Card>
+      </ScrollView>
+    );
     }
 
     return (
-      <ScrollView style={styles.tabContent}>
+      <ScrollView 
+        style={styles.tabContent}
+        showsVerticalScrollIndicator={false}
+        bounces={true}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Card gradient gradientColors={['#FF6B9D', '#C147E9']} style={styles.headerCard}>
           <Text style={styles.headerTitle}>Today&apos;s Workout</Text>
           {plan && (
@@ -378,7 +408,14 @@ export default function PlanScreen() {
     const mealsData = generateMealsData();
 
     return (
-      <ScrollView style={styles.tabContent}>
+      <ScrollView 
+        style={styles.tabContent}
+        showsVerticalScrollIndicator={false}
+        bounces={true}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         {/* Calorie Summary */}
         <Card gradient gradientColors={['#4ECDC4', '#44A08D']} style={styles.headerCard}>
           <Text style={styles.headerTitle}>Nutrition Plan</Text>
@@ -533,7 +570,13 @@ export default function PlanScreen() {
   const renderRecovery = () => {
     if (!plan?.recovery) {
       return (
-        <ScrollView style={styles.tabContent}>
+        <ScrollView 
+          style={styles.tabContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+        >
           <Card style={styles.headerCard}>
             <Text style={styles.headerTitle}>No Recovery Plan</Text>
             <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
@@ -543,7 +586,13 @@ export default function PlanScreen() {
     }
 
     return (
-      <ScrollView style={styles.tabContent}>
+      <ScrollView 
+        style={styles.tabContent}
+        showsVerticalScrollIndicator={false}
+        bounces={true}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+      >
         <Card gradient gradientColors={['#667eea', '#764ba2']} style={styles.headerCard}>
           <Text style={styles.headerTitle}>Recovery Plan</Text>
           <Text style={styles.headerSubtitle}>
@@ -568,12 +617,39 @@ export default function PlanScreen() {
             </Text>
           ))}
         </Card>
+
+        {/* Supplements Card */}
+        {(plan?.recovery?.supplements && plan.recovery.supplements.length > 0) && (
+          <Card style={styles.recoveryCard}>
+            <Text style={styles.recoveryTitle}>💊 Today's Supplements</Text>
+            {plan.recovery.supplements.map((item: string, index: number) => (
+              <Text key={index} style={styles.recoveryItem}>
+                • {item}
+              </Text>
+            ))}
+          </Card>
+        )}
+
+        {/* Personal Message Card */}
+        {plan?.recovery?.careNotes && (
+          <Card style={styles.recoveryCard}>
+            <Text style={styles.recoveryTitle}>✨ Personal Message</Text>
+            <Text style={styles.careNotesText}>{plan.recovery.careNotes}</Text>
+          </Card>
+        )}
       </ScrollView>
     );
   };
 
   const renderMotivation = () => (
-    <ScrollView style={styles.tabContent}>
+    <ScrollView 
+      style={styles.tabContent}
+      showsVerticalScrollIndicator={false}
+      bounces={true}
+      scrollEventThrottle={16}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
+    >
       <Card gradient gradientColors={['#FF9A9E', '#FECFEF']} style={styles.motivationCard}>
         <Sparkles size={40} color="#FFFFFF" style={styles.motivationIcon} />
         <Text style={styles.motivationTitle}>Your Daily Motivation</Text>
@@ -621,7 +697,7 @@ export default function PlanScreen() {
             </TouchableOpacity>
           ),
           headerLeft: () => (
-            <TouchableOpacity onPress={() => router.replace('/home')} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Go to Home">
+            <TouchableOpacity onPress={() => router.replace('/(tabs)/home')} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Go to Home">
               <ChevronLeft color={theme.color.ink} size={20} />
             </TouchableOpacity>
           ),
@@ -653,8 +729,7 @@ export default function PlanScreen() {
                 ],
               },
             ]}
-            onStartShouldSetResponder={() => true}
-            onResponderRelease={() => setShowConfetti(false)}
+            pointerEvents="none"
           >
             <Text style={styles.confettiBannerText}>🎉 Plan Ready! 🎉</Text>
           </Animated.View>
@@ -690,7 +765,7 @@ export default function PlanScreen() {
         </Modal>
         {renderTabBar()}
         {plan ? renderContent() : isWaitingForPlan ? (
-          <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }}>
+          <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }} keyboardDismissMode="on-drag">
             <Card style={{ padding: theme.space.lg, alignItems: 'center' }}>
               <ActivityIndicator size="large" color={theme.color.accent.primary} style={{ marginBottom: 12 }} />
               <Text style={{ fontSize: 16, fontWeight: '600', color: theme.color.ink, marginBottom: 6 }}>Loading your plan...</Text>
@@ -698,7 +773,7 @@ export default function PlanScreen() {
             </Card>
           </ScrollView>
         ) : (
-          <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }}>
+          <ScrollView style={styles.tabContent} contentContainerStyle={{ padding: theme.space.lg }} keyboardDismissMode="on-drag">
             <Card style={{ padding: theme.space.lg }}>
               <Text style={{ fontSize: 16, fontWeight: '600', color: theme.color.ink, marginBottom: 6 }}>No plan found</Text>
               <Text style={{ color: theme.color.muted }}>We couldn't find a plan for this day. {isToday ? 'Please complete your check-in to generate today\'s plan.' : 'Try another day or return to Today.'}</Text>
@@ -956,6 +1031,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: theme.color.muted,
     marginBottom: 6,
+    lineHeight: 20,
+  },
+  careNotesText: {
+    fontSize: 14,
+    color: theme.color.ink,
     lineHeight: 20,
   },
   motivationCard: {

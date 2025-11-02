@@ -16,7 +16,8 @@ export default function FoodEntriesScreen() {
   const manualExtras = useMemo(() => {
     const todayLog = getTodayFoodLog();
     const list = todayLog?.extras || [];
-    return list.filter((e: any) => !e.imageUri);
+    // Manual view → filter by source when available, fallback to no imagePath
+    return list.filter((e: any) => (e.source ? e.source === 'manual' : !e.imagePath));
   }, [getTodayFoodLog]);
 
   const confirmDelete = useCallback((id: string) => {
@@ -87,6 +88,14 @@ export default function FoodEntriesScreen() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           renderItem={renderItem}
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          initialNumToRender={10}
+          updateCellsBatchingPeriod={50}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
         />
       )}
     </View>

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Image, KeyboardAvoidingView, ScrollView, Platform, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Link, Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
@@ -10,6 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 export default function LoginScreen() {
   const router = useRouter();
   const auth = useAuth();
+  const { session } = auth ?? {} as any;
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -37,9 +38,17 @@ export default function LoginScreen() {
       setIsSubmitting(false);
       return;
     }
-    router.replace('/home');
     setIsSubmitting(false);
+    // Navigate to root where index.tsx handles onboarding/home redirect
+    router.replace('/');
   }, [canSubmit, email, password, signIn, router, isSubmitting]);
+
+  // Leave login screen automatically when a valid session exists
+  useEffect(() => {
+    if (!isAuthLoading && session) {
+      router.replace('/');
+    }
+  }, [isAuthLoading, session]);
 
   return (
   <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>

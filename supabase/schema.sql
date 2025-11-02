@@ -81,6 +81,74 @@ create table if not exists public.profiles (
   unique(email)
 );
 
+-- Ensure legacy instances of food_extras have required columns before creating indexes
+do $$ begin
+  -- Add source column if missing (used by index below)
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='food_extras' and column_name='source'
+  ) then
+    alter table public.food_extras add column source text;
+    update public.food_extras set source = 'manual' where source is null;
+    -- add check constraint if not present
+    if not exists (
+      select 1 from pg_constraint where conname = 'food_extras_source_check'
+    ) then
+      alter table public.food_extras add constraint food_extras_source_check check (source in ('manual','snap'));
+    end if;
+    alter table public.food_extras alter column source set not null;
+  end if;
+end $$;
+
+-- Ensure columns exist for legacy tables (backfill and defaults)
+do $$ begin
+  -- occurred_at_utc
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='food_extras' and column_name='occurred_at_utc'
+  ) then
+    alter table public.food_extras add column occurred_at_utc timestamptz;
+    -- backfill from legacy "date" column if present
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema='public' and table_name='food_extras' and column_name='date'
+    ) then
+      update public.food_extras set occurred_at_utc = date where occurred_at_utc is null;
+    end if;
+    update public.food_extras set occurred_at_utc = now() where occurred_at_utc is null;
+    alter table public.food_extras alter column occurred_at_utc set not null;
+    alter table public.food_extras alter column occurred_at_utc set default now();
+  end if;
+
+  -- day_key_local
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='food_extras' and column_name='day_key_local'
+  ) then
+    alter table public.food_extras add column day_key_local date;
+    -- compute from occurred_at_utc if available; else fallback to legacy date
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema='public' and table_name='food_extras' and column_name='occurred_at_utc'
+    ) then
+      update public.food_extras
+      set day_key_local = (occurred_at_utc at time zone 'Asia/Kolkata')::date
+      where day_key_local is null;
+    elsif exists (
+      select 1 from information_schema.columns
+      where table_schema='public' and table_name='food_extras' and column_name='date'
+    ) then
+      update public.food_extras
+      set day_key_local = (date at time zone 'Asia/Kolkata')::date
+      where day_key_local is null;
+    end if;
+    update public.food_extras
+    set day_key_local = (now() at time zone 'Asia/Kolkata')::date
+    where day_key_local is null;
+    alter table public.food_extras alter column day_key_local set not null;
+  end if;
+end $$;
+
 do $$ begin
   if not exists (select 1 from pg_trigger where tgname = 'profiles_set_updated_at') then
     create trigger profiles_set_updated_at before update on public.profiles for each row execute function public.set_updated_at();
@@ -195,22 +263,61 @@ create index if not exists idx_checkins_user_date on public.checkins(user_id, da
 create table if not exists public.food_extras (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
+  -- historical column kept for compatibility; prefer occurred_at_utc + day_key_local
   nutrition_plan_id uuid null references public.daily_plans(id) on delete set null,
-  date timestamptz not null default now(),
+  -- new canonical time fields
+  occurred_at_utc timestamptz not null default now(),
+  day_key_local date not null,
   name text not null,
-  calories int not null,
-  protein numeric not null,
-  carbs numeric not null,
-  fat numeric not null,
-  portion text,
-  image_url text,
-  confidence numeric,
-  notes text,
-  created_at timestamptz not null default now()
+  calories int not null check (calories >= 0),
+  protein numeric not null check (protein >= 0),
+  carbs numeric not null check (carbs >= 0),
+  fat numeric not null check (fat >= 0),
+  portion text null,
+  portion_weight_g numeric null,
+  -- migrated from image_url -> image_path (no public URLs)
+  image_path text null,
+  confidence numeric null check (confidence >= 0 and confidence <= 1),
+  notes text null,
+  -- auditing
+  source text not null default 'manual' check (source in ('manual','snap')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  -- idempotency key (per user)
+  idempotency_key text null,
+  -- optional nutrition mapping
+  food_id uuid null
 );
 
-create index if not exists idx_food_extras_user_date on public.food_extras(user_id, date desc);
+-- Backwards compatible indexes
+-- Ensure legacy instances have columns referenced by indexes
+do $$ begin
+  -- idempotency_key (for unique index)
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='food_extras' and column_name='idempotency_key'
+  ) then
+    alter table public.food_extras add column idempotency_key text;
+  end if;
+  -- source (for day+source index)
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='food_extras' and column_name='source'
+  ) then
+    alter table public.food_extras add column source text;
+    update public.food_extras set source = 'manual' where source is null;
+    if not exists (select 1 from pg_constraint where conname = 'food_extras_source_check') then
+      alter table public.food_extras add constraint food_extras_source_check check (source in ('manual','snap'));
+    end if;
+    alter table public.food_extras alter column source set not null;
+  end if;
+end $$;
+
+create index if not exists idx_food_extras_user_date on public.food_extras(user_id, occurred_at_utc desc);
 create index if not exists idx_food_extras_plan on public.food_extras(nutrition_plan_id);
+create index if not exists food_extras_user_day_idx on public.food_extras(user_id, day_key_local desc);
+create index if not exists food_extras_user_day_source_idx on public.food_extras(user_id, day_key_local desc, source);
+create unique index if not exists food_extras_user_idem_uniq on public.food_extras(user_id, idempotency_key);
 
 alter table public.profiles enable row level security;
 alter table public.weekly_base_plans enable row level security;
@@ -344,6 +451,29 @@ insert into storage.buckets (id, name, public)
 values ('avatars','avatars', true)
 on conflict (id) do nothing;
 
+-- Private bucket for food snaps
+insert into storage.buckets (id, name, public)
+values ('food_snaps','food_snaps', false)
+on conflict (id) do nothing;
+
+-- Optional canonical foods for nutrition mapping
+create table if not exists public.canonical_foods (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  alt_names text[] not null default '{}',
+  portion_unit text null,
+  kcal_per_100g numeric null,
+  protein_per_100g numeric null,
+  carbs_per_100g numeric null,
+  fat_per_100g numeric null
+);
+alter table public.canonical_foods enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='public' and tablename='canonical_foods' and policyname='canonical_foods_select_all') then
+    create policy canonical_foods_select_all on public.canonical_foods for select using (true);
+  end if;
+end $$;
+
 do $$ begin
   if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='avatars_public_read') then
     create policy avatars_public_read on storage.objects for select using (bucket_id = 'avatars');
@@ -365,6 +495,28 @@ end $$;
 do $$ begin
   if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='avatars_delete_own') then
     create policy avatars_delete_own on storage.objects for delete using (bucket_id = 'avatars' and owner = auth.uid());
+  end if;
+end $$;
+
+-- RLS for private bucket food_snaps
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='food_snaps_read_own') then
+    create policy food_snaps_read_own on storage.objects for select using (bucket_id = 'food_snaps' and owner = auth.uid());
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='food_snaps_insert_own') then
+    create policy food_snaps_insert_own on storage.objects for insert with check (bucket_id = 'food_snaps' and owner = auth.uid());
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='food_snaps_update_own') then
+    create policy food_snaps_update_own on storage.objects for update using (bucket_id = 'food_snaps' and owner = auth.uid()) with check (bucket_id = 'food_snaps' and owner = auth.uid());
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='food_snaps_delete_own') then
+    create policy food_snaps_delete_own on storage.objects for delete using (bucket_id = 'food_snaps' and owner = auth.uid());
   end if;
 end $$;
 

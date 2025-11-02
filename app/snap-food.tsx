@@ -1,16 +1,20 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform, TextInput, Modal, ScrollView, ActivityIndicator } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Haptics from 'expo-haptics';
 import { Camera, X, Check, Zap } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as FileSystem from 'expo-file-system';
 
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
+const reportError = (e: any) => { /* no-op if Sentry is not installed */ };
 import { theme } from '@/constants/colors';
+import { useAuth } from '@/hooks/useAuth';
 
 interface FoodAnalysisResponse {
   items: {
@@ -38,7 +42,8 @@ interface ManualFoodEntry {
 
 export default function SnapFoodScreen() {
   const params = useLocalSearchParams<{ manual?: string }>();
-  const { addExtraFood } = useUserStore();
+  const { addExtraFood, removeExtraFood } = useUserStore();
+  const { supabase, session } = useAuth();
   const insets = useSafeAreaInsets();
   const isManualOnly = params?.manual === '1';
   const [permission, requestPermission] = useCameraPermissions();
@@ -49,13 +54,51 @@ export default function SnapFoodScreen() {
   const [analysisResult, setAnalysisResult] = useState<FoodAnalysisResponse | null>(null);
   const [extraNotes, setExtraNotes] = useState('');
   const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
+  const [uploadedImagePath, setUploadedImagePath] = useState<string | null>(null);
+  const [failCount, setFailCount] = useState(0);
+  const [circuitOpenUntil, setCircuitOpenUntil] = useState<number | null>(null);
   const [manualEntry, setManualEntry] = useState<ManualFoodEntry>({
     name: '',
     portionSize: '',
   });
   const [isAnalyzingManual, setIsAnalyzingManual] = useState(false);
   const [manualAnalysisResult, setManualAnalysisResult] = useState<FoodAnalysisResponse | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<number>(0);
+  const [manualAnalysisProgress, setManualAnalysisProgress] = useState<number>(0);
   const cameraRef = useRef<CameraView>(null);
+
+  // On-device rate limiting/backoff helpers
+  const [onDeviceCallCount, setOnDeviceCallCount] = useState<{ count: number; resetAt: number }>({ count: 0, resetAt: Date.now() + 3600000 });
+  const MAX_ON_DEVICE_CALLS_PER_HOUR = 50;
+
+  const checkRateLimit = useCallback((): boolean => {
+    const now = Date.now();
+    if (now > onDeviceCallCount.resetAt) {
+      setOnDeviceCallCount({ count: 0, resetAt: now + 3600000 });
+      return true;
+    }
+    return onDeviceCallCount.count < MAX_ON_DEVICE_CALLS_PER_HOUR;
+  }, [onDeviceCallCount]);
+
+  const incrementRateLimit = useCallback(() => {
+    setOnDeviceCallCount(prev => ({ ...prev, count: prev.count + 1 }));
+  }, []);
+
+  const retryWithBackoff = useCallback(async <T,>(fn: () => Promise<T>, maxRetries = 3): Promise<T> => {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        const status = (error && typeof error === 'object' && 'status' in error) ? (error as any).status : undefined;
+        const isRetryable = status === 429 || (typeof status === 'number' && status >= 500);
+        if (i === maxRetries - 1 || !isRetryable) throw error;
+        const baseDelay = 1000 * Math.pow(2, i);
+        const jitter = Math.random() * 500;
+        await new Promise(r => setTimeout(r, baseDelay + jitter));
+      }
+    }
+    throw new Error('Max retries exceeded');
+  }, []);
 
   useEffect(() => {
     if (isManualOnly) return;
@@ -69,6 +112,42 @@ export default function SnapFoodScreen() {
       setShowManualEntry(true);
     }
   }, [params]);
+
+  // Animated progress while analyzing snap
+  useEffect(() => {
+    let timer: any;
+    if (isAnalyzing) {
+      setAnalysisProgress(0);
+      timer = setInterval(() => {
+        setAnalysisProgress(prev => {
+          const inc = 2 + Math.random() * 4; // 2–6%
+          const next = prev + inc;
+          return Math.min(next, 92);
+        });
+      }, 250);
+    } else {
+      setAnalysisProgress(0);
+    }
+    return () => { if (timer) clearInterval(timer); };
+  }, [isAnalyzing]);
+
+  // Animated progress while analyzing manual
+  useEffect(() => {
+    let timer: any;
+    if (isAnalyzingManual) {
+      setManualAnalysisProgress(0);
+      timer = setInterval(() => {
+        setManualAnalysisProgress(prev => {
+          const inc = 2 + Math.random() * 4; // 2–6%
+          const next = prev + inc;
+          return Math.min(next, 92);
+        });
+      }, 250);
+    } else {
+      setManualAnalysisProgress(0);
+    }
+    return () => { if (timer) clearInterval(timer); };
+  }, [isAnalyzingManual]);
 
   const compressImage = useCallback(async (uri: string): Promise<string> => {
     try {
@@ -87,89 +166,274 @@ export default function SnapFoodScreen() {
     }
   }, []);
 
-  const convertToBase64 = useCallback(async (uri: string): Promise<string> => {
-    try {
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64 = reader.result as string;
-          resolve(base64.split(',')[1]); // Remove data:image/jpeg;base64, prefix
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    } catch (error) {
-      console.error('Error converting to base64:', error);
-      throw error;
-    }
+  // On-device AI helpers
+  const analyzeManualOnDevice = useCallback(async (name: string, portion: string, notes?: string): Promise<FoodAnalysisResponse> => {
+    const apiKey = process.env.EXPO_PUBLIC_DEEPSEEK_API_KEY || process.env.EXPO_PUBLIC_AI_API_KEY;
+    if (!apiKey) throw { status: 500, message: 'DeepSeek API key not configured' };
+
+    const r = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'You are a nutrition expert. Return ONLY JSON with fields: items[{name,quantity,calories,protein_g,carbs_g,fat_g}], totals{kcal,protein_g,carbs_g,fat_g}, confidence (0..1), notes.' },
+          { role: 'user', content: `Food: ${name}\nPortion: ${portion}\nNotes: ${notes ?? ''}\nReturn valid JSON only.` }
+        ],
+        temperature: 0.2
+      })
+    });
+    if (!r.ok) throw { status: r.status, message: `DeepSeek failed: ${await r.text().catch(() => '')}` };
+    const j = await r.json().catch(() => ({}));
+    const text = j?.choices?.[0]?.message?.content ?? '{}';
+    return JSON.parse(text);
   }, []);
 
-  const analyzeFood = useCallback(async (imageBase64: string, notes: string) => {
-    try {
-      const response = await fetch('https://toolkit.rork.com/text/llm/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: 'system',
-              content: 'You are a nutrition expert. Analyze the food image and provide nutritional information in STRICT JSON format. Return only valid JSON with this exact structure: {"items":[{"name":"string","quantity":"string","calories":number,"protein_g":number,"carbs_g":number,"fat_g":number}],"totals":{"kcal":number,"protein_g":number,"carbs_g":number,"fat_g":number},"confidence":number,"notes":"string"}. Confidence should be between 0 and 1. Do not include any other text, just the JSON.'
-            },
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: `Analyze this food image and estimate nutritional information.${notes && notes.trim() ? ` Additional notes: ${notes.trim()}` : ''}`
-                },
-                {
-                  type: 'image',
-                  image: imageBase64
-                }
-              ]
-            }
-          ]
-        }),
-      });
+  const analyzeImageOnDevice = useCallback(async (imageUri: string, notes?: string): Promise<FoodAnalysisResponse> => {
+    const apiKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
+    if (!apiKey) throw { status: 500, message: 'Gemini API key not configured' };
+    const model = process.env.EXPO_PUBLIC_GEMINI_MODEL || 'gemini-2.5-flash';
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+    const base64 = await FileSystem.readAsStringAsync(imageUri, { encoding: FileSystem.EncodingType.Base64 });
+
+    const body = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inline_data: { mime_type: 'image/jpeg', data: base64 } },
+            { text: `Analyze this food image and estimate nutrition. ${notes ?? ''}` },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        response_mime_type: 'application/json',
+        response_schema: {
+          type: 'object',
+          properties: {
+            items: {
+              type: 'array',
+              minItems: 1,
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  quantity: { type: 'string' },
+                  calories: { type: 'number' },
+                  protein_g: { type: 'number' },
+                  carbs_g: { type: 'number' },
+                  fat_g: { type: 'number' },
+                },
+                required: ['name', 'quantity', 'calories', 'protein_g', 'carbs_g', 'fat_g'],
+              },
+            },
+            totals: {
+              type: 'object',
+              properties: {
+                kcal: { type: 'number' },
+                protein_g: { type: 'number' },
+                carbs_g: { type: 'number' },
+                fat_g: { type: 'number' },
+              },
+              required: ['kcal', 'protein_g', 'carbs_g', 'fat_g'],
+            },
+            confidence: { type: 'number', minimum: 0, maximum: 1 },
+            notes: { type: 'string' },
+          },
+          required: ['items', 'totals', 'confidence'],
+        },
+      },
+    } as const;
+
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw { status: res.status, message: `Gemini failed: ${await res.text().catch(() => '')}` };
+    const json = await res.json().catch(() => ({}));
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    return JSON.parse(text);
+  }, []);
+
+  // Helpers for Storage path + idempotency
+  const makeId = useCallback(() => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, []);
+  const friendlyErrorMessage = useCallback((error: any): string => {
+    // Check for structured error codes first
+    const errorCode = (error as any)?.code;
+    if (errorCode) {
+      switch (errorCode) {
+        case 'MODEL_TIMEOUT':
+          return 'Analysis took too long—try again or use Manual.';
+        case 'PARSE_FAILED':
+          return "Couldn't read nutrition—edit values manually.";
+        case 'RATE_LIMITED':
+          return 'Daily analysis limit reached—try tomorrow.';
+        case 'STORAGE_ERROR':
+          return 'Failed to access the image. Please try taking another photo.';
+        case 'UNAUTHORIZED':
+          return 'Session expired. Please sign in again.';
+        case 'INTERNAL':
+          if (error.message?.includes('API key')) {
+            return 'Service configuration issue. Please contact support.';
+          }
+          return 'Service temporarily unavailable. Please try manual entry.';
+        default:
+          break;
+      }
+    }
+    
+    // Fallback to message parsing
+    const raw = typeof error === 'string' ? error : (error?.message || JSON.stringify(error || {}));
+    const msg = String(raw);
+    if (/MODEL_TIMEOUT|timeout/i.test(msg)) return 'Analysis took too long—try again or use Manual.';
+    if (/PARSE_FAILED|parse/i.test(msg)) return "Couldn't read nutrition—edit values manually.";
+    if (/RATE_LIMITED|429|Too Many/i.test(msg)) return 'Daily analysis limit reached—try tomorrow.';
+    if (/API key|not configured/i.test(msg)) return 'Service configuration issue. Please use manual entry.';
+    return 'Could not analyze the food. Would you like to enter the details manually?';
+  }, []);
+  const buildStoragePath = useCallback(() => {
+    const uid = session?.user?.id;
+    if (!uid) return null;
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const id = makeId();
+    return `${uid}/${yyyy}/${mm}/${dd}/${id}.jpg`;
+  }, [session?.user?.id, makeId]);
+
+  const uploadImageToStorage = useCallback(async (uri: string): Promise<string> => {
+    if (!session?.user?.id) throw new Error('Not signed in');
+    const path = buildStoragePath();
+    if (!path) throw new Error('Could not determine storage path');
+    const res = await fetch(uri);
+    const blob = await res.blob();
+    const { error } = await supabase.storage.from('food_snaps').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+    if (error) throw error;
+    return path;
+  }, [buildStoragePath, session?.user?.id, supabase.storage]);
+
+  // Helper: resilient upsert that retries without image_path if schema lacks it
+  const upsertFoodExtras = useCallback(async (payload: any) => {
+    const attemptUpsert = async (p: any) =>
+      await supabase
+        .from('food_extras')
+        .upsert(p, { onConflict: 'user_id,idempotency_key' })
+        .select('id,name,calories,protein,carbs,fat,confidence,notes,source,image_path')
+        .single();
+
+    const attemptInsert = async (p: any) =>
+      await supabase
+        .from('food_extras')
+        .insert(p)
+        .select('id,name,calories,protein,carbs,fat,confidence,notes,source,image_path')
+        .single();
+
+    // Make a working copy we can mutate as we strip unknown columns
+    const working: Record<string, any> = { ...payload };
+
+    // Try up to 5 times, removing unknown columns when PostgREST reports them
+    for (let i = 0; i < 5; i++) {
+      const { data, error } = await attemptUpsert(working);
+      if (!error) return data;
+
+      const msg = (error as any)?.message || '';
+      const code = (error as any)?.code || '';
+
+      // Handle missing column errors: remove the named column and retry
+      if (code === 'PGRST204' || /schema cache|Could not find/i.test(msg)) {
+        // Try to extract the missing column between quotes
+        const m = msg.match(/the '([^']+)' column/i);
+        const missingCol = m?.[1];
+        const candidates = missingCol ? [missingCol] : ['image_path','portion_weight_g','day_key_local','occurred_at_utc','confidence','notes','source','idempotency_key'];
+        let removed = false;
+        for (const key of candidates) {
+          if (key in working) {
+            delete (working as any)[key];
+            removed = true;
+          }
+        }
+        if (removed) continue;
       }
 
-      const data = await response.json();
-      console.log('Raw API response:', data.completion);
-      
-      // Try to extract JSON from the response
-      let result: FoodAnalysisResponse;
+      // If conflict target/idempotency not supported on this schema, try plain insert
+      if (/idempotency_key|on conflict|does not exist|schema cache/i.test(msg)) {
+        const legacy: Record<string, any> = { ...working };
+        delete legacy.idempotency_key;
+        delete legacy.image_path;
+        const { data: d2, error: e2 } = await attemptInsert(legacy);
+        if (!e2) return d2;
+        throw e2;
+      }
+
+      // Legacy schemas that still require a 'date' column
+      if (/null value in column\s+"date"|column\s+"date"\s+of relation/i.test(msg)) {
+        const legacyWithDate: Record<string, any> = { ...working };
+        // Use local day; PostgREST accepts ISO date or YYYY-MM-DD
+        legacyWithDate.date = new Date().toISOString();
+        const { data: d3, error: e3 } = await attemptInsert(legacyWithDate);
+        if (!e3) return d3;
+        throw e3;
+      }
+
+      throw error;
+    }
+
+    throw new Error('Could not save extra after removing unknown columns');
+  }, [supabase]);
+
+  // Helper: timeout + retry wrapper with enhanced error capture
+  const invokeWithRetry = useCallback(async (body: any, headers?: Record<string, string>) => {
+    const attempt = async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
       try {
-        // First try to parse directly
-        result = JSON.parse(data.completion);
-      } catch (parseError) {
-        console.log('Direct parse failed, trying to extract JSON...');
-        // Try to extract JSON from the response text
-        const jsonMatch = data.completion.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          result = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error('No valid JSON found in response');
+        const { data, error } = await supabase.functions.invoke('macros', { body, headers });
+        if (error) {
+          // Enhanced error logging
+          console.error('[snap-food] Function error:', {
+            status: error.status,
+            message: error.message,
+            context: error.context,
+            details: (error as any).details || (error as any).response || error
+          });
+          
+          // Try to extract structured error from context
+          const errorPayload = (error as any).context?.response || (error as any).details;
+          if (errorPayload?.code) {
+            const enhancedError = new Error(errorPayload.message || error.message);
+            (enhancedError as any).code = errorPayload.code;
+            (enhancedError as any).status = error.status;
+            throw enhancedError;
+          }
+          throw error;
+        }
+        return data;
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    let lastErr: any = null;
+    for (let i = 0; i < 3; i++) {
+      try {
+        return await attempt();
+      } catch (e: any) {
+        console.error(`[snap-food] Attempt ${i + 1} failed:`, e);
+        lastErr = e;
+        // Don't retry on certain error codes
+        if (e.code && ['UNAUTHORIZED', 'BAD_INPUT', 'INTERNAL'].includes(e.code)) {
+          throw e;
+        }
+        if (i < 2) {
+          await new Promise(r => setTimeout(r, 300 * (i + 1)));
         }
       }
-      
-      // Validate the result structure
-      if (!result.totals || typeof result.totals.kcal !== 'number') {
-        throw new Error('Invalid response structure');
-      }
-      
-      return result;
-    } catch (error) {
-      console.error('Error analyzing food:', error);
-      throw error;
     }
-  }, []);
+    throw lastErr;
+  }, [supabase.functions]);
 
   const takePicture = useCallback(async () => {
     if (!cameraRef.current) return;
@@ -196,22 +460,62 @@ export default function SnapFoodScreen() {
   }, [compressImage]);
 
   const handleAnalyze = useCallback(async () => {
+    if (circuitOpenUntil && Date.now() < circuitOpenUntil) {
+      Alert.alert('Service busy', 'Image analysis is busy—use Manual Entry for now.');
+      return;
+    }
     if (!capturedImageUri) {
       Alert.alert('Missing Information', 'Please capture a photo first.');
       return;
     }
 
     setIsAnalyzing(true);
-    
+    let analysisData: FoodAnalysisResponse | null = null;
     try {
-      const imageBase64 = await convertToBase64(capturedImageUri);
-      const result = await analyzeFood(imageBase64, extraNotes.trim());
-      setAnalysisResult(result);
-    } catch (error) {
-      console.error('Analysis failed:', error);
+      if (checkRateLimit()) {
+        try {
+          analysisData = await retryWithBackoff(() => analyzeImageOnDevice(capturedImageUri, extraNotes.trim() || undefined));
+          incrementRateLimit();
+        } catch (onDeviceErr) {
+          // Fallback to Edge Function
+        }
+      }
+
+      if (!analysisData) {
+        const path = await uploadImageToStorage(capturedImageUri);
+        setUploadedImagePath(path);
+        const data = await invokeWithRetry({
+          kind: 'image',
+          image_path: path,
+          notes: extraNotes.trim() || undefined,
+          previewOnly: true,
+          occurred_at_local: new Date().toISOString(),
+        });
+        analysisData = data as FoodAnalysisResponse;
+      }
+
+      setAnalysisResult(analysisData);
+      setFailCount(0);
+      setAnalysisProgress(100);
+    } catch (error: any) {
+      console.error('[snap-food] Analysis failed:', {
+        error,
+        code: error?.code,
+        status: error?.status,
+        message: error?.message
+      });
+      reportError(error);
+
+      const isConfigError = error?.code === 'INTERNAL' && error?.message?.includes('API key');
+      if (!isConfigError) {
+        const nextFails = failCount + 1;
+        setFailCount(nextFails);
+        if (nextFails >= 3) setCircuitOpenUntil(Date.now() + 120000);
+      }
+
       Alert.alert(
         'Analysis Failed',
-        'Could not analyze the food. Would you like to enter the details manually?',
+        friendlyErrorMessage(error),
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Manual Entry', onPress: () => setShowManualEntry(true) },
@@ -220,59 +524,120 @@ export default function SnapFoodScreen() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [capturedImageUri, extraNotes, convertToBase64, analyzeFood]);
+  }, [capturedImageUri, extraNotes, uploadImageToStorage, invokeWithRetry, failCount, circuitOpenUntil, analyzeImageOnDevice, checkRateLimit, retryWithBackoff, incrementRateLimit]);
 
   const handleAddToExtras = useCallback(async () => {
     if (Platform.OS !== 'web') {
       Haptics.selectionAsync();
     }
 
-    let foodData;
-    
-    if (analysisResult) {
-      // Use AI analysis result
-      foodData = {
-        name: analysisResult.items.map(item => item.name).join(', ') || 'Food Snap',
-        calories: analysisResult.totals.kcal,
-        protein: analysisResult.totals.protein_g,
-        fat: analysisResult.totals.fat_g,
-        carbs: analysisResult.totals.carbs_g,
-        confidence: analysisResult.confidence,
-        notes: (extraNotes && extraNotes.trim()) ? extraNotes.trim() : (analysisResult.notes || undefined),
-        imageUri: capturedImageUri || undefined,
-      };
-    } else if (manualAnalysisResult) {
-      // Use manual analysis result
-      foodData = {
-        name: manualAnalysisResult.items.map(item => item.name).join(', ') || manualEntry.name.trim(),
-        calories: manualAnalysisResult.totals.kcal,
-        protein: manualAnalysisResult.totals.protein_g,
-        fat: manualAnalysisResult.totals.fat_g,
-        carbs: manualAnalysisResult.totals.carbs_g,
-        confidence: manualAnalysisResult.confidence,
-        notes: (extraNotes && extraNotes.trim()) ? extraNotes.trim() : (manualAnalysisResult.notes || undefined),
-        imageUri: capturedImageUri || undefined,
-      };
-    } else {
-      return;
-    }
-
     try {
-      const success = await addExtraFood(foodData);
-      if (success) {
-        Alert.alert(
-          'Added Successfully!',
-          `${foodData.name} has been added to your extras.`,
-          [{ text: 'OK', onPress: () => router.back() }]
-        );
+      const idem = makeId();
+      if (analysisResult) {
+        let imagePath = uploadedImagePath;
+        if (capturedImageUri && !imagePath) {
+          imagePath = await uploadImageToStorage(capturedImageUri);
+          setUploadedImagePath(imagePath);
+        }
+
+        const now = new Date();
+        const dayKeyLocal = now.toLocaleDateString('en-CA');
+        const portionQty = analysisResult.items?.[0]?.quantity ?? null;
+
+        const insertSnap: any = {
+          user_id: session!.user!.id,
+          occurred_at_utc: now.toISOString(),
+          day_key_local: dayKeyLocal,
+          name: analysisResult.items.map(i => i.name).join(', '),
+          calories: Math.round(analysisResult.totals.kcal),
+          protein: analysisResult.totals.protein_g,
+          carbs: analysisResult.totals.carbs_g,
+          fat: analysisResult.totals.fat_g,
+          portion: portionQty,
+          portion_weight_g: null,
+          confidence: analysisResult.confidence ?? null,
+          notes: extraNotes.trim() || analysisResult.notes || null,
+          source: capturedImageUri ? 'snap' : 'manual',
+          idempotency_key: idem,
+        };
+        if (imagePath) insertSnap.image_path = imagePath;
+
+        const row: any = await upsertFoodExtras(insertSnap);
+
+        await addExtraFood({
+          name: row.name,
+          calories: row.calories,
+          protein: row.protein,
+          fat: row.fat,
+          carbs: row.carbs,
+          confidence: row.confidence ?? undefined,
+          notes: row.notes ?? undefined,
+          imageUri: capturedImageUri || undefined,
+          imagePath: row.image_path || undefined,
+          source: 'snap',
+          serverId: row.id,
+        });
+
+        Alert.alert('Added Successfully!', `${row.name} added.`, [
+          { text: 'Undo', style: 'destructive', onPress: async () => { try { await removeExtraFood(row.id); } catch {}; router.back(); } },
+          { text: 'OK', onPress: () => router.back() }
+        ]);
+      } else if (manualAnalysisResult) {
+        const now = new Date();
+        const dayKeyLocal = now.toLocaleDateString('en-CA');
+        const portionQty = manualAnalysisResult.items?.[0]?.quantity ?? manualEntry.portionSize;
+
+        const insertManual: any = {
+          user_id: session!.user!.id,
+          occurred_at_utc: now.toISOString(),
+          day_key_local: dayKeyLocal,
+          name: manualAnalysisResult.items.map(i => i.name).join(', '),
+          calories: Math.round(manualAnalysisResult.totals.kcal),
+          protein: manualAnalysisResult.totals.protein_g,
+          carbs: manualAnalysisResult.totals.carbs_g,
+          fat: manualAnalysisResult.totals.fat_g,
+          portion: portionQty,
+          portion_weight_g: null,
+          confidence: manualAnalysisResult.confidence ?? null,
+          notes: extraNotes.trim() || manualAnalysisResult.notes || null,
+          source: 'manual',
+          idempotency_key: idem,
+        };
+
+        const row: any = await upsertFoodExtras(insertManual);
+
+        await addExtraFood({
+          name: row.name,
+          calories: row.calories,
+          protein: row.protein,
+          fat: row.fat,
+          carbs: row.carbs,
+          confidence: row.confidence ?? undefined,
+          notes: row.notes ?? undefined,
+          imageUri: undefined,
+          imagePath: row.image_path || undefined,
+          source: 'manual',
+          serverId: row.id,
+        });
+
+        Alert.alert('Added Successfully!', `${row.name} added.`, [
+          { text: 'Undo', style: 'destructive', onPress: async () => { try { await removeExtraFood(row.id); } catch {}; router.back(); } },
+          { text: 'OK', onPress: () => router.back() }
+        ]);
       } else {
-        Alert.alert('Error', 'Failed to add food to extras. Please try again.');
+        return;
       }
-    } catch (error) {
-      console.error('Error adding extra food:', error);
-      Alert.alert('Error', 'Failed to add food to extras. Please try again.');
+    } catch (error: any) {
+      console.error('[snap-food] Error adding extra food:', {
+        error,
+        code: error?.code,
+        status: error?.status,
+        message: error?.message
+      });
+      reportError(error);
+      Alert.alert('Error', friendlyErrorMessage(error) || 'Failed to add food to extras. Please try again.');
     }
-  }, [analysisResult, manualAnalysisResult, manualEntry, extraNotes, capturedImageUri, addExtraFood]);
+  }, [analysisResult, manualAnalysisResult, manualEntry, extraNotes, capturedImageUri, uploadedImagePath, makeId, supabase, session, addExtraFood, removeExtraFood, uploadImageToStorage]);
 
   const handleAnalyzeManualEntry = useCallback(async () => {
     if (!manualEntry.name.trim() || !manualEntry.portionSize.trim()) {
@@ -281,62 +646,47 @@ export default function SnapFoodScreen() {
     }
 
     setIsAnalyzingManual(true);
-    
+    let analysisData: FoodAnalysisResponse | null = null;
     try {
-      const response = await fetch('https://toolkit.rork.com/text/llm/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: 'user',
-              content: `Calculate the macros of this food in the given portion respond with the macros only no other text or info. Food: ${manualEntry.name.trim()}, Portion: ${manualEntry.portionSize.trim()}. Respond in this EXACT JSON format: {"items":[{"name":"${manualEntry.name.trim()}","quantity":"${manualEntry.portionSize.trim()}","calories":0,"protein_g":0,"carbs_g":0,"fat_g":0}],"totals":{"kcal":0,"protein_g":0,"carbs_g":0,"fat_g":0},"confidence":0.9,"notes":""}`
-            }
-          ]
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      console.log('Manual entry API response:', data.completion);
-      
-      // Try to extract JSON from the response
-      let result: FoodAnalysisResponse;
-      try {
-        // First try to parse directly
-        result = JSON.parse(data.completion);
-      } catch (parseError) {
-        console.log('Direct parse failed, trying to extract JSON...');
-        // Try to extract JSON from the response text
-        const jsonMatch = data.completion.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          result = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error('No valid JSON found in response');
+      if (checkRateLimit()) {
+        try {
+          analysisData = await retryWithBackoff(() => analyzeManualOnDevice(
+            manualEntry.name.trim(),
+            manualEntry.portionSize.trim(),
+            extraNotes.trim() || undefined
+          ));
+          incrementRateLimit();
+        } catch (onDeviceErr) {
+          // Fallback to Edge Function
         }
       }
-      
-      // Validate the result structure
-      if (!result.totals || typeof result.totals.kcal !== 'number') {
-        throw new Error('Invalid response structure');
+
+      if (!analysisData) {
+        const data = await invokeWithRetry({
+          kind: 'text',
+          name: manualEntry.name.trim(),
+          portion: manualEntry.portionSize.trim(),
+          notes: extraNotes.trim() || undefined,
+          previewOnly: true,
+          occurred_at_local: new Date().toISOString(),
+        });
+        analysisData = data as FoodAnalysisResponse;
       }
-      
-      setManualAnalysisResult(result);
-    } catch (error) {
-      console.error('Manual analysis failed:', error);
-      Alert.alert(
-        'Analysis Failed',
-        'Could not calculate nutritional information. Please try again or check your internet connection.'
-      );
+
+      setManualAnalysisResult(analysisData);
+    } catch (error: any) {
+      console.error('[snap-food] Manual analysis failed:', {
+        error,
+        code: error?.code,
+        status: error?.status,
+        message: error?.message
+      });
+      reportError(error);
+      Alert.alert('Analysis Failed', friendlyErrorMessage(error));
     } finally {
       setIsAnalyzingManual(false);
     }
-  }, [manualEntry]);
+  }, [manualEntry, extraNotes, analyzeManualOnDevice, invokeWithRetry, checkRateLimit, retryWithBackoff, incrementRateLimit, friendlyErrorMessage]);
 
   const resetCapture = useCallback(() => {
     setCapturedImageUri(null);
@@ -351,7 +701,7 @@ export default function SnapFoodScreen() {
 
   if (isManualOnly) {
     return (
-      <View style={styles.container}>
+      <KeyboardDismissView style={styles.container}>
         <Stack.Screen options={{ title: 'Manual Entry', headerShown: false }} />
         <View style={[styles.modalContainer, { paddingTop: insets.top }]}>
           <View style={styles.modalHeader}>
@@ -453,7 +803,7 @@ export default function SnapFoodScreen() {
             </Card>
           </ScrollView>
         </View>
-      </View>
+      </KeyboardDismissView>
     );
   }
 
@@ -487,7 +837,7 @@ export default function SnapFoodScreen() {
 
   if (showPreview && capturedImageUri) {
     return (
-      <View style={styles.container}>
+      <KeyboardDismissView style={styles.container}>
         <Stack.Screen options={{ title: 'Food Analysis' }} />
         <ScrollView style={styles.previewContainer}>
           <View style={styles.imagePreview}>
@@ -572,8 +922,10 @@ export default function SnapFoodScreen() {
 
             {isAnalyzing && (
               <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={theme.color.accent.primary} />
-                <Text style={styles.loadingText}>Analyzing food...</Text>
+                <Text style={styles.progressLabel}>Analyzing your food…</Text>
+                <View style={styles.progressContainer}>
+                  <View style={[styles.progressBar, { width: `${Math.round(analysisProgress)}%` }]} />
+                </View>
               </View>
             )}
 
@@ -607,7 +959,7 @@ export default function SnapFoodScreen() {
           animationType="slide"
           presentationStyle="pageSheet"
         >
-          <View style={[styles.modalContainer, { paddingTop: insets.top }]}>
+          <KeyboardDismissView style={[styles.modalContainer, { paddingTop: insets.top }]}>
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => setShowManualEntry(false)}>
                 <X size={24} color={theme.color.ink} />
@@ -654,12 +1006,14 @@ export default function SnapFoodScreen() {
                   />
                 )}
 
-                {isAnalyzingManual && (
-                  <View style={styles.loadingContainer}>
-                    <ActivityIndicator size="large" color={theme.color.accent.primary} />
-                    <Text style={styles.loadingText}>Calculating nutrition...</Text>
+              {isAnalyzingManual && (
+                <View style={styles.loadingContainer}>
+                  <Text style={styles.progressLabel}>Analyzing your food…</Text>
+                  <View style={styles.progressContainer}>
+                    <View style={[styles.progressBar, { width: `${Math.round(manualAnalysisProgress)}%` }]} />
                   </View>
-                )}
+                </View>
+              )}
 
                 {manualAnalysisResult && (
                   <View style={styles.analysisResultContainer}>
@@ -706,9 +1060,9 @@ export default function SnapFoodScreen() {
                 )}
               </Card>
             </ScrollView>
-          </View>
+          </KeyboardDismissView>
         </Modal>
-      </View>
+      </KeyboardDismissView>
     );
   }
 
@@ -903,6 +1257,9 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: theme.color.ink,
+    // Ensure the title wraps rather than pushing the badge outside the card
+    flex: 1,
+    marginRight: theme.space.sm,
   },
   confidenceBadge: {
     flexDirection: 'row',
@@ -912,6 +1269,9 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.xs,
     borderRadius: 8,
     gap: 4,
+    // Prevent the badge from shrinking or overflowing outside the container
+    flexShrink: 0,
+    maxWidth: 200,
   },
   confidenceText: {
     fontSize: theme.size.label,
@@ -979,6 +1339,23 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: theme.size.body,
     color: theme.color.muted,
+  },
+  progressLabel: {
+    fontSize: theme.size.body,
+    color: theme.color.muted,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  progressContainer: {
+    height: 10,
+    width: '100%',
+    backgroundColor: theme.color.line,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: theme.color.accent.primary,
   },
   modalContainer: {
     flex: 1,

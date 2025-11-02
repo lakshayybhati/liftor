@@ -1,0 +1,7 @@
+{
+  "setup-worktree": [
+    "npm install",
+    "npx prisma generate",
+    "npx supabase db push"
+  ]
+}

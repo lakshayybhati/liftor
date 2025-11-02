@@ -8,19 +8,63 @@
 import Purchases from 'react-native-purchases';
 import { Alert, Platform } from 'react-native';
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Dev bypass storage key
+const BYPASS_KEY = 'Liftor_paywall_bypass';
+
+/**
+ * Enable subscription bypass in Expo (dev utility)
+ */
+export async function enableSubscriptionBypass(): Promise<void> {
+  try {
+    // Only allow in Expo Go or development
+    if (Constants.appOwnership === 'expo' || __DEV__) {
+      await AsyncStorage.setItem(BYPASS_KEY, 'true');
+    }
+  } catch {}
+}
+
+/**
+ * Disable subscription bypass
+ */
+export async function disableSubscriptionBypass(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(BYPASS_KEY);
+  } catch {}
+}
+
+/**
+ * Check if bypass is enabled (only honored in Expo Go/dev)
+ */
+export async function isSubscriptionBypassEnabled(): Promise<boolean> {
+  try {
+    if (!(Constants.appOwnership === 'expo' || __DEV__)) return false;
+    const v = await AsyncStorage.getItem(BYPASS_KEY);
+    return v === 'true';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Check if user has active subscription
  */
 export async function hasActiveSubscription(): Promise<boolean> {
   try {
+    // Respect dev bypass in Expo/Dev
+    if (await isSubscriptionBypassEnabled()) return true;
+
+    // Guard: SDK must be configured and not running in Expo Go
+    if (Constants.appOwnership === 'expo') return false;
+
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
     const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
     
     const customerInfo = await Purchases.getCustomerInfo();
     return !!customerInfo.entitlements.active[requiredEntitlement];
   } catch (error) {
-    console.error('[Subscription] Error checking active subscription:', error);
+    // Quietly return false rather than crashing UI overlays
     return false;
   }
 }
@@ -39,6 +83,20 @@ export async function getSubscriptionDetails(): Promise<{
   isTrial: boolean;
 }> {
   try {
+    // Guard: avoid calling Purchases in Expo Go or before configuration
+    if (Constants.appOwnership === 'expo') {
+      return {
+        isActive: false,
+        entitlementId: null,
+        expirationDate: null,
+        willRenew: false,
+        productId: null,
+        platform: 'unknown',
+        periodType: 'UNKNOWN',
+        isTrial: false,
+      };
+    }
+
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
     const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
     
@@ -73,7 +131,7 @@ export async function getSubscriptionDetails(): Promise<{
       isTrial: false,
     };
   } catch (error) {
-    console.error('[Subscription] Error getting subscription details:', error);
+    // Quiet fallback so we don't show red error overlays if SDK isn't ready
     return {
       isActive: false,
       entitlementId: null,
@@ -93,6 +151,10 @@ export async function getSubscriptionDetails(): Promise<{
 export async function restorePurchases(): Promise<boolean> {
   try {
     console.log('[Subscription] Restoring purchases...');
+    if (Constants.appOwnership === 'expo') {
+      Alert.alert('Unavailable in Expo Go', 'Please run in a dev client or app build to restore purchases.');
+      return false;
+    }
     const customerInfo = await Purchases.restorePurchases();
     
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
@@ -117,7 +179,6 @@ export async function restorePurchases(): Promise<boolean> {
       return false;
     }
   } catch (error: any) {
-    console.error('[Subscription] ❌ Error restoring purchases:', error);
     Alert.alert(
       'Restore Failed',
       'Could not restore purchases. Please check your internet connection and try again.',
@@ -173,9 +234,17 @@ export async function getSubscriptionStatusText(): Promise<string> {
 export async function openManageSubscription(): Promise<void> {
   try {
     console.log('[Subscription] Opening manage subscription...');
+    if (Constants.appOwnership === 'expo') {
+      // Give instructions in Expo Go where native sheet isn't available
+      if (Platform.OS === 'ios') {
+        Alert.alert('Manage Subscription', 'Open Settings → Your Name → Subscriptions → Liftor');
+      } else {
+        Alert.alert('Manage Subscription', 'Open Google Play → Profile → Payments & Subscriptions → Subscriptions → Liftor');
+      }
+      return;
+    }
     await Purchases.showManageSubscriptions();
   } catch (error: any) {
-    console.error('[Subscription] Error opening manage subscription:', error);
     
     // Fallback: provide manual instructions
     if (Platform.OS === 'ios') {

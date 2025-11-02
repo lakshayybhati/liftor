@@ -53,6 +53,7 @@ export const DayPlanSchema = z.object({
   workout: WorkoutSchema,
   nutrition: NutritionSchema,
   recovery: RecoverySchema,
+  reason: z.string().optional(),
 });
 
 // Weekly base plan schema

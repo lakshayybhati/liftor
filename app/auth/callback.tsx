@@ -22,7 +22,7 @@ export default function AuthCallbackScreen() {
 
   useEffect(() => {
     if (session && !isAuthLoading) {
-      router.replace('/home');
+      router.replace('/');
     }
   }, [session, isAuthLoading]);
 

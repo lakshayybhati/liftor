@@ -12,6 +12,8 @@ export type ActivityLevel = 'Sedentary' | 'Lightly Active' | 'Moderately Active'
 
 export type WorkoutIntensity = 'Optimal' | 'Ego lifts' | 'Recovery focused';
 
+export type TrainingLevel = 'Beginner' | 'Intermediate' | 'Professional';
+
 export interface User {
   id: string;
   name: string;
@@ -41,7 +43,7 @@ export interface User {
   sessionLength?: number; // in minutes
   travelDays?: number; // days per month
   fastingWindow?: string; // e.g., "16:8", "18:6"
-  mealCount?: number; // 3-6 meals per day
+  mealCount?: number; // 1-8 meals per day
   injuries?: string;
   budgetConstraints?: string;
   wakeTime?: string;
@@ -49,12 +51,19 @@ export interface User {
   stepTarget?: number;
   caffeineFrequency?: string;
   alcoholFrequency?: string;
+  // Daily check-in reminder time in human format, e.g., "9:00 AM"
+  checkInReminderTime?: string;
   stressBaseline?: number; // 1-10
   sleepQualityBaseline?: number; // 1-10
   preferredWorkoutSplit?: string;
   specialRequests?: string;
   vmnTranscription?: string; // VMN Transcription value
   workoutIntensity?: WorkoutIntensity; // Workout intensity preference
+  // Numeric slider-based intensity (1-10) used for plan fine-tuning
+  // 1 = very light effort per workout, 10 = maximum intensity per workout
+  workoutIntensityLevel?: number;
+  // Training experience level
+  trainingLevel?: TrainingLevel; // Beginner (<1yr), Intermediate (1-3yrs), Professional (>3yrs)
   // Weight tracking
   goalWeight?: number; // in kg
   // Base plan storage
@@ -107,12 +116,14 @@ export interface WorkoutPlan {
       duration_min?: number;
     }[];
   }[];
+  intensity?: string;
   notes?: string;
 }
 
 export interface NutritionPlan {
   total_kcal: number;
   protein_g: number;
+  meals_per_day?: number;
   meals: {
     name: string;
     items: {
@@ -126,6 +137,14 @@ export interface NutritionPlan {
 export interface RecoveryPlan {
   mobility: string[];
   sleep: string[];
+  // Optional personalized care content
+  careNotes?: string; // human-friendly paragraph with very specific advice
+  supplements?: string[]; // suggested supplements (safe, general guidance)
+  // UI-level structured card for supplements: current + add-ons
+  supplementCard?: {
+    current: string[]; // from onboarding user.supplements
+    addOns: string[];  // recommended with timing cues
+  };
 }
 
 export interface DailyPlan {
@@ -148,7 +167,9 @@ export interface WeeklyBasePlan {
       workout: WorkoutPlan;
       nutrition: NutritionPlan;
       recovery: RecoveryPlan;
+      reason?: string; // brief explanation for why this day's plan fits the user
     };
   };
   isLocked?: boolean;
+  expectedWeeksToGoal?: number;
 }

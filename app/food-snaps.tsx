@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, Image } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -7,16 +7,33 @@ import { Trash2, ChevronLeft } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
+import { useAuth } from '@/hooks/useAuth';
+import { getSignedUrls } from '@/utils/signed-url-cache';
 
 export default function FoodSnapsScreen() {
   const insets = useSafeAreaInsets();
   const { getTodayFoodLog, removeExtraFood } = useUserStore();
+  const { supabase } = useAuth();
   const [isDeleting, setIsDeleting] = useState<string | null>(null);
+  const [signedMap, setSignedMap] = useState<Record<string,string>>({});
 
   const allExtras = useMemo(() => {
     const todayLog = getTodayFoodLog();
-    return todayLog?.extras || [];
+    const items = todayLog?.extras || [];
+    // Snap view → filter by explicit source when available, fallback to presence of imagePath
+    return items.filter((e: any) => (e.source ? e.source === 'snap' : !!e.imagePath));
   }, [getTodayFoodLog]);
+
+  useEffect(() => {
+    const imagePaths = (allExtras || []).map((e: any) => e.imagePath).filter(Boolean);
+    if (imagePaths.length === 0) return;
+    (async () => {
+      try {
+        const m = await getSignedUrls(supabase, 'food_snaps', imagePaths, 60);
+        setSignedMap(m);
+      } catch {}
+    })();
+  }, [allExtras, supabase]);
 
   const confirmDelete = useCallback((id: string) => {
     Alert.alert(
@@ -37,8 +54,8 @@ export default function FoodSnapsScreen() {
   const renderItem = ({ item }: any) => (
     <Card style={styles.itemCard}>
       <View style={styles.itemRow}>
-        {!!item.imageUri && (
-          <Image source={{ uri: item.imageUri }} style={styles.thumb} />
+        {!!item.imagePath && (
+          <Image source={{ uri: signedMap[item.imagePath] || '' }} style={styles.thumb} />
         )}
         <View style={styles.itemInfo}>
           <Text style={styles.itemName}>{item.name}</Text>
@@ -89,6 +106,14 @@ export default function FoodSnapsScreen() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           renderItem={renderItem}
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          initialNumToRender={10}
+          updateCellsBatchingPeriod={50}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
         />
       )}
     </View>

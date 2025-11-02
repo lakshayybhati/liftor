@@ -102,6 +102,8 @@ export function useProfile() {
         data: { avatar_url: avatarUrl },
       });
       if (error) throw error;
+      // Ensure session metadata reflects the new avatar immediately across the app
+      try { await supabase.auth.refreshSession(); } catch {}
       return true;
     },
     onSuccess: () => {

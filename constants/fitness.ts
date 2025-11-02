@@ -175,7 +175,8 @@ export const SORENESS_AREAS = [
   'Chest',
   'Back', 
   'Shoulders',
-  'Arms',
+  'Biceps',
+  'Triceps',
   'Legs',
   'Core',
   'Glutes',
@@ -255,10 +256,14 @@ export const FASTING_WINDOWS = [
 ] as const;
 
 export const MEAL_COUNTS = [
+  { value: 1, label: '1 meal' },
+  { value: 2, label: '2 meals' },
   { value: 3, label: '3 meals' },
   { value: 4, label: '4 meals' },
   { value: 5, label: '5 meals' },
   { value: 6, label: '6 meals' },
+  { value: 7, label: '7 meals' },
+  { value: 8, label: '8 meals' },
 ] as const;
 
 export const CAFFEINE_FREQUENCY = [
@@ -284,4 +289,10 @@ export const WORKOUT_SPLITS = [
   { days: 4, split: 'Upper/Lower/Upper/Lower', label: 'Upper/Lower Split (4 days)' },
   { days: 5, split: 'Push/Pull/Legs + Upper/Lower', label: 'PPL + UL (5 days)' },
   { days: 6, split: 'Push/Pull/Legs x2', label: 'PPL x2 (6 days)' },
+] as const;
+
+export const TRAINING_LEVELS = [
+  { id: 'Beginner', label: 'Beginner', description: 'Less than 1 year of training experience' },
+  { id: 'Intermediate', label: 'Intermediate', description: '1-3 years of training experience' },
+  { id: 'Professional', label: 'Professional', description: 'More than 3 years of training experience' },
 ] as const;

@@ -67,6 +67,16 @@ export default function VerifyOtpScreen() {
   const code = useMemo(() => digits.join(''), [digits]);
   const canSubmit = code.length === 6;
 
+  const onBack = useCallback(() => {
+    if (mode === 'signup') {
+      router.replace({ pathname: '/auth/signup', params: { prefillEmail: identifier, prefillName: name } });
+    } else if (mode === 'reset') {
+      router.replace('/auth/login');
+    } else {
+      router.replace('/auth/login');
+    }
+  }, [mode, identifier, name]);
+
   const onChangeDigit = useCallback((index: number, val: string) => {
     const only = val.replace(/\D/g, '').slice(-1);
     setDigits(prev => {
@@ -88,11 +98,11 @@ export default function VerifyOtpScreen() {
     if (mode === 'reset') {
       router.replace('/auth/reset-password');
     } else if (mode === 'signup') {
-      router.replace('/home');
+      router.replace('/');
     } else if (mode === 'profile') {
-      router.replace('/home?celebrate=1');
+      router.replace('/');
     } else {
-      router.replace('/home');
+      router.replace('/');
     }
   }, [canSubmit, verifyOtp, identifier, code, mode]);
 
@@ -113,7 +123,27 @@ export default function VerifyOtpScreen() {
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
           <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
             <View style={styles.container}>
-        <Stack.Screen options={{ title: 'Verify Code', headerShown: true }} />
+        <Stack.Screen 
+          options={{ 
+            title: 'Verify Code', 
+            headerShown: true, 
+            headerBackVisible: false,
+            gestureEnabled: false,
+            headerStyle: {
+              backgroundColor: '#000000',
+            },
+            headerTintColor: '#FFFFFF',
+            headerTitleStyle: {
+              color: '#FFFFFF',
+              fontWeight: '600',
+            },
+            headerLeft: () => (
+              <TouchableOpacity onPress={onBack} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Back">
+                <Text style={{ color: theme.color.accent.primary, fontWeight: '600' }}>Back</Text>
+              </TouchableOpacity>
+            )
+          }} 
+        />
         <Text style={styles.title}>Enter the 6‑digit code</Text>
         <Text style={styles.subtitle}>Sent to {masked}</Text>
         {error && <Text style={styles.error}>{error}</Text>}
@@ -124,11 +154,23 @@ export default function VerifyOtpScreen() {
               ref={(el) => (inputsRef.current[i] = el)}
               style={styles.otpBox}
               keyboardType="number-pad"
+              returnKeyType={i === 5 ? 'done' : 'next'}
+              blurOnSubmit={false}
               maxLength={1}
               value={d}
               onChangeText={(val) => onChangeDigit(i, val)}
               onKeyPress={({ nativeEvent }) => {
                 if (nativeEvent.key === 'Backspace' && !digits[i] && i > 0) inputsRef.current[i - 1]?.focus();
+                if ((nativeEvent.key === 'Enter' || nativeEvent.key === '\n') && i === 5 && canSubmit) {
+                  onSubmit();
+                }
+              }}
+              onSubmitEditing={() => {
+                if (i === 5) {
+                  if (canSubmit) onSubmit();
+                } else {
+                  inputsRef.current[i + 1]?.focus();
+                }
               }}
             />
           ))}

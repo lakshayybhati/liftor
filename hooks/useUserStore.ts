@@ -1,6 +1,8 @@
 import createContextHook from '@nkzw/create-context-hook';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { celebrateMilestone } from '@/utils/notifications';
+import { getNotificationPreferences } from '@/utils/notification-storage';
 import type { User, CheckinData, DailyPlan, WeeklyBasePlan, WorkoutPlan, NutritionPlan, RecoveryPlan } from '@/types/user';
 import { useAuth } from '@/hooks/useAuth';
 import { logProductionMetric, getProductionConfig } from '@/utils/production-config';
@@ -28,6 +30,10 @@ interface ExtraFood {
   notes?: string;
   portionHint?: string;
   imageUri?: string;
+  serverId?: string; // Supabase row id for deletes/sync
+  imagePath?: string; // Storage path in food_snaps
+  source?: 'manual' | 'snap';
+  syncStatus?: 'synced' | 'syncing' | 'failed';
 }
 
 interface DailyFoodLog {
@@ -94,7 +100,7 @@ async function retrySupabaseOperation<T>(
 }
 
 export const [UserProvider, useUserStore] = createContextHook(() => {
-  const { session, supabase } = useAuth();
+  const { session, supabase, isAuthLoading } = useAuth();
   const uid = session?.user?.id ?? null;
   const KEYS = {
     USER: scopedKey(USER_STORAGE_KEY, uid),
@@ -113,8 +119,14 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   const [extras, setExtras] = useState<ExtraFood[]>([]);
   const [completionsByDate, setCompletionsByDate] = useState<Record<string, PlanCompletionDay>>({});
   const [isLoading, setIsLoading] = useState(true);
+  const [pendingFoodOps, setPendingFoodOps] = useState<any[]>([]);
+  const hydratedUidRef = useRef<string | null>(null);
 
   const loadUserData = useCallback(async () => {
+    if (!uid) {
+      console.warn('[UserStore] Skipping data load - no uid (auth not ready)');
+      return;
+    }
     console.log('[UserStore] Starting data load for uid:', uid ? uid.substring(0, 8) + '...' : 'anon');
     const loadStartTime = Date.now();
     
@@ -270,6 +282,13 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           await AsyncStorage.removeItem(KEYS.EXTRAS);
         }
       }
+      try {
+        const ops = await AsyncStorage.getItem(scopedKey('Liftor_food_ops', uid));
+        if (ops && ops.trim().startsWith('[')) {
+          const parsedOps = JSON.parse(ops);
+          if (Array.isArray(parsedOps)) setPendingFoodOps(parsedOps);
+        }
+      } catch {}
       
       if (completionsData && completionsData.trim().startsWith('{') && completionsData.trim().endsWith('}')) {
         try {
@@ -377,6 +396,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
               preferredExercises: (profileRecord.preferred_exercises as string[] | null) ?? undefined,
               avoidExercises: (profileRecord.avoid_exercises as string[] | null) ?? undefined,
               preferredTrainingTime: (profileRecord.preferred_training_time as string | null) ?? undefined,
+              checkInReminderTime: (profileRecord as any).checkin_reminder_time ?? undefined,
               sessionLength: (profileRecord.session_length as number | null) ?? undefined,
               travelDays: (profileRecord.travel_days as number | null) ?? undefined,
               fastingWindow: (profileRecord.fasting_window as string | null) ?? undefined,
@@ -454,9 +474,334 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Don't set isLoading(false) again here - it's already set after local data load
     }
   }, [uid, supabase]); // KEYS are derived from uid, so uid is sufficient
+  // Queue processing for offline ops
+  const persistFoodOps = useCallback(async (ops: any[]) => {
+    setPendingFoodOps(ops);
+    try { await AsyncStorage.setItem(scopedKey('Liftor_food_ops', uid), JSON.stringify(ops)); } catch {}
+  }, [uid]);
+
+  const processFoodOpsQueue = useCallback(async () => {
+    if (!uid) return;
+    if (pendingFoodOps.length === 0) return;
+    const remaining: any[] = [];
+    for (const op of pendingFoodOps) {
+      try {
+        if (op.type === 'insert_text') {
+          const idem = op.idemKey || `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+          const { error } = await supabase.functions.invoke('macros', {
+            body: {
+              kind: 'text',
+              name: op.name,
+              portion: op.portion,
+              notes: op.notes,
+              previewOnly: false,
+              occurred_at_local: op.occurred_at_local,
+            },
+            headers: { 'Idempotency-Key': idem },
+          });
+          if (error) throw error;
+          // On success, nothing else — UI will fetch latest via local state
+        } else if (op.type === 'insert_image') {
+          // Upload local image then call macros insert
+          const d = new Date();
+          const yyyy = d.getFullYear();
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const dd = String(d.getDate()).padStart(2, '0');
+          const path = `${uid}/${yyyy}/${mm}/${dd}/${op.localId || Date.now()}.jpg`;
+          const res = await fetch(op.localUri);
+          const blob = await res.blob();
+          const { error: upErr } = await supabase.storage.from('food_snaps').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+          if (upErr) throw upErr;
+          const idem = op.idemKey || `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+          const { error } = await supabase.functions.invoke('macros', {
+            body: {
+              kind: 'image',
+              image_path: path,
+              notes: op.notes,
+              previewOnly: false,
+              occurred_at_local: op.occurred_at_local,
+            },
+            headers: { 'Idempotency-Key': idem },
+          });
+          if (error) throw error;
+        } else if (op.type === 'delete') {
+          await supabase.from('food_extras').delete().eq('id', op.id);
+        }
+      } catch (e) {
+        // keep op for next retry
+        remaining.push({ ...op, retries: (op.retries || 0) + 1 });
+      }
+    }
+    await persistFoodOps(remaining);
+  }, [pendingFoodOps, uid, supabase, persistFoodOps]);
+
+
+  // Hydrate state from Supabase (server → device) after login or reinstall
+  const hydrateFromDatabase = useCallback(async () => {
+    if (!uid) {
+      console.warn('[Hydrate] No user session; skipping database hydration');
+      return { success: false, reason: 'no-session' } as const;
+    }
+
+    try {
+      console.log('[Hydrate] Starting database hydration...');
+      const now = new Date();
+      const fmt = (d: Date) => d.toISOString().split('T')[0];
+      const since90 = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      const since30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      const [dbCheckins, dbPlans, dbBasePlans, dbExtras, dbProfile] = await Promise.all([
+        retrySupabaseOperation(async () =>
+          await supabase
+            .from('checkins')
+            .select('*')
+            .eq('user_id', uid)
+            .gte('date', fmt(since90))
+            .order('date', { ascending: true })
+        ),
+        retrySupabaseOperation(async () =>
+          await supabase
+            .from('daily_plans')
+            .select('*')
+            .eq('user_id', uid)
+            .gte('date', fmt(since30))
+            .order('date', { ascending: true })
+        ),
+        retrySupabaseOperation(async () =>
+          await supabase
+            .from('weekly_base_plans')
+            .select('*')
+            .eq('user_id', uid)
+            .order('created_at', { ascending: true })
+            .limit(10)
+        ),
+        retrySupabaseOperation(async () =>
+          await supabase
+            .from('food_extras')
+            .select('*')
+            .eq('user_id', uid)
+            .gte('day_key_local', fmt(since30))
+            .order('occurred_at_utc', { ascending: true })
+        ),
+        retrySupabaseOperation(async () =>
+          await supabase
+            .from('profiles')
+            .select(
+              [
+                'id',
+                'onboarding_complete',
+                'base_plan',
+                // Subscription-related fields (fetched for completeness)
+                'subscription_active',
+                'subscription_platform',
+                'subscription_will_renew',
+                'subscription_expiration_at',
+                'rc_entitlements'
+              ].join(', ')
+            )
+            .eq('id', uid)
+            .maybeSingle()
+        ),
+      ]);
+
+      // Map and persist check-ins
+      try {
+        if (Array.isArray(dbCheckins) && dbCheckins.length > 0) {
+          const mapped = dbCheckins.map((c: any) => ({
+            id: c.id,
+            mode: c.mode,
+            date: c.date,
+            bodyWeight: c.body_weight ?? undefined,
+            currentWeight: c.current_weight ?? undefined,
+            mood: c.mood ?? undefined,
+            moodCharacter: c.mood_character ?? undefined,
+            energy: c.energy ?? undefined,
+            sleepHrs: c.sleep_hrs ?? undefined,
+            sleepQuality: c.sleep_quality ?? undefined,
+            wokeFeeling: c.woke_feeling ?? undefined,
+            soreness: c.soreness ?? undefined,
+            appearance: c.appearance ?? undefined,
+            digestion: c.digestion ?? undefined,
+            stress: c.stress ?? undefined,
+            waterL: c.water_l ?? undefined,
+            saltYN: c.salt_yn ?? undefined,
+            suppsYN: c.supps_yn ?? undefined,
+            steps: c.steps ?? undefined,
+            kcalEst: c.kcal_est ?? undefined,
+            caffeineYN: c.caffeine_yn ?? undefined,
+            alcoholYN: c.alcohol_yn ?? undefined,
+            motivation: c.motivation ?? undefined,
+            hr: c.hr ?? undefined,
+            hrv: c.hrv ?? undefined,
+            injuries: c.injuries ?? undefined,
+            busyBlocks: c.busy_blocks ?? undefined,
+            travelYN: c.travel_yn ?? undefined,
+            workoutIntensity: c.workout_intensity ?? undefined,
+          })) as CheckinData[];
+
+          setCheckins(mapped);
+          await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(mapped));
+          console.log('[Hydrate] Check-ins loaded:', mapped.length);
+        }
+      } catch (e) {
+        console.warn('[Hydrate] Failed to map/persist check-ins', e);
+      }
+
+      // Map and persist daily plans
+      try {
+        if (Array.isArray(dbPlans) && dbPlans.length > 0) {
+          const mapped = dbPlans.map((p: any) => ({
+            id: p.id,
+            date: p.date,
+            workout: p.workout ?? undefined,
+            nutrition: p.nutrition ?? undefined,
+            recovery: p.recovery ?? undefined,
+            motivation: p.motivation ?? undefined,
+            adherence: p.adherence ?? undefined,
+            adjustments: p.adjustments ?? undefined,
+            isFromBasePlan: p.is_from_base_plan ?? undefined,
+          })) as DailyPlan[];
+
+          setPlans(mapped);
+          await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(mapped));
+          console.log('[Hydrate] Daily plans loaded:', mapped.length);
+        }
+      } catch (e) {
+        console.warn('[Hydrate] Failed to map/persist daily plans', e);
+      }
+
+      // Map and persist base plans
+      try {
+        if (Array.isArray(dbBasePlans) && dbBasePlans.length > 0) {
+          const mapped = dbBasePlans.map((bp: any) => ({
+            id: bp.id,
+            createdAt: bp.created_at,
+            days: bp.days,
+            isLocked: bp.is_locked,
+          })) as WeeklyBasePlan[];
+
+          setBasePlans(mapped);
+          await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(mapped));
+          console.log('[Hydrate] Base plans loaded:', mapped.length);
+        }
+      } catch (e) {
+        console.warn('[Hydrate] Failed to map/persist base plans', e);
+      }
+
+      // Map and merge food extras into DailyFoodLog
+      try {
+        if (Array.isArray(dbExtras)) {
+          const byDay: Record<string, ExtraFood[]> = {};
+          for (const row of dbExtras as any[]) {
+            const day: string = row.day_key_local || (row.occurred_at_utc || '').split('T')[0];
+            const extra: ExtraFood = {
+              id: String(row.id),
+              name: row.name,
+              calories: Number(row.calories) || 0,
+              protein: Number(row.protein) || 0,
+              fat: Number(row.fat) || 0,
+              carbs: Number(row.carbs) || 0,
+              timestamp: row.occurred_at_utc || new Date().toISOString(),
+              confidence: row.confidence ?? undefined,
+              notes: row.notes ?? undefined,
+              portionHint: row.portion ?? undefined,
+              imagePath: row.image_path ?? undefined,
+              source: row.source === 'snap' ? 'snap' : 'manual',
+              serverId: String(row.id),
+              syncStatus: 'synced',
+            };
+            byDay[day] = byDay[day] || [];
+            byDay[day].push(extra);
+          }
+
+          // Merge with existing local logs: keep entries, replace extras per day, recompute totals
+          const existingMap: Record<string, DailyFoodLog> = Object.fromEntries(
+            (foodLogs || []).map(l => [l.date, l])
+          );
+          const allDays = new Set<string>([
+            ...Object.keys(existingMap),
+            ...Object.keys(byDay),
+          ]);
+
+          const merged: DailyFoodLog[] = Array.from(allDays).map(day => {
+            const localLog = existingMap[day];
+            const entries = localLog?.entries || [];
+            // Combine extras with de-duplication by serverId/id
+            const dbDayExtras = byDay[day] || [];
+            const combined = [...(localLog?.extras || []), ...dbDayExtras];
+            const dedupMap = new Map<string, ExtraFood>();
+            for (const e of combined) {
+              const key = e.serverId || e.id;
+              if (!dedupMap.has(key)) dedupMap.set(key, e);
+            }
+            const extrasArr = Array.from(dedupMap.values());
+
+            const totalsFrom = (arr: { calories: number; protein: number; fat: number; carbs: number }[]) =>
+              arr.reduce((acc, it) => ({
+                calories: acc.calories + (Number(it.calories) || 0),
+                protein: acc.protein + (Number(it.protein) || 0),
+                fat: acc.fat + (Number(it.fat) || 0),
+                carbs: acc.carbs + (Number(it.carbs) || 0),
+              }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
+
+            const entryTotals = totalsFrom(entries);
+            const extrasTotals = totalsFrom(extrasArr);
+            return {
+              date: day,
+              entries,
+              extras: extrasArr,
+              totalCalories: entryTotals.calories + extrasTotals.calories,
+              totalProtein: entryTotals.protein + extrasTotals.protein,
+              totalFat: entryTotals.fat + extrasTotals.fat,
+              totalCarbs: entryTotals.carbs + extrasTotals.carbs,
+            } as DailyFoodLog;
+          }).sort((a, b) => b.date.localeCompare(a.date));
+
+          setFoodLogs(merged);
+          await AsyncStorage.setItem(KEYS.FOOD_LOG, JSON.stringify(merged));
+          console.log('[Hydrate] Food extras merged into logs for days:', merged.length);
+        }
+      } catch (e) {
+        console.warn('[Hydrate] Failed to map/merge food extras', e);
+      }
+
+      // Light profile alignment: ensure onboarding flag reflects server
+      try {
+        if (dbProfile && typeof dbProfile === 'object' && (dbProfile as any).id) {
+          const remoteOnboarded = !!(dbProfile as any).onboarding_complete;
+          if (user && user.onboardingComplete !== remoteOnboarded) {
+            const nextUser = { ...user, onboardingComplete: remoteOnboarded } as User;
+            setUser(nextUser);
+            await AsyncStorage.setItem(KEYS.USER, JSON.stringify(nextUser));
+          }
+          // base_plan already handled via weekly_base_plans fetch; subscription fields are fetched by useProfile
+        }
+      } catch (e) {
+        console.warn('[Hydrate] Failed to align profile fields', e);
+      }
+
+      console.log('[Hydrate] ✅ Database hydration complete');
+      return { success: true } as const;
+    } catch (e) {
+      console.error('[Hydrate] Unexpected error during hydration', e);
+      return { success: false, reason: 'exception' } as const;
+    }
+  }, [uid, supabase, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.USER]);
+
+  // Trigger hydration after local load completes
+  useEffect(() => {
+    if (isAuthLoading) return; // wait for auth to stabilize
+    if (!uid) return;
+    if (isLoading) return; // wait until local data is in place to merge cleanly
+    if (hydratedUidRef.current === uid) return; // already hydrated for this uid
+    hydratedUidRef.current = uid;
+    hydrateFromDatabase().catch(err => console.warn('[Hydrate] Background hydration failed:', err));
+  }, [uid, isLoading, isAuthLoading]);
+
 
   // Reload scoped data whenever the authenticated user changes
   useEffect(() => {
+    if (isAuthLoading || !uid) return; // prevent anon→uid oscillation triggers during auth bootstrap
     // Reset in-memory state immediately to avoid showing previous user's data
     setUser(null);
     setCheckins([]);
@@ -466,13 +811,23 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     setExtras([]);
     setIsLoading(true);
     loadUserData();
-  }, [uid, loadUserData]);
+  }, [uid, isAuthLoading, loadUserData]);
 
   const updateUser = useCallback(async (userData: User) => {
     if (!userData?.id) return;
     try {
       setUser(userData);
       await AsyncStorage.setItem(KEYS.USER, JSON.stringify(userData));
+      // Milestone notifications: weight goal
+      try {
+        const prefs = await getNotificationPreferences();
+        if (prefs.milestonesEnabled && typeof userData.weight === 'number' && typeof userData.goalWeight === 'number') {
+          const diff = Math.abs((userData.weight as number) - (userData.goalWeight as number));
+          if (diff < 0.5) {
+            await celebrateMilestone('weight_goal', { weight: userData.goalWeight });
+          }
+        }
+      } catch {}
       
       // Log success in production
       const config = getProductionConfig();
@@ -500,6 +855,24 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       const updatedCheckins = [...checkins, checkin];
       setCheckins(updatedCheckins);
       await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(updatedCheckins));
+      // Milestone notifications: streaks
+      try {
+        const prefs = await getNotificationPreferences();
+        if (prefs.milestonesEnabled) {
+          let streak = 0;
+          const today = new Date();
+          for (let i = 0; i < 30; i++) {
+            const d = new Date(today);
+            d.setDate(today.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            const hasCheckin = updatedCheckins.some(c => c.date === dateStr);
+            if (hasCheckin) streak++; else if (i > 0) break;
+          }
+          if (streak === 7 || streak === 14 || streak === 30) {
+            await celebrateMilestone('streak', { days: streak });
+          }
+        }
+      } catch {}
       
       // Log success in production
       const config = getProductionConfig();
@@ -529,6 +902,14 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       }
       setPlans(updatedPlans);
       await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(updatedPlans));
+      // Milestone notifications: plan completed (adherence)
+      try {
+        const prefs = await getNotificationPreferences();
+        const adherence = (plan as any).adherence as number | undefined;
+        if (prefs.milestonesEnabled && typeof adherence === 'number' && adherence > 0.8) {
+          await celebrateMilestone('plan_completed', { date: plan.date });
+        }
+      } catch {}
       
       // Log success in production
       const config = getProductionConfig();
@@ -559,6 +940,38 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.log('[UserStore] Saving to AsyncStorage...');
       await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
       console.log('[UserStore] ✅ AsyncStorage save complete');
+
+      // Best-effort: persist to Supabase weekly_base_plans so edits survive reloads and cross-device
+      if (uid) {
+        try {
+          const inserted = await retrySupabaseOperation(async () =>
+            await supabase
+              .from('weekly_base_plans')
+              .insert({
+                user_id: uid,
+                days: basePlan.days as any,
+                is_locked: !!basePlan.isLocked,
+              } as any)
+              .select('*')
+              .single()
+          );
+
+          if (inserted && (inserted as any).id) {
+            const serverPlan: WeeklyBasePlan = {
+              id: (inserted as any).id,
+              createdAt: (inserted as any).created_at,
+              days: (inserted as any).days,
+              isLocked: (inserted as any).is_locked,
+            } as any;
+            const merged = [...updatedBasePlans.slice(0, -1), serverPlan];
+            setBasePlans(merged);
+            await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(merged));
+            console.log('[UserStore] ✅ weekly_base_plans inserted and local state/id aligned');
+          }
+        } catch (e) {
+          console.warn('[UserStore] weekly_base_plans insert failed (will remain local-only until next sync)', e);
+        }
+      }
       
       // Log success in production
       const config = getProductionConfig();
@@ -584,7 +997,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Re-throw to let caller know there was an error
       throw error;
     }
-  }, [basePlans, KEYS.BASE_PLANS]);
+  }, [basePlans, KEYS.BASE_PLANS, uid, supabase]);
 
   // Define getCurrentBasePlan BEFORE syncLocalToBackend since it's used as a dependency
   const getCurrentBasePlan = useCallback(() => {
@@ -723,13 +1136,68 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       setBasePlans(updatedBasePlans);
       await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
       
+      // Persist change to Supabase when possible
+      if (uid) {
+        try {
+          const isUuid = /^[0-9a-fA-F-]{36}$/.test(currentBasePlan.id);
+          if (isUuid) {
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('weekly_base_plans')
+                .update({ days: updatedBasePlan.days as any })
+                .eq('id', currentBasePlan.id)
+            );
+          } else {
+            // No server row yet — insert a new one and align local id
+            const inserted = await retrySupabaseOperation(async () =>
+              await supabase
+                .from('weekly_base_plans')
+                .insert({
+                  user_id: uid,
+                  days: updatedBasePlan.days as any,
+                  is_locked: !!updatedBasePlan.isLocked,
+                } as any)
+                .select('*')
+                .single()
+            );
+            if (inserted && (inserted as any).id) {
+              const merged = basePlans.map(plan => 
+                plan.id === currentBasePlan.id 
+                  ? ({
+                      ...updatedBasePlan,
+                      id: (inserted as any).id,
+                      createdAt: (inserted as any).created_at,
+                      isLocked: (inserted as any).is_locked,
+                    } as WeeklyBasePlan)
+                  : plan
+              );
+              setBasePlans(merged);
+              await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(merged));
+            }
+          }
+          // Also keep profile snapshot fresh for redundancy
+          try {
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('profiles')
+                .update({ base_plan: updatedBasePlan as any })
+                .eq('id', uid)
+            );
+          } catch (e) {
+            console.warn('[UserStore] profiles.base_plan snapshot update failed', e);
+          }
+        } catch (e) {
+          console.warn('[UserStore] weekly_base_plans sync failed', e);
+        }
+      }
+      
       console.log(`Successfully updated ${dayKey} in base plan`);
       return true;
     } catch (error) {
       console.error('Error updating base plan day:', error);
       return false;
     }
-  }, [basePlans, getCurrentBasePlan]);
+  }, [basePlans, getCurrentBasePlan, uid, supabase, KEYS.BASE_PLANS]);
 
   const getRecentCheckins = useCallback((days: number = 15) => {
     const cutoffDate = new Date();
@@ -969,52 +1437,10 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         ...extraFood,
         id: Date.now().toString(),
         timestamp: nowIso,
+        syncStatus: 'synced',
       };
 
-      if (uid) {
-        try {
-          console.log('[Supabase] Inserting into food_extras');
-          let nutritionPlanId: string | null = null;
-          try {
-            const { data: rpcData, error: rpcError } = await supabase.rpc('get_todays_nutrition_plan', { user_uuid: uid });
-            if (rpcError) {
-              console.warn('[Supabase] get_todays_nutrition_plan error', rpcError);
-            } else if (rpcData) {
-              nutritionPlanId = rpcData as string;
-            }
-          } catch (e) {
-            console.warn('[Supabase] RPC exception', e);
-          }
-
-          const insertPayload = {
-            user_id: uid,
-            nutrition_plan_id: nutritionPlanId,
-            date: nowIso,
-            name: newExtra.name,
-            calories: Math.round(newExtra.calories),
-            protein: Number(newExtra.protein),
-            carbs: Number(newExtra.carbs),
-            fat: Number(newExtra.fat),
-            portion: newExtra.portionHint ?? null,
-            image_url: newExtra.imageUri ?? null,
-            confidence: newExtra.confidence ?? null,
-            notes: newExtra.notes ?? null,
-          } as const;
-
-          try {
-            await retrySupabaseOperation(async () =>
-              await supabase.from('food_extras').insert(insertPayload)
-            );
-            console.log('[Supabase] Inserted food_extras successfully');
-          } catch (insertError) {
-            console.error('[Supabase] Insert food_extras failed', insertError);
-          }
-        } catch (e) {
-          console.error('[Supabase] addExtraFood remote sync failed', e);
-        }
-      } else {
-        console.log('[Supabase] No session, storing locally only');
-      }
+      // Local-only update; server insert is handled by Edge Function from the UI flow
 
       const existingLogIndex = foodLogs.findIndex(log => log.date === today);
       let updatedFoodLogs: DailyFoodLog[];
@@ -1064,11 +1490,12 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
   const removeExtraFood = useCallback(async (extraId: string) => {
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const existingLogIndex = foodLogs.findIndex(log => log.date === today);
-      if (existingLogIndex < 0) return false;
+      // Find the first log containing this extra id
+      const logIndex = foodLogs.findIndex(log => (log.extras || []).some(e => e.id === extraId));
+      if (logIndex < 0) return false;
 
-      const existingLog = foodLogs[existingLogIndex];
+      const existingLog = foodLogs[logIndex];
+      const removedItem = (existingLog.extras || []).find(e => e.id === extraId);
       const updatedExtras = (existingLog.extras || []).filter(e => e.id !== extraId);
 
       const updatedLog: DailyFoodLog = {
@@ -1081,18 +1508,22 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       };
 
       const updatedFoodLogs = [...foodLogs];
-      updatedFoodLogs[existingLogIndex] = updatedLog;
+      updatedFoodLogs[logIndex] = updatedLog;
       setFoodLogs(updatedFoodLogs);
       await AsyncStorage.setItem(KEYS.FOOD_LOG, JSON.stringify(updatedFoodLogs));
 
-      // Best-effort remote cleanup
-      if (uid) {
+      // Best-effort remote cleanup by server id if present
+      const serverRowId = removedItem?.serverId || removedItem?.id || extraId;
+      if (uid && serverRowId) {
         try {
           await retrySupabaseOperation(async () =>
-            await supabase.from('food_extras').delete().match({ user_id: uid, id: extraId })
+            await supabase.from('food_extras').delete().match({ user_id: uid, id: serverRowId })
           );
         } catch (e) {
-          console.warn('[Supabase] Delete food_extras failed', e);
+          // queue delete
+          const next = [...pendingFoodOps, { type: 'delete', id: serverRowId, createdAt: Date.now(), retries: 0 }];
+          await persistFoodOps(next);
+          console.warn('[Supabase] Delete failed, queued');
         }
       }
 
@@ -1101,7 +1532,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.error('Error removing extra food:', error);
       return false;
     }
-  }, [foodLogs, uid, supabase, KEYS.FOOD_LOG]);
+  }, [foodLogs, uid, supabase, KEYS.FOOD_LOG, pendingFoodOps, persistFoodOps]);
 
   const getNutritionProgress = useCallback(() => {
     const today = new Date().toISOString().split('T')[0];
@@ -1125,15 +1556,27 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const dist = distMap[mealCount as 3|4|5|6] || distMap[3];
     const completedMeals = new Set(completionsByDate[today]?.completedMeals ?? []);
     const tickCalories = selectedMeals.reduce((sum, m, idx) => sum + (completedMeals.has(m.mealType) ? Math.round(targetCalories * dist[idx]) : 0), 0);
-    const logCalories = todayFoodLog?.totalCalories || 0;
+    // Derive totals from entries + extras (avoid drift)
+    const entryTotals = (todayFoodLog?.entries || []).reduce((acc, e) => ({
+      calories: acc.calories + e.calories,
+      protein: acc.protein + e.protein,
+      fat: acc.fat + e.fat,
+      carbs: acc.carbs + e.carbs,
+    }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
+    const extraTotals = (todayFoodLog?.extras || []).reduce((acc, e) => ({
+      calories: acc.calories + e.calories,
+      protein: acc.protein + e.protein,
+      fat: acc.fat + e.fat,
+      carbs: acc.carbs + e.carbs,
+    }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
 
-    const eatenCalories = tickCalories + logCalories;
+    const eatenCalories = tickCalories + entryTotals.calories + extraTotals.calories;
 
     return {
       calories: Math.min(eatenCalories / targetCalories, 1),
-      protein: Math.min((todayFoodLog?.totalProtein || 0) / targetProtein, 1),
-      fat: Math.min((todayFoodLog?.totalFat || 0) / targetFat, 1),
-      carbs: Math.min((todayFoodLog?.totalCarbs || 0) / targetCarbs, 1),
+      protein: Math.min((entryTotals.protein + extraTotals.protein) / targetProtein, 1),
+      fat: Math.min((entryTotals.fat + extraTotals.fat) / targetFat, 1),
+      carbs: Math.min((entryTotals.carbs + extraTotals.carbs) / targetCarbs, 1),
     };
   }, [getTodayPlan, getTodayFoodLog, completionsByDate, user?.mealCount]);
 
@@ -1141,15 +1584,17 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     try {
       console.log('Starting data clear process...');
       
-      // Reset state first
+      // Reset state first (only app-scoped user data; do NOT touch subscription state)
       setUser(null);
       setCheckins([]);
       setPlans([]);
       setBasePlans([]);
       setFoodLogs([]);
       setExtras([]);
+      setCompletionsByDate({});
       
-      // Then clear AsyncStorage (scoped to current uid)
+      // Then clear AsyncStorage (scoped to current uid). Intentionally preserve any
+      // subscription-related keys (e.g., RevenueCat cache, paywall bypass) and notification prefs.
       await Promise.all([
         AsyncStorage.removeItem(KEYS.USER),
         AsyncStorage.removeItem(KEYS.CHECKINS),
@@ -1157,14 +1602,16 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         AsyncStorage.removeItem(KEYS.BASE_PLANS),
         AsyncStorage.removeItem(KEYS.FOOD_LOG),
         AsyncStorage.removeItem(KEYS.EXTRAS),
+        AsyncStorage.removeItem(KEYS.COMPLETIONS),
+        AsyncStorage.removeItem(scopedKey('Liftor_food_ops', uid)),
       ]);
       
-      console.log('All data cleared successfully');
+      console.log('All data cleared successfully (subscription data preserved)');
     } catch (error) {
       console.error('Error clearing data:', error);
       throw error;
     }
-  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS]);
+  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, KEYS.COMPLETIONS, uid]);
 
   const value = useMemo(() => ({
     user,
@@ -1200,7 +1647,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     clearAllData,
     syncLocalToBackend,
     loadUserData,
-  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted, clearAllData, syncLocalToBackend, loadUserData]);
+    processFoodOpsQueue,
+    hydrateFromDatabase,
+  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted, clearAllData, syncLocalToBackend, loadUserData, processFoodOpsQueue, hydrateFromDatabase]);
 
   return value;
 });

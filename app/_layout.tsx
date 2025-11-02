@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
+import { Stack, router, usePathname } from "expo-router";
 import * as Linking from 'expo-linking';
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useRef, useState } from "react";
@@ -13,6 +13,15 @@ import Constants from "expo-constants";
 import colors from "@/constants/colors";
 import { runEnvironmentDiagnostics } from "@/utils/environment-diagnostics";
 import { validateProductionConfig, getProductionConfig } from "@/utils/production-config";
+import * as Notifications from 'expo-notifications';
+import { 
+  registerForPushNotificationsAsync,
+  savePushTokenToBackend,
+  scheduleWorkoutReminder,
+  scheduleDailyCheckInReminder
+} from '@/utils/notifications';
+import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notification-storage';
+import { parseTimeString } from '@/utils/notifications';
 
 // Prevent splash screen from hiding automatically
 SplashScreen.preventAutoHideAsync().catch((err) => {
@@ -36,6 +45,7 @@ function RCPurchasesInit() {
   const { session } = useAuth();
   const lastUserIdRef = useRef<string | null>(null);
   const isConfiguredRef = useRef<boolean>(false);
+  const pathname = usePathname();
 
   useEffect(() => {
     // Skip configuration on web or Expo Go; requires EAS dev client or standalone build
@@ -143,6 +153,69 @@ function RCPurchasesInit() {
     return () => sub.remove();
   }, []);
 
+  // Real-time entitlement listener removed: paywall navigation is handled only at specific flow points
+
+  return null;
+}
+
+function NotificationsInit() {
+  const { session, supabase } = useAuth();
+  const { user } = useUserStore();
+  const notificationListener = useRef<any>(null);
+  const responseListener = useRef<any>(null);
+
+  useEffect(() => {
+    if (!session?.user?.id) return;
+
+    registerForPushNotificationsAsync().then(async (token) => {
+      if (token && session.user.id) {
+        await savePushTokenToBackend(supabase, session.user.id, token);
+      }
+    });
+
+    notificationListener.current = Notifications.addNotificationReceivedListener((notification: any) => {
+      console.log('[Notifications] Received:', notification);
+    });
+
+    responseListener.current = Notifications.addNotificationResponseReceivedListener((response: any) => {
+      try {
+        const screen = (response as any)?.notification?.request?.content?.data?.screen;
+        if (screen) router.push(screen as any);
+      } catch {}
+    });
+
+    return () => {
+      if (notificationListener.current) Notifications.removeNotificationSubscription(notificationListener.current);
+      if (responseListener.current) Notifications.removeNotificationSubscription(responseListener.current);
+    };
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!user) return;
+    getNotificationPreferences().then(async (prefs) => {
+      try {
+        // Idempotent scheduling: reschedule only when the time actually changes
+        if (prefs.workoutRemindersEnabled && user.preferredTrainingTime) {
+          if (prefs.lastScheduledWorkoutTime !== user.preferredTrainingTime) {
+            await scheduleWorkoutReminder(user.preferredTrainingTime);
+            await saveNotificationPreferences({ ...prefs, lastScheduledWorkoutTime: user.preferredTrainingTime });
+          }
+        }
+
+        if (prefs.checkInRemindersEnabled && prefs.checkInReminderTime) {
+          const time = prefs.checkInReminderTime;
+          const { hour, minute } = parseTimeString(time);
+          if (prefs.lastScheduledCheckInTime !== time) {
+            await scheduleDailyCheckInReminder(hour, minute);
+            await saveNotificationPreferences({ ...prefs, lastScheduledCheckInTime: time });
+          }
+        }
+      } catch (e) {
+        console.warn('[Notifications] Scheduling error:', e);
+      }
+    });
+  }, [user?.preferredTrainingTime]);
+
   return null;
 }
 
@@ -152,6 +225,9 @@ function RootLayoutNav() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="onboarding" options={{ headerShown: false }} />
       <Stack.Screen name="paywall" options={{ headerShown: false }} />
+      <Stack.Screen name="manage-subscription" options={{ headerShown: false }} />
+      <Stack.Screen name="cancel-retention" options={{ headerShown: false }} />
+      <Stack.Screen name="cancel-reasons" options={{ headerShown: false }} />
       <Stack.Screen name="checkin" options={{ headerShown: true }} />
       <Stack.Screen name="generating-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan" options={{ headerShown: true }} />
@@ -283,6 +359,7 @@ export default function RootLayout() {
               <GestureHandlerRootView style={styles.container}>
                 <AppInitializer>
                   <RCPurchasesInit />
+                  <NotificationsInit />
                   <RootLayoutNav />
                 </AppInitializer>
               </GestureHandlerRootView>

@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, KeyboardAvoidingView, ScrollView, Platform, TouchableWithoutFeedback, Keyboard } from 'react-native';
-import { Link, Stack, useRouter } from 'expo-router';
+import { Link, Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
@@ -10,9 +10,10 @@ import { Image } from 'react-native';
 
 export default function SignupScreen() {
   const router = useRouter();
+  const qp = useLocalSearchParams<{ prefillEmail?: string; prefillName?: string }>();
   const auth = useAuth();
-  const [name, setName] = useState<string>('');
-  const [email, setEmail] = useState<string>('');
+  const [name, setName] = useState<string>((qp.prefillName as string) || '');
+  const [email, setEmail] = useState<string>((qp.prefillEmail as string) || '');
   const [password, setPassword] = useState<string>('');
   const [confirm, setConfirm] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -67,7 +68,7 @@ export default function SignupScreen() {
       setIsSubmitting(false);
       return;
     }
-    router.replace('/home');
+    router.replace('/');
     setIsSubmitting(false);
   }, [canSubmit, email, password, name, signUp, router, isSubmitting]);
 

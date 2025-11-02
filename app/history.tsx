@@ -227,7 +227,10 @@ export default function HistoryScreen() {
           <Text style={styles.statValue}>
             {(hasPlans || hasCheckins) ? `${statistics.completionRate}%` : '--'}
           </Text>
-          <Text style={styles.statLabel} numberOfLines={1}>Completion</Text>
+          <View style={styles.statLabelWrap}>
+            <Text style={styles.statLabel}>Avg</Text>
+            <Text style={styles.statSubLabel}>complition</Text>
+          </View>
         </View>
       </Card>
     </View>
@@ -452,7 +455,7 @@ export default function HistoryScreen() {
       {recentCheckins.length === 0 ? (
         <Text style={styles.noDataText}>No check-ins yet</Text>
       ) : (
-        <ScrollView style={styles.checkinsList}>
+        <View style={styles.checkinsList}>
           {recentCheckins.slice(0, Math.min(days, 20)).map((checkin, index) => {
             const date = new Date(checkin.date);
             
@@ -489,7 +492,7 @@ export default function HistoryScreen() {
               </View>
             );
           })}
-        </ScrollView>
+        </View>
       )}
     </Card>
     );
@@ -506,7 +509,15 @@ export default function HistoryScreen() {
       />
       
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+          scrollEventThrottle={16}
+          removeClippedSubviews={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           {renderTimeRangeSelector()}
           {renderStatsCards()}
           {renderWeightChart()}
@@ -583,6 +594,15 @@ const styles = StyleSheet.create({
     marginTop: 4,
     textAlign: 'center',
   },
+  statLabelWrap: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  statSubLabel: {
+    fontSize: 11,
+    color: theme.color.muted,
+    textAlign: 'center',
+  },
   chartCard: {
     marginBottom: 20,
   },
@@ -638,7 +658,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   checkinsList: {
-    maxHeight: 300,
+    maxHeight: 400,
   },
   checkinItem: {
     flexDirection: 'row',

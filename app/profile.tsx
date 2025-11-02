@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Platform, Image, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Platform, Alert, ActivityIndicator } from 'react-native';
+import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Stack, useRouter } from 'expo-router';
 import { theme } from '@/constants/colors';
@@ -7,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import * as ImagePicker from 'expo-image-picker';
+import { Image as ExpoImage } from 'expo-image';
 import { Camera, Image as ImageIcon, Save, UserCog, ChevronRight, ArrowLeft } from 'lucide-react-native';
 
 export default function ProfileScreen() {
@@ -186,7 +188,7 @@ export default function ProfileScreen() {
   }, [canSave, name, avatar, email, newPassword, confirmPassword, session?.user?.email, updateProfile, uploadAvatar, updateAvatarUrl, supabase, router, derivedName, session?.user?.app_metadata]);
 
   return (
-    <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+    <KeyboardDismissView style={[styles.container, { paddingBottom: insets.bottom }]}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity 
@@ -212,7 +214,7 @@ export default function ProfileScreen() {
               const existing = (session?.user?.user_metadata as any)?.avatar_url as string | undefined;
               const displayUri = avatar || existing || null;
               if (displayUri) {
-                return <Image source={{ uri: displayUri }} style={styles.avatar} />;
+                return <ExpoImage source={{ uri: displayUri }} style={styles.avatar} contentFit="cover" />;
               }
               return (
                 <View style={styles.avatarPlaceholder}>
@@ -297,9 +299,18 @@ export default function ProfileScreen() {
           </TouchableOpacity>
 
           <Button title={saving ? 'Saving…' : 'Save'} onPress={onSave} disabled={!canSave || saving} icon={<Save color="#fff" size={18} />} />
+
+          {/* Manage Subscription Entry Point */}
+          <TouchableOpacity
+            onPress={() => router.push('/manage-subscription')}
+            accessibilityRole="button"
+            style={{ alignSelf: 'center', marginTop: 8 }}
+          >
+            <Text style={{ color: theme.color.muted, fontSize: 13 }}>Subscription</Text>
+          </TouchableOpacity>
         </View>
       )}
-    </View>
+    </KeyboardDismissView>
   );
 }
 
