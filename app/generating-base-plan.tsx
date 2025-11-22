@@ -7,7 +7,7 @@ import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
 import { theme } from '@/constants/colors';
 import { Dumbbell, Apple, Heart, Calendar } from 'lucide-react-native';
-import { generateWeeklyBasePlan } from '@/services/documented-ai-service';
+import { generateWeeklyBasePlan } from '@/services/plan-generation';
 import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
 import Purchases from 'react-native-purchases';
@@ -169,172 +169,28 @@ export default function GeneratingBasePlanScreen() {
     } catch (error) {
       try { /* ensure timer cleared if set */ } catch {}
       console.error('❌ Error in plan generation screen:', error);
-      
+
       // Log the failure
       await logPlanGenerationAttempt('base', false, error, {
         userDataPresent: !!user,
         errorMessage: String(error),
         errorType: error instanceof Error ? error.name : 'Unknown'
       });
-      
-      // Determine if error is recoverable
-      const errorMessage = String(error);
-      const isNetworkError = errorMessage.includes('network') || 
-                            errorMessage.includes('fetch') || 
-                            errorMessage.includes('timeout');
-      const isConfigError = errorMessage.includes('API key') || 
-                           errorMessage.includes('configuration');
-      
-      // Show user-friendly error message
-      if (isNetworkError) {
-        Alert.alert(
-          'Connection Issue',
-          'Unable to connect to AI services. Using a basic plan template instead.',
-          [{ text: 'OK' }]
-        );
-      } else if (isConfigError) {
-        Alert.alert(
-          'Service Issue',
-          'AI service configuration issue. Using a personalized basic plan instead.',
-          [{ text: 'OK' }]
-        );
-      } else {
-        Alert.alert(
-          'Plan Generation',
-          'Using a personalized basic plan. You can regenerate anytime from settings.',
-          [{ text: 'OK' }]
-        );
-      }
-      
-      // The AI service already handles fallback, but if that also fails:
-      // Create a simple emergency fallback plan
-      const emergencyPlan = createEmergencyFallbackPlan();
-      
-      await addBasePlan(emergencyPlan);
-      
-      console.log('[GenerateBasePlan] ✅ Emergency plan saved successfully');
-      
-      // Set generating to false first
-      setIsGenerating(false);
-      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
-      setShowFeaturePreview(false);
-      
-      // Wait for state to propagate before navigating
-      console.log('[GenerateBasePlan] ⏳ Waiting for state propagation (fallback)...');
-      setTimeout(() => {
-        console.log('[GenerateBasePlan] 🚀 Navigating to plan-preview (fallback)');
-        
-        // Try push first, then replace
-        try {
-          unlockNavigation();
-          router.push('/plan-preview');
-          setTimeout(() => {
-            router.replace('/plan-preview');
-          }, 500);
-        } catch (e) {
-          console.error('[GenerateBasePlan] Fallback navigation error:', e);
-          unlockNavigation();
-          try { router.replace('/plan-preview'); } catch {}
-        }
-      }, 1500);
+
+      // Failure UX: do not save any plan, do not navigate
+      Alert.alert(
+        'We\'re experiencing high demand',
+        "Due to high demand we're having an issue. Try again in a bit; contact us if this persists.",
+        [
+          { text: 'Go Back', onPress: () => { try { unlockNavigation(); router.replace('/(tabs)/home'); } catch {} } },
+          { text: 'Try Again', onPress: () => { try { generatePlan(); } catch {} } },
+        ],
+        { cancelable: true }
+      );
     }
   }, [user, addBasePlan]);
 
-  // Emergency fallback function
-  const createEmergencyFallbackPlan = (): WeeklyBasePlan => {
-    const targetCalories = user?.dailyCalorieTarget || 2000;
-    const targetProtein = user?.weight ? Math.round(user.weight * 2.2 * 0.9) : 150;
-    const trainingDays = user?.trainingDays ?? 3;
-    const diet: ('vegetarian' | 'eggitarian' | 'nonveg') = user?.dietaryPrefs?.includes('Vegetarian')
-      ? 'vegetarian'
-      : user?.dietaryPrefs?.includes('Eggitarian')
-        ? 'eggitarian'
-        : 'nonveg';
-    
-    const createDayPlan = (focus: string, isRest: boolean = false) => ({
-      workout: {
-        focus: [focus],
-        blocks: isRest ? [
-          {
-            name: 'Active Recovery',
-            items: [{ exercise: 'Light walking or yoga', sets: 1, reps: '20-30 min', RIR: 0 }]
-          }
-        ] : [
-          {
-            name: 'Warm-up',
-            items: [{ exercise: 'Dynamic stretching', sets: 1, reps: '5-8 min', RIR: 0 }]
-          },
-          {
-            name: 'Main Workout',
-              items: [
-              { exercise: 'Exercise 1', sets: 3, reps: '8-12', RIR: 2 },
-              { exercise: 'Exercise 2', sets: 3, reps: '10-15', RIR: 2 },
-              { exercise: 'Exercise 3', sets: 3, reps: '12-15', RIR: 1 }
-            ]
-          }
-        ],
-        notes: isRest ? 'Rest and recovery day' : 'Focus on proper form'
-      },
-      nutrition: {
-        total_kcal: targetCalories,
-        protein_g: targetProtein,
-        meals: [
-            {
-              name: 'Breakfast',
-              items: [
-              { food: diet === 'vegetarian' ? 'Oats + plant protein' : diet === 'eggitarian' ? 'Eggs + toast' : 'Greek yogurt + protein', qty: diet === 'eggitarian' ? '3 eggs + 2 slices' : '1 serving' },
-              { food: 'Fruit', qty: '1 piece' }
-              ]
-            },
-            {
-              name: 'Lunch',
-              items: [
-              { food: diet === 'vegetarian' ? 'Paneer/Tofu' : diet === 'eggitarian' ? 'Eggs' : 'Chicken/Fish', qty: '150-200g' },
-              { food: 'Rice/Quinoa/Roti', qty: '1 cup / 2 rotis' },
-              { food: 'Mixed vegetables', qty: '2 cups' }
-              ]
-            },
-            {
-              name: 'Dinner',
-              items: [
-              { food: diet === 'vegetarian' ? 'Paneer/Tofu' : diet === 'eggitarian' ? 'Egg whites' : 'Fish/Egg whites', qty: '150-200g' },
-              { food: 'Sweet potato/Rice', qty: '1 medium / 1 cup' },
-              { food: 'Salad (cucumber, tomato, greens)', qty: '2 cups' }
-            ]
-          }
-        ],
-        hydration_l: 2.5
-      },
-      recovery: {
-        mobility: ['Stretching routine', 'Focus on tight areas'],
-        sleep: ['7-8 hours recommended', 'Consistent bedtime'],
-        careNotes: isRest ? 'Gentle day. Prioritize walks, sunlight, and breath work.' : 'Hydrate and add 10-min walk post-meal to aid recovery.',
-        supplements: ['Magnesium (evening)', 'Omega‑3 (with meals)']
-      }
-    });
-
-    // Distribute training days first, remaining days as recovery, no fixed weekdays
-    const order = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
-    const focuses = ['Upper Body','Lower Body','Full Body','Push','Pull','Legs','Core'];
-    let trainIdx = 0;
-    const days: any = {};
-    order.forEach((d, i) => {
-      if (trainIdx < trainingDays) {
-        const focus = focuses[trainIdx % focuses.length];
-        days[d] = createDayPlan(focus, false);
-        trainIdx++;
-      } else {
-        days[d] = createDayPlan('Recovery', true);
-      }
-    });
-
-    return {
-        id: Date.now().toString(),
-        createdAt: new Date().toISOString(),
-        days,
-        isLocked: false,
-      };
-  };
+  // Emergency fallback removed per NO-FALLBACK policy
 
   useEffect(() => {
     if (startedRef.current) return;

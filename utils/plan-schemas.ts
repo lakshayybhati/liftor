@@ -43,9 +43,18 @@ export const NutritionSchema = z.object({
 });
 
 // Recovery schema
+export const SupplementCardSchema = z.object({
+  current: z.array(z.string()).default([]),
+  addOns: z.array(z.string()).default([]),
+  optimizeNotes: z.array(z.string()).optional(),
+});
+
 export const RecoverySchema = z.object({
   mobility: z.array(z.string()).min(1, "Must have at least one mobility tip"),
   sleep: z.array(z.string()).min(1, "Must have at least one sleep tip"),
+  supplements: z.array(z.string()).optional(),
+  careNotes: z.string().optional(),
+  supplementCard: SupplementCardSchema.optional(),
 });
 
 // Daily plan schema
@@ -53,7 +62,7 @@ export const DayPlanSchema = z.object({
   workout: WorkoutSchema,
   nutrition: NutritionSchema,
   recovery: RecoverySchema,
-  reason: z.string().optional(),
+  reason: z.string().min(1, "Reason is required"),
 });
 
 // Weekly base plan schema
@@ -70,7 +79,8 @@ export const WeeklyBasePlanSchema = z.object({
 });
 
 // Daily plan response schema (with additional fields)
-export const DailyPlanResponseSchema = DayPlanSchema.extend({
+export const DailyPlanResponseSchema = DayPlanSchema.omit({ reason: true }).extend({
+  reason: z.string().optional(),
   motivation: z.string().optional(),
   adjustments: z.array(z.string()).optional(),
 });
@@ -84,6 +94,7 @@ export type Meal = z.infer<typeof MealSchema>;
 export type Nutrition = z.infer<typeof NutritionSchema>;
 export type Recovery = z.infer<typeof RecoverySchema>;
 export type DayPlan = z.infer<typeof DayPlanSchema>;
+export type SupplementCard = z.infer<typeof SupplementCardSchema>;
 export type WeeklyBasePlanData = z.infer<typeof WeeklyBasePlanSchema>;
 export type DailyPlanResponse = z.infer<typeof DailyPlanResponseSchema>;
 

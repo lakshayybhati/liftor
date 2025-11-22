@@ -15,7 +15,6 @@ import type { User } from '@/types/user';
 // Test user for plan generation
 const TEST_USER: User = {
   id: 'test-user',
-  email: 'test@example.com',
   age: 28,
   sex: 'Male',
   height: 175,

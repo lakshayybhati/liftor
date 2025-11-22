@@ -127,9 +127,9 @@ export function testPlanValidation() {
   };
 
   // Copy structure for all days
-  const days = ['tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  const days = ['tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
   days.forEach(day => {
-    validWeeklyPlan.days[day] = JSON.parse(JSON.stringify(validWeeklyPlan.days.monday));
+    (validWeeklyPlan.days as any)[day] = JSON.parse(JSON.stringify(validWeeklyPlan.days.monday));
   });
 
   const validDailyPlan = {

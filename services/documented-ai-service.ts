@@ -5,6 +5,9 @@
 
 import type { User, WeeklyBasePlan, DailyPlan, CheckinData } from '@/types/user';
 import { generateAICompletion, type Message } from '@/utils/ai-client';
+import { buildBasePlanPrompts, buildReasonPrompt } from '@/utils/prompt-templates/base-plan';
+import { isExerciseCompatibleWithEquipment, categorizeExercise, findEquipmentAlternative } from '@/utils/exercise-taxonomy';
+import { mergeSupplements } from '@/utils/supplements';
 
 // API Configuration (migrated to ai-client; endpoint now configured per provider)
 
@@ -15,66 +18,78 @@ import { generateAICompletion, type Message } from '@/utils/ai-client';
 export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan> {
   console.log('🏗️ Starting Base Plan Generation (Tier 1)...');
   
-  try {
-    // Step 1: User Profile Building (40+ data points)
-    const userProfile = buildComprehensiveUserProfile(user);
-    console.log('📊 User profile built with', userProfile.split('\n').length, 'data points');
+  const userProfile = buildComprehensiveUserProfile(user);
+  console.log('📊 User profile built with', userProfile.split('\n').length, 'data points');
 
-    // Step 2: AI Prompt Construction
-    const { systemPrompt, userRequest } = constructBasePlanPrompts(user, userProfile);
-    
-    // Step 3: LLM API Call
-    const response = await makeLLMRequest(systemPrompt, userRequest);
-    
-    // Step 4: JSON Processing & Validation
-    const parsedPlan = processAndValidateBasePlan(response);
-    
-    // Step 5: Create WeeklyBasePlan Object
-    // Normalize nutrition metrics across all days to ensure targets are enforced
-    const days = parsedPlan.days;
-    const requiredDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
-    // Respect manual calorie target from onboarding when provided
-    const normalizedCalories = user.dailyCalorieTarget ?? calculateTDEE(user);
-    const normalizedProtein = calculateProteinTarget(user);
-    for (const day of requiredDays) {
-      if (days[day]?.nutrition) {
-        days[day].nutrition.total_kcal = normalizedCalories;
-        days[day].nutrition.protein_g = normalizedProtein;
-        // Dynamic hydration per day based on workout intensity and session/user factors
-        days[day].nutrition.hydration_l = computeHydrationLiters(user, days[day]?.workout);
+  const normalizedCalories = user.dailyCalorieTarget ?? calculateTDEE(user);
+  const normalizedProtein = calculateProteinTarget(user);
+
+  const MAX_ATTEMPTS = 3;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      console.log(`🌀 Base plan generation attempt ${attempt}/${MAX_ATTEMPTS}`);
+      const { systemPrompt, userRequest } = constructBasePlanPrompts(
+        user,
+        userProfile,
+        normalizedCalories,
+        normalizedProtein,
+        attempt
+      );
+
+      const response = await makeLLMRequest(systemPrompt, userRequest);
+      const trimmedResponse = response.trim();
+      if (/^INCOMPLETE$/i.test(trimmedResponse)) {
+        throw new Error('AI indicated INCOMPLETE base plan');
+      }
+
+      const parsedPlan = processAndValidateBasePlan(response);
+
+      const days = parsedPlan.days;
+      const requiredDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+      const missingDays = requiredDays.filter(day => !days?.[day]);
+      if (missingDays.length > 0) {
+        throw new Error(`AI response incomplete. Missing days: ${missingDays.join(', ')}`);
+      }
+
+      for (const day of requiredDays) {
+        if (days[day]?.nutrition) {
+          days[day].nutrition.total_kcal = normalizedCalories;
+          days[day].nutrition.protein_g = normalizedProtein;
+          days[day].nutrition.hydration_l = computeHydrationLiters(user, days[day]?.workout);
+        }
+      }
+
+      const constrainedDays = await postProcessWeeklyPlan(user, days, normalizedCalories, normalizedProtein);
+      // Enforce workout volume and structure (6–7 exercises) and other user constraints
+      const expandedDays = applyUserConstraintsToWeeklyDays(user, constrainedDays);
+
+      const basePlan: WeeklyBasePlan = {
+        id: Date.now().toString(),
+        createdAt: new Date().toISOString(),
+        days: expandedDays,
+        isLocked: false,
+        expectedWeeksToGoal: typeof parsedPlan.expectedWeeksToGoal === 'number'
+          ? parsedPlan.expectedWeeksToGoal
+          : estimateWeeksToGoal(user)
+      };
+
+      console.log('✅ Base plan generated successfully with', Object.keys(basePlan.days).length, 'days');
+      return basePlan;
+    } catch (error) {
+      lastError = error;
+      console.error(`⚠️ Base plan generation attempt ${attempt} failed:`, error);
+      if (attempt < MAX_ATTEMPTS) {
+        const delayMs = 1000 * attempt;
+        console.log(`⏳ Retrying base plan generation in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     }
-
-    // Enforce user constraints (diet/exercise) and weekly meal consistency
-    const constrainedDays = applyUserConstraintsToWeeklyDays(user, days);
-
-    const basePlan: WeeklyBasePlan = {
-      id: Date.now().toString(),
-      createdAt: new Date().toISOString(),
-      days: constrainedDays,
-      isLocked: false,
-      expectedWeeksToGoal: typeof parsedPlan.expectedWeeksToGoal === 'number'
-        ? parsedPlan.expectedWeeksToGoal
-        : estimateWeeksToGoal(user)
-    };
-
-    console.log('✅ Base plan generated successfully with', Object.keys(basePlan.days).length, 'days');
-    return basePlan;
-
-  } catch (error) {
-    console.error('❌ Base plan generation failed:', error);
-
-    // Enhanced error handling - if JSON parsing fails, still try adaptive fallback
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    if (errorMessage.includes('JSON') || errorMessage.includes('parsing') || errorMessage.includes('validation')) {
-      console.log('🔄 AI response parsing failed, using adaptive fallback system...');
-      return generateAdaptiveBasePlan(user);
-    }
-
-    // For other errors, also use adaptive fallback
-    console.log('🔄 Using adaptive fallback system for other errors...');
-    return generateAdaptiveBasePlan(user);
   }
+
+  console.error('❌ Base plan generation failed after retries:', lastError);
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 /**
@@ -210,399 +225,18 @@ function buildComprehensiveUserProfile(user: User): string {
  * Step 2: HYPER-PERSONALIZED AI Prompt Construction for Base Plan
  * Reactive microcycle with Yesterday→Today→Tomorrow logic and deep justification
  */
-function constructBasePlanPrompts(user: User, userProfile: string) {
-  const targetCalories = user.dailyCalorieTarget || calculateTDEE(user);
-  const proteinTarget = calculateProteinTarget(user);
-  const split = getWorkoutSplit(user);
-  const schedule = computeTrainingSchedule(user.trainingDays || 3);
-  const dayNames = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
-  
-  // Calculate session time budget
-  const sessionCap = user.sessionLength || 45;
-  const intensityLevel = user.workoutIntensityLevel || 6;
-  const bodyweight = user.weight || 70;
-  
-  console.log('🎯 Hyper-Personalized Plan Generation:', { 
-    split, 
-    sessionCap, 
-    intensityLevel,
-    trainingDays: user.trainingDays 
-  });
+function constructBasePlanPrompts(
+  user: User,
+  _userProfile: string,
+  targetCalories: number,
+  proteinTarget: number,
+  attempt: number
+) {
+  const retryMessage = attempt > 1
+    ? `Attempt ${attempt}: previous response was incomplete. You MUST return the full monday-sunday JSON now.`
+    : undefined;
 
-  const systemPrompt = `You are an elite strength coach and sports nutritionist. Create a REACTIVE, HYPER-PERSONALIZED 7-day microcycle that deeply analyzes and justifies EVERY decision using Yesterday→Today→Tomorrow logic.
-
-⚠️  CRITICAL AUTONOMY REQUIREMENT ⚠️
-You will receive a JSON structure showing REQUIRED FIELDS AND FORMAT ONLY.
-The example exercises, foods, and reasoning text are PLACEHOLDERS prefixed with "[AI: ...]".
-You MUST think independently and generate a completely original plan based on user data.
-DO NOT copy any placeholder text. SELECT, CALCULATE, and JUSTIFY every choice.
-
-=== CORE USER CONTEXT ===
-Goal: ${user.goal} (optimize every choice toward this)
-Experience: ${user.trainingLevel || 'Beginner'} (${user.trainingLevel === 'Beginner' ? '<1yr' : user.trainingLevel === 'Intermediate' ? '1-3yrs' : '>3yrs'})
-Training Frequency: ${user.trainingDays} days/week
-Session Cap: ${sessionCap} minutes HARD LIMIT (est_time_min must be ≤ ${sessionCap})
-Intensity Preference: ${intensityLevel}/10 (${intensityLevel <= 3 ? 'light effort' : intensityLevel <= 6 ? 'moderate' : 'high intensity'})
-Equipment: ${user.equipment.join(', ')} (ONLY use these)
-Body Weight: ${bodyweight}kg
-Injuries/Limitations: ${user.injuries || 'None'}
-Diet: ${user.dietaryPrefs.join(', ')}
-Meals/Day: ${user.mealCount || 3} (must match exactly)
-Fasting Window: ${user.fastingWindow || 'None'}
-Daily Calories: ${targetCalories} kcal (±5% tolerance: ${Math.round(targetCalories * 0.95)}-${Math.round(targetCalories * 1.05)})
-Daily Protein: ${proteinTarget}g (±5% tolerance: ${Math.round(proteinTarget * 0.95)}-${Math.round(proteinTarget * 1.05)})
-${user.allergies ? `Allergies/Avoid: ${user.allergies}` : ''}
-${user.budgetConstraints ? `Budget: ${user.budgetConstraints}` : ''}
-${user.preferredExercises?.length ? `Preferred Movements: ${user.preferredExercises.join(', ')}` : ''}
-${user.avoidExercises?.length ? `Avoid Exercises: ${user.avoidExercises.join(', ')}` : ''}
-
-=== REACTIVE MICROCYCLE PRINCIPLES ===
-
-1. YESTERDAY→TODAY→TOMORROW LOGIC (CRITICAL):
-   - Track per-muscle load across the cycle
-   - Day 1 → baseline (fresh state)
-   - Day 2+ → consider what was trained Day N-1
-   - If muscle group hit hard yesterday (high volume/low RIR):
-     → Reduce sets by 20-40% today
-     → Increase RIR by 1-2 points
-     → Prefer machine/isometric variations
-     → Consider complete rest for that muscle
-   - If muscle under-served and soreness low:
-     → Increase volume/frequency
-     → Add compound movements
-     → Lower RIR for progressive overload
-   - Each day sets up tomorrow's capabilities
-
-2. OPTIMAL EXERCISE SELECTION (CRITICAL):
-   - Choose THE MOST EFFECTIVE exercises for user's goal + equipment + experience
-   - Vary rep zones across week: 5-8 (strength), 8-12 (hypertrophy), 12-20 (endurance/pump)
-   - Explicit guidance: RIR (0-5), RPE (6-10), tempo (e.g., "3010"), rest periods (60-180s)
-   - Progressive load recommendations (e.g., "+2.5kg from last week")
-   - 2-3 SUBSTITUTIONS per exercise:
-     a) Unilateral option (address imbalances)
-     b) Grip/stance variation (change stimulus angle)
-     c) Low-impact alternative (for high DOMS days)
-
-3. TIME MANAGEMENT (HARD CONSTRAINT):
-   - Estimate time per exercise: warmup sets + working sets + rest
-   - Total workout est_time_min MUST BE ≤ ${sessionCap} min
-   - Include time for warmup, cool-down, transitions
-   - If over budget: reduce exercises, not quality
-
-4. DAILY INTENSITY LABELING:
-   - Assign intensity: "Deload" | "Light" | "Moderate" | "Hard" | "Peak"
-   - Distribute across week to prevent overtraining
-   - Match intensity to user's ${intensityLevel}/10 preference
-
-5. CONDITIONING INTEGRATION:
-   - Weave goal-appropriate cardio:
-     - Fat loss: HIIT, circuits, finishers
-     - Muscle gain: minimal, low-impact
-     - Endurance: steady-state, tempo runs
-   - Time-efficient placement (supersets, active rest)
-
-6. NUTRITION HYPER-PERSONALIZATION:
-   - Lock to ${user.mealCount || 3} meals (never deviate)
-   - Hit ${targetCalories}±5% kcal and ${proteinTarget}±5%g
-   - Use LOCAL, PRACTICAL foods (${user.dietaryPrefs.join(', ')})
-   - Macro timing:
-     → Pre-workout: carbs 1-2hrs before
-     → Post-workout: protein + carbs within 2hrs
-     → Fat lower around training, higher at night
-   - Honor allergies, budget, cooking complexity
-   - 2-3 swap options per meal (same macros)
-   - Ensure fiber (25-35g) and micronutrients
-   - Hydration: ${Math.round(bodyweight * 0.033)}L base + activity adjustments
-
-7. RECOVERY SPECIFICITY:
-   - Day-specific mobility matching worked tissues
-   - Actionable sleep tactics (not generic)
-   - Gentle cardio/step prescriptions
-   - Stress control options
-   - Empathetic careNotes referencing user's goals
-   - Supplements: ONLY if not in user's list AND relevant to today
-
-8. REASON STRING (MOST CRITICAL):
-   For EACH day, write a comprehensive 3-5 sentence reasoning that EXPLICITLY states:
-   a) What was trained YESTERDAY (specific muscles, sets, intensity)
-   b) Why TODAY's exercise selection, RIR, time allocation fit the user
-   c) How today sets up TOMORROW (muscle recovery, fatigue management)
-   d) Which user data dictated decisions:
-      - Equipment limitations
-      - Meal count requirements
-      - Intensity slider (${intensityLevel}/10)
-      - Injuries/avoid exercises
-      - Session time cap (${sessionCap}min)
-      - IF window timing
-      - Experience level
-   e) Training split justification and weekly balance
-   
-   Make each day's reason UNIQUE and SPECIFIC - reference actual exercises, rep ranges, and user constraints.
-
-=== OUTPUT REQUIREMENTS ===
-- Pure JSON (no markdown, no backticks)
-- Days labeled: day1, day2, day3, day4, day5, day6, day7
-- Include expectedWeeksToGoal
-- Autonomous split/rest placement (balance weekly volume)
-- Same input → same output (deterministic)
-- Progressive volume balance across microcycle
-- Equipment filters enforced
-- All constraints validated
-
-Return ONLY valid JSON matching this structure:`;
-
-  // Build enhanced example with reactive microcycle structure
-  const exampleDays: any = {};
-  dayNames.forEach((day, index) => {
-    const isTraining = schedule[index];
-    const focus = isTraining ? split[index % split.length] : 'Recovery';
-    const prevDayIndex = index === 0 ? 6 : index - 1;
-    const nextDayIndex = (index + 1) % 7;
-    const wasPrevTraining = schedule[prevDayIndex];
-    const isNextTraining = schedule[nextDayIndex];
-    
-    exampleDays[day] = {
-      workout: {
-        focus: [focus],
-        intensity: isTraining ? "Moderate" : "Deload",
-        est_time_min: isTraining ? sessionCap - 5 : 20,
-        blocks: isTraining ? [
-          { 
-            name: "Warm-up", 
-            items: [
-              { 
-                exercise: "Dynamic stretching + movement prep", 
-                sets: 1, 
-                reps: "5-8 min", 
-                RIR: 0,
-                tempo: "controlled",
-                rest_sec: 0,
-                notes: "Activate target muscles, increase core temp"
-              }
-            ] 
-          },
-          { 
-            name: "Main Training", 
-            items: [
-              { 
-                exercise: "[AI: SELECT specific compound from user equipment - e.g., Barbell Squat if gym, DB Goblet Squat if dumbbells]",
-                sets: 4, 
-                reps: "[AI: CHOOSE based on goal - strength: 5-8, hypertrophy: 8-12, endurance: 12-20]", 
-                RIR: 2,
-                RPE: 8,
-                tempo: "[AI: SELECT - e.g., 3010, 2020, 3120]",
-                rest_sec: 120,
-                load_guidance: "[AI: SPECIFY - e.g., 80% 1RM, RPE 8, +2.5kg from last week]",
-                substitutions: [
-                  "[AI: Unilateral variation for THIS exercise - e.g., Single-leg squat, Split squat]",
-                  "[AI: Grip/stance variation for THIS exercise - e.g., Wide stance, Front squat]",
-                  "[AI: Low-impact alternative for THIS exercise - e.g., Leg press, Wall sit]"
-                ],
-                notes: "[AI: Add context - e.g., Progressive overload, Form focus, Volume reduced due to yesterday]"
-              },
-              { 
-                exercise: "[AI: SELECT secondary compound matching focus]", 
-                sets: 3, 
-                reps: "[AI: CHOOSE rep range]", 
-                RIR: 2,
-                RPE: 7,
-                tempo: "[AI: SELECT tempo]",
-                rest_sec: 90,
-                load_guidance: "[AI: SPECIFY load]",
-                substitutions: [
-                  "[AI: Unilateral option]",
-                  "[AI: Alternative equipment]",
-                  "[AI: Variation pattern]"
-                ]
-              },
-              {
-                exercise: "[AI: SELECT isolation matching focus]",
-                sets: 3,
-                reps: "[AI: Higher reps for isolation work]",
-                RIR: 1,
-                RPE: 8,
-                tempo: "[AI: Slower tempo for isolation]",
-                rest_sec: 60,
-                substitutions: [
-                  "[AI: Different angle]",
-                  "[AI: Different tool]",
-                  "[AI: Intensity technique]"
-                ]
-              }
-            ]
-          },
-          { 
-            name: "Conditioning", 
-            items: [
-              {
-                exercise: "Goal-appropriate finisher",
-                sets: 1,
-                reps: "10-15 min",
-                RIR: 3,
-                notes: "Fat loss: HIIT | Muscle gain: light cardio | Endurance: steady state"
-              }
-            ]
-          },
-          { 
-            name: "Cool-down", 
-            items: [
-              { 
-                exercise: "Static stretching + breathing", 
-                sets: 1, 
-                reps: "5-10 min", 
-                RIR: 0,
-                notes: "Target worked muscles, parasympathetic activation"
-              }
-            ]
-          }
-        ] : [
-          { 
-            name: "Active Recovery", 
-            items: [
-              { exercise: "Light walking or cycling", sets: 1, reps: "20-30 min", RIR: 0, notes: "Zone 2 HR, conversational pace" },
-              { exercise: "Gentle mobility flow", sets: 1, reps: "10-15 min", RIR: 0, notes: "Focus on yesterday's worked tissues" }
-            ]
-          }
-        ],
-        notes: isTraining ? 
-          `Training ${focus}. Managed volume based on ${wasPrevTraining ? 'yesterday\'s training load' : 'fresh state'}. Sets up ${isNextTraining ? 'tomorrow\'s session' : 'recovery period'}.` : 
-          "Active recovery - facilitate repair, manage fatigue"
-      },
-      nutrition: {
-        total_kcal: targetCalories,
-        protein_g: proteinTarget,
-        meals_per_day: user.mealCount || 3,
-        fiber_g: 30,
-        meals: [
-          { 
-            name: "[AI: Name meal - e.g., Pre-Workout Meal, Breakfast, etc.]", 
-            timing: "[AI: SPECIFY based on training time and IF window]",
-            items: [
-              { food: "[AI: SELECT real food matching diet - e.g., Chicken breast, Paneer, Tofu]", qty: "[AI: CALCULATE quantity - e.g., 150g, 1 cup]", macros: "[AI: ESTIMATE - e.g., 0c/30p/3f]" },
-              { food: "[AI: SELECT complementary food]", qty: "[AI: CALCULATE quantity]", macros: "[AI: ESTIMATE macros]" }
-            ],
-            swaps: [
-              "[AI: Provide swap with similar macros - name specific food + quantity]",
-              "[AI: Budget-friendly alternative - specific food]",
-              "[AI: Quick/meal prep option - specific food]"
-            ]
-          },
-          { 
-            name: "[AI: Name meal 2]", 
-            timing: "[AI: SPECIFY timing]",
-            items: [
-              { food: "[AI: SELECT protein matching diet]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
-              { food: "[AI: SELECT carb source]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
-              { food: "[AI: SELECT vegetables]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" }
-            ],
-            swaps: [
-              "[AI: Different protein within diet constraints]",
-              "[AI: Carb swap - rice/quinoa/potato]",
-              "[AI: Veggie alternative]"
-            ]
-          },
-          { 
-            name: "[AI: Name meal 3]", 
-            timing: "[AI: SPECIFY timing]",
-            items: [
-              { food: "[AI: SELECT protein+fat source]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" },
-              { food: "[AI: SELECT fiber-rich carb]", qty: "[AI: CALCULATE]", macros: "[AI: ESTIMATE]" }
-            ],
-            swaps: [
-              "[AI: Fattier protein option]",
-              "[AI: Different prep method]",
-              "[AI: Batch cook friendly]"
-            ]
-          }
-        ],
-        hydration_l: Math.round(bodyweight * 0.033 * 10) / 10,
-        hydration_notes: `Base ${Math.round(bodyweight * 0.033)}L + ${isTraining ? '0.5-1L during training' : '0L (rest day)'} + climate adjustments`
-      },
-      recovery: {
-        mobility: [
-          isTraining ? 
-            `${focus}-specific stretches: target worked muscles (hip flexors, thoracic spine, etc.)` :
-            "Full body flow: gentle yoga, joint circles, breath work"
-        ],
-        sleep: [
-          `Target 7-9 hours (${isTraining ? 'prioritize tonight - muscle repair' : 'maintain consistency'})`,
-          "Actionable: No screens 1hr before bed, cool room (65-68°F), consistent time",
-          `${isNextTraining ? 'Tomorrow is training - ensure quality rest tonight' : 'Recovery continues - allow deep sleep cycles'}`
-        ],
-        steps: isTraining ? "8,000-10,000 (NEAT)" : "10,000-12,000 (active recovery)",
-        stress_control: [
-          "5-10min breathwork or meditation",
-          "Nature exposure if possible",
-          `${wasPrevTraining ? 'Celebrate progress from yesterday' : 'Prepare mentally for upcoming session'}`
-        ],
-        careNotes: isTraining ?
-          `Excellent work on ${focus} today! You challenged yourself with ${focus === 'Push' ? 'chest, shoulders, triceps' : focus === 'Pull' ? 'back, biceps, rear delts' : focus === 'Legs' ? 'quads, hamstrings, glutes' : 'full body patterns'}. Your ${user.goal.toLowerCase().replace('_', ' ')} goal is well-served by this stimulus. ${wasPrevTraining ? 'Note that you trained yesterday, so we managed volume appropriately today.' : 'You came in fresh, allowing quality work.'} ${isNextTraining ? 'Tomorrow continues the split, so prioritize protein and sleep tonight.' : 'Tomorrow is recovery - your body will rebuild stronger.'}` :
-          `Recovery day - your muscles are repairing from ${wasPrevTraining ? 'yesterday\'s ' + split[(prevDayIndex) % split.length] + ' session' : 'the training cycle'}. Light movement accelerates recovery without adding fatigue. ${isNextTraining ? 'Tomorrow you\'ll train ' + split[(nextDayIndex) % split.length] + ', so stay hydrated and mobile today.' : 'Another rest day tomorrow allows complete restoration.'} Remember: growth happens during recovery, not just training.`,
-        supplements: [
-          ...(isTraining ? ["Protein powder post-workout (if not hitting protein through food)"] : []),
-          "Creatine 5g daily (timing flexible)",
-          ...(isTraining ? ["Caffeine pre-workout (optional, 150-300mg if tolerance allows)"] : []),
-          ...(!isTraining ? ["Magnesium glycinate 200-400mg (evening, aids sleep)"] : []),
-          "Omega-3 1-2g daily (with meals, reduce inflammation)"
-        ].filter(s => !user.supplements?.some(us => s.toLowerCase().includes(us.toLowerCase())))
-      },
-      reason: "[AI: WRITE UNIQUE 3-5 SENTENCE REASONING - See autonomy instructions below. Must include: yesterday context, today decisions, tomorrow setup, user data citations, split justification. Be specific with YOUR chosen exercises and foods, not generic terms.]"
-    };
-  });
-
-  const userRequest = JSON.stringify({
-    expectedWeeksToGoal: estimateWeeksToGoal(user),
-    days: exampleDays
-  }, null, 2);
-
-  return { 
-    systemPrompt, 
-    userRequest: `${userRequest}
-
-CRITICAL INSTRUCTIONS FOR AI AUTONOMY:
-
-1. The above JSON is a STRUCTURAL REFERENCE ONLY - showing required fields and format
-2. DO NOT copy the example exercises, foods, or reasoning text
-3. YOU MUST autonomously decide:
-   - Which specific exercises based on user's equipment + goal + experience
-   - Exact rep ranges based on goal (strength: 5-8, hypertrophy: 8-12, endurance: 12-20)
-   - RIR/RPE based on intensity preference (${intensityLevel}/10)
-   - Real food items matching user's diet (${user.dietaryPrefs.join(', ')})
-   - Actual quantities that hit ${targetCalories}kcal and ${proteinTarget}g protein
-   - Equipment-filtered substitutions (only use ${user.equipment.join(', ')})
-   - Unique reasoning for each day that references YOUR exercise choices
-
-4. THINK DEEPLY about:
-   - What did I program yesterday? How does that affect today's muscle selection?
-   - Is this muscle group recovered enough for high volume?
-   - Does this exercise fit the time budget (${sessionCap}min)?
-   - Are these foods realistic and accessible?
-   - Does my reasoning explain the Yesterday→Today→Tomorrow logic?
-
-5. VARY your choices:
-   - Don't repeat the same exercises every day
-   - Rotate food items across meals and days
-   - Use different rep ranges across the week
-   - Adjust RIR based on accumulated fatigue
-
-6. CALCULATE intelligently:
-   - est_time_min must be realistic (warmup + sets × rest + cool-down)
-   - Macro totals must be ±5% of targets
-   - Substitutions must be truly equivalent alternatives
-
-7. BE SPECIFIC in reasoning:
-   - Name the actual exercises you chose (not "compound movement")
-   - State the actual muscles worked (not "upper body")
-   - Reference the user's actual data (equipment, meals/day, intensity)
-
-Example of GOOD reasoning:
-"Day 3 follows Pull training yesterday where we hit back/biceps with 18 total sets (RIR 2). Today's Leg workout uses barbell squats, Romanian deadlifts, and Bulgarian split squats (your gym equipment) for 42 minutes (under 45min cap). These compound movements target your muscle gain goal at intermediate level. Volume is high (20 sets) since legs are fresh, but RIR is 2-3 per your 6/10 intensity preference. Three meals (breakfast 10am per 16:8 IF window, lunch 2pm, dinner 8pm) distribute 2050kcal and 152g protein via chicken, rice, vegetables (non-veg diet). Tomorrow is recovery, so tonight's protein and 8hrs sleep are critical for quad/hamstring/glute repair."
-
-Example of BAD reasoning (don't do this):
-"This is a training day focusing on the split. Exercises match your goals. Nutrition hits targets."
-
-CREATE A COMPLETELY NEW, THOUGHTFUL PLAN. USE THE STRUCTURE BUT THINK INDEPENDENTLY.` 
-  };
+  return buildBasePlanPrompts(user, targetCalories, proteinTarget, retryMessage);
 }
 
 /**
@@ -640,7 +274,7 @@ ADJUSTMENT RULES:
 - Travel/Busy: Switch to 20-30min bodyweight/DB circuits
 - Digestive Issues: Reduce dense carbs pre-workout, lighter morning meals
 - Great Recovery: Allow +1 set on primaries or slightly tighter RIR
-- Diet Adherence Issues: Keep same meals but adjust portions
+- Diet Adherence Issues: Keep same meals but if any suggestions change it accordingly and adjust portions
  - If Special Request is present, explicitly incorporate it (e.g., focus area, time cap, joint-friendly swaps) without violating safety/time constraints
 
 RELEVANCE FILTER (CRITICAL):
@@ -698,6 +332,133 @@ async function makeLLMRequest(systemPrompt: string, userRequest: string): Promis
 
   console.log('✅ LLM response received:', completion.substring(0, 100) + '...');
   return completion;
+}
+
+// Post-processing pipeline: validate equipment/diet, dedup, normalize, compose reasons, supplements
+async function postProcessWeeklyPlan(
+  user: User,
+  days: any,
+  calorieTarget: number,
+  proteinTarget: number
+): Promise<any> {
+  const allDayKeys = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+  const isVeg = (user.dietaryPrefs || []).some((d) => /veg/i.test(d)) && !(user.dietaryPrefs || []).some(d => /non[- ]?veg/i.test(d));
+  const isEgg = (user.dietaryPrefs || []).some((d) => /egg/i.test(d));
+  const avoidList = new Set((user.avoidExercises || []).map((s) => s.toLowerCase()));
+
+  for (const dayKey of allDayKeys) {
+    const day = days[dayKey];
+    if (!day) continue;
+
+    // Normalize nutrition
+    if (!day.nutrition) day.nutrition = { total_kcal: calorieTarget, protein_g: proteinTarget, meals: [], hydration_l: 2.5 };
+    day.nutrition.total_kcal = calorieTarget;
+    day.nutrition.protein_g = proteinTarget;
+    if (typeof day.nutrition.hydration_l !== 'number' || day.nutrition.hydration_l < 1) day.nutrition.hydration_l = 2.5;
+
+    // Diet replacements
+    for (const meal of day.nutrition.meals || []) {
+      for (const item of meal.items || []) {
+        const lower = String(item.food || '').toLowerCase();
+        const isMeat = /(chicken|beef|pork|fish|mutton|turkey|shrimp|tuna)/i.test(lower);
+        if (isVeg && isMeat) item.food = 'Paneer/Tofu';
+        else if (isEgg && /chicken|beef|pork|fish|mutton|turkey/i.test(lower)) item.food = 'Eggs';
+      }
+    }
+
+    // Workout validation + dedup + equipment-aware replacements
+    if (!day.workout) day.workout = { focus: ['Full Body'], blocks: [], notes: '' };
+    if (!Array.isArray(day.workout.focus)) day.workout.focus = [String(day.workout.focus || 'Full Body')];
+    for (const block of day.workout.blocks || []) {
+      const seen = new Set<string>();
+      const newItems: any[] = [];
+      for (const item of block.items || []) {
+        let name = String(item.exercise || '').trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (avoidList.has(key)) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        if (!isExerciseCompatibleWithEquipment(name, user.equipment || [])) {
+          const category = categorizeExercise(name);
+          const replacement = findEquipmentAlternative(category, user.equipment || []);
+          if (replacement) name = replacement;
+        }
+
+        newItems.push({
+          exercise: name,
+          sets: typeof item.sets === 'number' ? item.sets : 3,
+          reps: item.reps || '8-12',
+          RIR: typeof item.RIR === 'number' ? Math.min(Math.max(item.RIR, 0), 5) : 2,
+        });
+      }
+      block.items = newItems;
+    }
+
+    // Supplements: merge current vs add-ons and add optimize notes
+    const userSupps = user.supplements || [];
+    const aiSupps = (day.recovery?.supplements || []) as string[];
+    day.recovery = day.recovery || { mobility: ['Stretching'], sleep: ['7-8 hours'] };
+    const supplementalHeuristics = computeSupplementHeuristics(user, aiSupps);
+    const suggestedSupps = Array.from(new Set([...(aiSupps || []), ...supplementalHeuristics]));
+    const mergedSupps = mergeSupplements(userSupps, suggestedSupps);
+    day.recovery.supplementCard = {
+      current: mergedSupps.current,
+      addOns: mergedSupps.addOns,
+      optimizeNotes: mergedSupps.optimizeNotes,
+    };
+
+    // Reason: ensure present and non-generic
+    const reason = String(day.reason || '').trim();
+    if (!reason || reason.length < 24) {
+      day.reason = synthesizeReason(day, user, calorieTarget, proteinTarget);
+    }
+  }
+
+  return days;
+}
+
+function computeSupplementHeuristics(user: User, aiSupps: string[]): string[] {
+  const suggestions: string[] = [];
+  const aiSet = new Set((aiSupps || []).map(s => s.toLowerCase()));
+  const currentSet = new Set((user.supplements || []).map(s => s.toLowerCase()));
+  const dietSet = new Set((user.dietaryPrefs || []).map(d => d.toLowerCase()));
+  const goal = (user.goal || '').toLowerCase();
+
+  const push = (name: string) => {
+    const key = name.toLowerCase();
+    if (aiSet.has(key) || currentSet.has(key) || suggestions.some(s => s.toLowerCase() === key)) {
+      return;
+    }
+    suggestions.push(name);
+  };
+
+  if (goal.includes('muscle')) {
+    push('Creatine');
+    push('Whey Protein');
+  }
+
+  if (goal.includes('endurance')) {
+    push('Electrolytes');
+  }
+
+  if (dietSet.has('vegetarian') || dietSet.has('eggitarian')) {
+    push('Vitamin D');
+    push('Omega-3');
+  }
+
+  push('Magnesium');
+
+  return suggestions;
+}
+
+
+function synthesizeReason(day: any, user: User, kcal: number, protein: number): string {
+  const focus = (day?.workout?.focus || []).join(', ') || 'General';
+  const goal = user.goal || 'fitness';
+  const pg = user.personalGoals || '';
+  return `This ${focus} day prioritizes your ${goal.toLowerCase()} goal${pg ? ` and personal focus (${pg})` : ''}. Exercise selection respects your equipment and level to drive progressive overload without overuse. Nutrition (${kcal} kcal, ${protein}g protein) supports adaptation within your dietary preferences. Recovery work targets tissues stressed today to prepare you for the next session.`;
 }
 
 /**
@@ -803,11 +564,58 @@ function processAndValidateBasePlan(rawResponse: string): any {
   console.log('📝 JSON preview:', jsonString.substring(0, 150) + '...');
 
   try {
-    const parsedPlan = JSON.parse(jsonString);
+    let parsedPlan = JSON.parse(jsonString);
 
     // Validate structure with more lenient checking
     if (!parsedPlan || typeof parsedPlan !== 'object') {
       throw new Error('Parsed response is not a valid object');
+    }
+
+    if (!parsedPlan.days) {
+      const dayKeys = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+      let extractedDays: Record<string, any> = {};
+      for (const key of dayKeys) {
+        if (parsedPlan[key]) {
+          extractedDays[key] = parsedPlan[key];
+        }
+      }
+
+      if (Object.keys(extractedDays).length !== dayKeys.length) {
+        const altMap: Record<string, string> = {
+          day1: 'monday',
+          day2: 'tuesday',
+          day3: 'wednesday',
+          day4: 'thursday',
+          day5: 'friday',
+          day6: 'saturday',
+          day7: 'sunday'
+        };
+        const altExtracted: Record<string, any> = {};
+        for (const [altKey, realKey] of Object.entries(altMap)) {
+          if (parsedPlan[altKey]) {
+            altExtracted[realKey] = parsedPlan[altKey];
+          }
+        }
+        if (Object.keys(altExtracted).length === dayKeys.length) {
+          extractedDays = altExtracted;
+          const clonedAlt = { ...parsedPlan } as Record<string, any>;
+          for (const altKey of Object.keys(altMap)) {
+            delete clonedAlt[altKey];
+          }
+          parsedPlan = clonedAlt;
+        }
+      }
+
+      // Restructure if we found ANY days at top level (not just all 7)
+      if (Object.keys(extractedDays).length > 0) {
+        console.log(`ℹ️ Restructuring AI response into days object (found ${Object.keys(extractedDays).length} days)`);
+        const cloned = { ...parsedPlan } as Record<string, any>;
+        for (const key of dayKeys) {
+          delete cloned[key];
+        }
+        cloned.days = extractedDays;
+        parsedPlan = cloned;
+      }
     }
 
     // Try to validate structure, but don't fail completely if some parts are missing
@@ -1214,7 +1022,7 @@ function validatePlanStructure(plan: any): { isValid: boolean; errors: string[] 
     return { isValid: false, errors };
   }
 
-  const requiredDays = ['day1', 'day2', 'day3', 'day4', 'day5', 'day6', 'day7'];
+  const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   for (const day of requiredDays) {
     if (!plan.days[day]) {
       errors.push(`Missing ${day} in plan`);
@@ -1689,7 +1497,7 @@ function buildDayReason(params: {
   if (goals) extras.push(`keeps your goals (${goals}) front and center`);
   if (sr) extras.push(`respects your request: ${sr}`);
   const extraText = extras.length ? ` and ${extras.join(' and ')}` : '';
-  return `${dayLabel} focuses on ${focus} to accelerate your ${primaryGoal.toLowerCase().replace('_',' ')} goal. It’s built for ${sessionLength} min with your equipment (${eq})${extraText}. Recovery tips and supplements are tuned to today’s workload so you bounce back stronger.`;
+  return `${dayLabel} focuses on ${focus} to accelerate your ${primaryGoal.toLowerCase().replace('_',' ')} goal. It's built for ${sessionLength} min with your equipment (${eq})${extraText}. Recovery tips and supplements are tuned to today's workload so you bounce back stronger.`;
 }
 
 /**
@@ -2844,7 +2652,7 @@ function getExercisesForFocus(focus: string, equipment: string[]): string[] {
     'Mobility': byEquip(
       ['Couch Stretch','Hip Flexor Stretch','Hamstring Stretch','Thoracic Rotation','Banded Dislocates','Ankle Dorsiflexion'],
       ['Couch Stretch','Hip Airplanes (DB assist)','Banded Dislocates','Ankle Mobility Drills'],
-      ['Couch Stretch','Hip Flexor Stretch','90/90 Switches','World’s Greatest Stretch','Ankle Mobility']
+      ['Couch Stretch','Hip Flexor Stretch','90/90 Switches','World\'s Greatest Stretch','Ankle Mobility']
     ),
     'Yoga': byEquip(
       ['Sun Salutation A','Sun Salutation B','Warrior Flow','Triangle Pose','Bridge Pose','Pigeon Pose'],

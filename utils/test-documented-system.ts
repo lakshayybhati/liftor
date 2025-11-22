@@ -35,8 +35,8 @@ const comprehensiveTestUser: User = {
   
   // Supplements & Goals
   supplements: ['Creatine', 'Whey Protein', 'Multivitamin'],
-  personalGoals: 'Build muscle mass and increase strength',
-  perceivedLacks: 'Upper body development, particularly chest and shoulders',
+  personalGoals: ['Build muscle mass and increase strength'],
+  perceivedLacks: ['Upper body development, particularly chest and shoulders'],
   
   // Limitations & Special Requests
   injuries: 'Previous lower back strain - avoid heavy overhead movements',
@@ -573,11 +573,11 @@ class DocumentedSystemTest {
   private analyzeAdjustments(dailyPlan: any, checkin: CheckinData): string {
     const adjustments: string[] = [];
 
-    if (checkin.energy < 5) {
+    if (checkin.energy !== undefined && checkin.energy < 5) {
       adjustments.push('Low energy adjustments');
     }
     
-    if (checkin.stress > 7) {
+    if (checkin.stress !== undefined && checkin.stress > 7) {
       adjustments.push('High stress modifications');
     }
     

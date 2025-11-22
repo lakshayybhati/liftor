@@ -24,7 +24,18 @@ function compactText(input: string, maxLength: number): string {
 }
 
 function optimizeMessages(messages: Message[]): Message[] {
-  // Limit system to 2000 chars, user to 6000 chars; others to 2000
+  const content = messages.map(m => m.content).join(' ').toLowerCase();
+  
+  // Detect base plan generation (needs full prompts)
+  const isBasePlan = content.includes('seven') || content.includes('7-day') || 
+                     content.includes('weekly') || content.includes('monday') && content.includes('sunday');
+  
+  if (isBasePlan) {
+    // Don't truncate for base plan generation - need full context
+    return messages;
+  }
+  
+  // Limit system to 2000 chars, user to 6000 chars; others to 2000 for daily adjustments
   const limits = { system: 2000, user: 6000, assistant: 2000 } as const;
   return messages.map(m => ({
     role: m.role,
@@ -34,11 +45,21 @@ function optimizeMessages(messages: Message[]): Message[] {
 
 function estimateMaxTokens(messages: Message[]): number {
   const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-  // Approximate 4 chars ≈ 1 token; cap to keep responses short and fast
+  const content = messages.map(m => m.content).join(' ').toLowerCase();
+  
+  // Detect base plan generation (needs more tokens for full week)
+  const isBasePlan = content.includes('seven') || content.includes('7-day') || 
+                     content.includes('weekly') || content.includes('monday') && content.includes('sunday');
+  
+  if (isBasePlan) {
+    return 8192; // Significantly increased for full 7-day plans
+  }
+  
+  // Approximate 4 chars ≈ 1 token; cap to keep responses short and fast for daily adjustments
   const approxTokens = Math.ceil(totalChars / 4);
-  if (approxTokens < 600) return 512;
-  if (approxTokens < 2000) return 1024;
-  return 2048;
+  if (approxTokens < 600) return 1024;
+  if (approxTokens < 2000) return 2048;
+  return 4096;
 }
 
 /**
@@ -213,7 +234,7 @@ async function generateWithGemini(messages: Message[]): Promise<AIResponse> {
           temperature: 0.6,
           topK: 40,
           topP: 0.9,
-          maxOutputTokens: Math.min(2048, maxTokens),
+          maxOutputTokens: maxTokens,
         },
       }),
       signal: controller.signal,
@@ -248,7 +269,7 @@ async function generateWithGemini(messages: Message[]): Promise<AIResponse> {
                 temperature: 0.6,
                 topK: 40,
                 topP: 0.9,
-                maxOutputTokens: Math.min(2048, maxTokens),
+                maxOutputTokens: maxTokens,
               },
             }),
             signal: controller.signal,
@@ -315,7 +336,7 @@ async function generateWithOpenAI(messages: Message[]): Promise<AIResponse> {
       model,
       messages: optimized.map(m => ({ role: m.role === 'system' ? 'system' : m.role === 'user' ? 'user' : 'assistant', content: m.content })),
       temperature: 0.6,
-      max_tokens: Math.min(2048, maxTokens),
+      max_tokens: maxTokens,
     }),
   });
 
@@ -382,7 +403,7 @@ async function generateWithDeepSeek(messages: Message[]): Promise<AIResponse> {
           content: m.content 
         })),
         temperature: 0.6,
-        max_tokens: Math.min(2048, estimateMaxTokens(optimized)),
+        max_tokens: estimateMaxTokens(optimized),
       }),
       signal: controller.signal,
     });

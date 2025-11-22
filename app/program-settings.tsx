@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { ArrowLeft, Settings, Save, Calendar } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';

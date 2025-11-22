@@ -415,7 +415,7 @@ Please modify the plan based on their request and return ONLY the updated day da
       }).start();
 
       // Lazy-load the AI generator to keep bundle light
-      const { generateWeeklyBasePlan } = await import('@/services/documented-ai-service');
+      const { generateWeeklyBasePlan } = await import('@/services/plan-generation');
 
       // Compose special requests with user input (without mutating profile)
       const combinedRequest = `${user?.specialRequests ? user.specialRequests + ' | ' : ''}User requested changes: ${planEditText || 'Rebuild my weekly base plan'}`;

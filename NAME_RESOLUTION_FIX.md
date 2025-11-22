@@ -286,3 +286,13 @@ GROUP BY name_status;
 The home screen will now display actual user names instead of "User" for new signups. Existing users may need database updates to fix their stored names.
 
 
+
+
+
+
+
+
+
+
+
+

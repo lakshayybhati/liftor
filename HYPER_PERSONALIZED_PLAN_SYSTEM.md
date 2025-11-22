@@ -420,3 +420,13 @@ The base plan system is now **truly intelligent and reactive**. Every workout, m
 
 This isn't just a workout plan - it's a **coaching system** that explains its decisions and adapts to the user's unique situation.
 
+
+
+
+
+
+
+
+
+
+

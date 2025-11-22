@@ -9,7 +9,7 @@ import { useAuth } from '@/hooks/useAuth';
 export default function VerifyOtpScreen() {
   const params = useLocalSearchParams<{ identifier?: string; mode?: 'login' | 'signup' | 'reset' | 'profile'; name?: string; auto?: string }>();
   const identifier = (params.identifier || '').toString();
-  const mode = (params.mode || 'login') as 'login' | 'signup' | 'reset';
+  const mode = (params.mode || 'login') as 'login' | 'signup' | 'reset' | 'profile';
   const name = (params.name || '').toString();
   const auto = (params.auto || '') === '1';
   const auth = useAuth();
@@ -151,7 +151,7 @@ export default function VerifyOtpScreen() {
           {digits.map((d, i) => (
             <TextInput
               key={i}
-              ref={(el) => (inputsRef.current[i] = el)}
+              ref={(el) => { inputsRef.current[i] = el; }}
               style={styles.otpBox}
               keyboardType="number-pad"
               returnKeyType={i === 5 ? 'done' : 'next'}

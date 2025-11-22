@@ -296,3 +296,33 @@ export const TRAINING_LEVELS = [
   { id: 'Intermediate', label: 'Intermediate', description: '1-3 years of training experience' },
   { id: 'Professional', label: 'Professional', description: 'More than 3 years of training experience' },
 ] as const;
+
+// Curated exercise pools by equipment type (used for replacements, not prescription)
+export const EXERCISES_BY_EQUIPMENT: Record<string, string[]> = {
+  Bodyweight: [
+    'Push-ups', 'Pike Push-ups', 'Pull-ups', 'Inverted Rows', 'Bodyweight Squats', 'Reverse Lunges',
+    'Hip Bridges', 'Plank', 'Hollow Hold', 'Dead Bug', 'Burpees', 'Mountain Climbers', 'Walking', 'Yoga Flow'
+  ],
+  Bands: [
+    'Band Chest Press', 'Band Shoulder Press', 'Band Rows', 'Band Face Pulls', 'Band Pulldowns',
+    'Band Squats', 'Band Romanian Deadlifts', 'Band Lunges', 'Band Pallof Press', 'Band Woodchop'
+  ],
+  Dumbbells: [
+    'DB Bench Press', 'DB Incline Press', 'DB Shoulder Press', 'DB Row', 'DB Pullover', 'DB Rear Delt Fly',
+    'DB Squat', 'DB Romanian Deadlift', 'DB Lunge', 'DB Farmer Carry', 'DB Russian Twist'
+  ],
+  Gym: [
+    'Barbell Bench Press', 'Incline Bench Press', 'Overhead Press', 'Lat Pulldown', 'Seated Cable Row', 'Face Pull',
+    'Back Squat', 'Front Squat', 'Leg Press', 'Hamstring Curl', 'Calf Raise', 'Cable Pallof Press', 'Hanging Leg Raise',
+    'Assault Bike', 'Row Erg', 'Ski Erg'
+  ],
+};
+
+export const EXERCISE_SYNONYMS: Record<string, string[]> = {
+  'Upper Push': ['bench press', 'chest press', 'shoulder press', 'overhead press', 'push-up', 'dip'],
+  'Upper Pull': ['row', 'pulldown', 'pull-up', 'chin-up', 'face pull', 'rear delt'],
+  Legs: ['squat', 'deadlift', 'lunge', 'hinge', 'press', 'curl', 'raise'],
+  Core: ['plank', 'crunch', 'leg raise', 'pallof', 'anti-rotation'],
+  Conditioning: ['sprint', 'bike', 'erg', 'metcon', 'circuit', 'burpee', 'jump rope'],
+  Recovery: ['walk', 'yoga', 'mobility', 'stretch', 'foam roll'],
+};
