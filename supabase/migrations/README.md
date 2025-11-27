@@ -4,6 +4,15 @@ This directory contains SQL migration files for the Liftor database schema.
 
 ## Available Migrations
 
+### `20251127_add_daily_plan_memory_column.sql` - Daily Plan Memory Support
+
+**Purpose**: Restores the `memory` column on `daily_plans` so the app can persist AI memory snapshots during daily check-ins.
+
+**What it does**:
+- ✅ Adds `daily_plans.memory jsonb` when missing (idempotent)
+- ✅ Documents column purpose for future migrations
+- ✅ Resolves Supabase error `PGRST204 Could not find the 'memory' column`
+
 ### `20251014_security_fixes.sql` - Security Hardening
 
 **Purpose**: Comprehensive security fixes for all tables, storage buckets, and RPC functions.

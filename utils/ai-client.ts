@@ -381,11 +381,13 @@ async function generateWithDeepSeek(messages: Message[]): Promise<AIResponse> {
   console.log('[DeepSeek] Messages count:', messages.length);
   console.log('[DeepSeek] API key prefix:', apiKey.substring(0, 10) + '...');
 
-  // Add timeout for production reliability; read from production config with 120s default
+  // Add timeout for production reliability; read from production config with 600s default (increased from 300s)
   const controller = new AbortController();
-  const timeoutMs = Math.max(30000, config.aiTimeoutMs || 120000);
+  // Use 10 minutes as default to prevent premature timeouts during two-stage generation
+  const timeoutMs = Math.max(600000, config.aiTimeoutMs || 600000);
+  console.log(`⏱️ [DeepSeek] Timeout set to ${Math.round(timeoutMs/1000)}s`);
   const timeoutId = setTimeout(() => {
-    console.error(`❌ [DeepSeek] Request timeout after ${Math.round(timeoutMs/1000)}s`);
+    console.warn(`⚠️ [DeepSeek] Request timeout after ${Math.round(timeoutMs/1000)}s - switching to fallback`);
     controller.abort();
   }, timeoutMs);
 

@@ -177,12 +177,45 @@ create table if not exists public.daily_plans (
   motivation text,
   adherence numeric,
   adjustments text[] not null default '{}',
+  nutrition_adjustments text[] not null default '{}',
+  memory_adjustments text[] not null default '{}',
   is_from_base_plan boolean not null default false,
+  is_ai_adjusted boolean not null default false,
+  flags text[] not null default '{}',
+  memory jsonb null,
   base_plan_id uuid null references public.weekly_base_plans(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(user_id, date)
 );
+
+-- Migration: Add is_ai_adjusted and flags columns if they don't exist
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='daily_plans' and column_name='is_ai_adjusted'
+  ) then
+    alter table public.daily_plans add column is_ai_adjusted boolean not null default false;
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='daily_plans' and column_name='flags'
+  ) then
+    alter table public.daily_plans add column flags text[] not null default '{}';
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='daily_plans' and column_name='nutrition_adjustments'
+  ) then
+    alter table public.daily_plans add column nutrition_adjustments text[] not null default '{}';
+  end if;
+end $$;
 
 do $$ begin
   if not exists (select 1 from pg_trigger where tgname = 'daily_plans_set_updated_at') then
@@ -247,10 +280,31 @@ create table if not exists public.checkins (
   busy_blocks jsonb,
   travel_yn boolean,
   workout_intensity int,
+  yesterday_workout_quality int,
+  special_request text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(user_id, date)
 );
+
+-- Migration: Add yesterday_workout_quality and special_request columns if they don't exist
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='checkins' and column_name='yesterday_workout_quality'
+  ) then
+    alter table public.checkins add column yesterday_workout_quality int;
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='checkins' and column_name='special_request'
+  ) then
+    alter table public.checkins add column special_request text;
+  end if;
+end $$;
 
 do $$ begin
   if not exists (select 1 from pg_trigger where tgname = 'checkins_set_updated_at') then

@@ -37,7 +37,7 @@ export interface User {
   personalGoals?: string[]; // e.g., "bigger arms", "better sleep"
   perceivedLacks?: string[]; // e.g., "protein intake", "recovery"
   // New specifics fields
-  preferredExercises?: string[];
+  trainingStylePreferences?: string[];
   avoidExercises?: string[];
   preferredTrainingTime?: string;
   sessionLength?: number; // in minutes
@@ -101,6 +101,7 @@ export interface CheckinData {
   busyBlocks?: {start: string; end: string; reason: string}[];
   travelYN?: boolean;
   workoutIntensity?: number; // Workout intensity slider value (1-10)
+  yesterdayWorkoutQuality?: number; // 1-10 rating of yesterday's workout
 }
 
 export interface WorkoutPlan {
@@ -155,8 +156,74 @@ export interface DailyPlan {
   recovery: RecoveryPlan;
   motivation: string;
   adherence?: number;
-  adjustments?: string[]; // List of adjustments made from base plan
+  adjustments?: string[]; // List of adjustments made from base plan (workout-focused)
+  nutritionAdjustments?: string[]; // List of nutrition-specific adjustments based on check-in
+  memoryAdjustments?: string[]; // List of specific memory-based adjustments
+  flags?: string[]; // AI-generated flags for specific conditions (e.g., LOW_SLEEP_TREND)
+  dailyHighlights?: string; // Short paragraph summarizing the day for memory storage
   isFromBasePlan?: boolean;
+  isAiAdjusted?: boolean;
+  memorySnapshot?: TrendMemory;
+}
+
+export interface TrendMemory {
+  scores: {
+    sleep: number;
+    energy: number;
+    water: number;
+    stress: number;
+  };
+  ema: {
+    sleep: number;
+    energy: number;
+    water: number;
+    stress: number;
+  };
+  sorenessHistory: string;
+  sorenessStreaks: {
+    area: string;
+    length: number;
+    isRedFlag: boolean;
+  }[];
+  digestionHistory: string;
+  digestionStreaks: {
+    state: string;
+    length: number;
+    isRedFlag: boolean;
+  }[];
+  weightTrend: {
+    last7Days: { date: string; weight: number }[];
+    deltaKg: number;
+    direction: 'up' | 'down' | 'flat';
+    recommendedCalorieDelta: number;
+  };
+}
+
+/**
+ * Yesterday Snapshot Layer
+ * Provides a crisp, one-day conclusion context that complements the EMA trends.
+ * Captures what happened (or didn't happen) in the last 1-3 days.
+ */
+export interface LastDayContext {
+  lastCheckinDate: string | null;
+  daysSinceLastCheckin: number;        // 0 = today, 1 = yesterday, 3 = they vanished 3 days
+  hadCheckinYesterday: boolean;
+
+  // Behaviour
+  yesterdayWorkoutStatus?: 'completed' | 'partial' | 'skipped';
+  yesterdayNutritionStatus?: 'on_target' | 'under' | 'over' | 'unknown';
+  yesterdaySupplementsStatus?: 'taken' | 'skipped' | 'unknown';
+  yesterdayCompletedSupplements?: string[];
+
+  // Notes / symptoms parsed from free text
+  healthNote?: string;                 // e.g. "sore throat", "mild cold", "headache"
+  lifestyleNote?: string;              // e.g. "travel day", "very busy day"
+
+  // Copy yesterday's specialRequest if it matters
+  yesterdaySpecialRequest?: string | null;
+  
+  // AI-generated summary of yesterday's session (from dailyHighlights)
+  yesterdayHighlights?: string;        // Short paragraph summary of previous day
 }
 
 export interface WeeklyBasePlan {
@@ -172,4 +239,6 @@ export interface WeeklyBasePlan {
   };
   isLocked?: boolean;
   expectedWeeksToGoal?: number;
+  isGenerating?: boolean;
+  generationProgress?: number; // 1-7
 }

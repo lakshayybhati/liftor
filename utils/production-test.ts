@@ -2,7 +2,7 @@
  * Comprehensive Production Test Suite
  * Tests all production-ready features
  */
-import { generateWeeklyBasePlan, generateDailyPlan } from '@/services/production-ai-service';
+import { generateWeeklyBasePlan, generateDailyPlan } from '@/services/plan-generation';
 import { validateWeeklyPlan, validateDailyPlan } from '@/utils/plan-schemas';
 import { productionMonitor, startSystemMonitoring } from '@/utils/production-monitor';
 import type { User, CheckinData } from '@/types/user';
@@ -27,7 +27,7 @@ const testUsers: User[] = [
     supplements: ['Creatine', 'Whey Protein'],
     sessionLength: 60,
     mealCount: 4,
-    preferredExercises: ['Bench Press', 'Squats'],
+    trainingStylePreferences: ['Strength', 'Hypertrophy'],
     avoidExercises: ['Deadlifts'],
   },
   {
@@ -496,7 +496,7 @@ class ProductionTestSuite {
       
       const customUser = {
         ...testUsers[0],
-        preferredExercises: ['Bench Press', 'Squats'],
+        trainingStylePreferences: ['Strength', 'Hypertrophy'],
         avoidExercises: ['Deadlifts'],
         dietaryPrefs: ['Vegetarian' as const],
         specialRequests: 'No jumping exercises'

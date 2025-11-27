@@ -294,6 +294,43 @@ export default function SnapFoodScreen() {
     if (/API key|not configured/i.test(msg)) return 'Service configuration issue. Please use manual entry.';
     return 'Could not analyze the food. Would you like to enter the details manually?';
   }, []);
+
+  const isNetworkError = useCallback((error: any): boolean => {
+    const raw = typeof error === 'string'
+      ? error
+      : error?.message || error?.details || JSON.stringify(error || {});
+    return /Network request failed|Failed to fetch|NetworkError/i.test(String(raw));
+  }, []);
+
+  const buildLocalExtraFromAnalysis = useCallback(
+    (
+      analysis: FoodAnalysisResponse,
+      options: {
+        source: 'manual' | 'snap';
+        notes?: string | null;
+        portion?: string | null;
+        imageUri?: string | null;
+      }
+    ) => {
+      const name =
+        analysis.items?.map(item => item.name).filter(Boolean).join(', ') ||
+        'Logged meal';
+      const round = (value: number) => Math.round(Number(value) || 0);
+
+      return {
+        name,
+        calories: round(analysis.totals?.kcal ?? 0),
+        protein: round(analysis.totals?.protein_g ?? 0),
+        fat: round(analysis.totals?.fat_g ?? 0),
+        carbs: round(analysis.totals?.carbs_g ?? 0),
+        notes: options.notes ?? undefined,
+        portionHint: options.portion ?? undefined,
+        source: options.source,
+        imageUri: options.imageUri ?? undefined,
+      };
+    },
+    []
+  );
   const buildStoragePath = useCallback(() => {
     const uid = session?.user?.id;
     if (!uid) return null;
@@ -527,117 +564,136 @@ export default function SnapFoodScreen() {
   }, [capturedImageUri, extraNotes, uploadImageToStorage, invokeWithRetry, failCount, circuitOpenUntil, analyzeImageOnDevice, checkRateLimit, retryWithBackoff, incrementRateLimit]);
 
   const handleAddToExtras = useCallback(async () => {
+    const analysisData = analysisResult ?? manualAnalysisResult;
+    if (!analysisData) {
+      Alert.alert('Missing data', 'Please calculate nutrition first by tapping "Calculate Nutrition".');
+      return;
+    }
+
+    // Validate analysis has required data
+    if (!analysisData.items || !Array.isArray(analysisData.items) || analysisData.items.length === 0) {
+      Alert.alert('Invalid Data', 'Nutrition calculation incomplete. Please recalculate nutrition before saving.');
+      return;
+    }
+
+    if (!analysisData.totals || typeof analysisData.totals.kcal !== 'number') {
+      Alert.alert('Invalid Data', 'Nutrition calculation incomplete. Please recalculate nutrition before saving.');
+      return;
+    }
+
+    const sourceType: 'manual' | 'snap' = analysisResult && capturedImageUri ? 'snap' : 'manual';
+    const portionLabel =
+      manualAnalysisResult?.items?.[0]?.quantity ??
+      manualEntry.portionSize ??
+      analysisResult?.items?.[0]?.quantity ??
+      null;
+    const combinedNotes = extraNotes.trim() || analysisData.notes || null;
+
     if (Platform.OS !== 'web') {
       Haptics.selectionAsync();
     }
 
-    try {
-      const idem = makeId();
-      if (analysisResult) {
-        let imagePath = uploadedImagePath;
-        if (capturedImageUri && !imagePath) {
-          imagePath = await uploadImageToStorage(capturedImageUri);
-          setUploadedImagePath(imagePath);
-        }
+    // Build the local extra payload immediately
+    const offlineExtra = buildLocalExtraFromAnalysis(analysisData, {
+      source: sourceType,
+      notes: combinedNotes,
+      portion: portionLabel,
+      imageUri: capturedImageUri || null,
+    });
 
-        const now = new Date();
-        const dayKeyLocal = now.toLocaleDateString('en-CA');
-        const portionQty = analysisResult.items?.[0]?.quantity ?? null;
-
-        const insertSnap: any = {
-          user_id: session!.user!.id,
-          occurred_at_utc: now.toISOString(),
-          day_key_local: dayKeyLocal,
-          name: analysisResult.items.map(i => i.name).join(', '),
-          calories: Math.round(analysisResult.totals.kcal),
-          protein: analysisResult.totals.protein_g,
-          carbs: analysisResult.totals.carbs_g,
-          fat: analysisResult.totals.fat_g,
-          portion: portionQty,
-          portion_weight_g: null,
-          confidence: analysisResult.confidence ?? null,
-          notes: extraNotes.trim() || analysisResult.notes || null,
-          source: capturedImageUri ? 'snap' : 'manual',
-          idempotency_key: idem,
-        };
-        if (imagePath) insertSnap.image_path = imagePath;
-
-        const row: any = await upsertFoodExtras(insertSnap);
-
-        await addExtraFood({
-          name: row.name,
-          calories: row.calories,
-          protein: row.protein,
-          fat: row.fat,
-          carbs: row.carbs,
-          confidence: row.confidence ?? undefined,
-          notes: row.notes ?? undefined,
-          imageUri: capturedImageUri || undefined,
-          imagePath: row.image_path || undefined,
-          source: 'snap',
-          serverId: row.id,
-        });
-
-        Alert.alert('Added Successfully!', `${row.name} added.`, [
-          { text: 'Undo', style: 'destructive', onPress: async () => { try { await removeExtraFood(row.id); } catch {}; router.back(); } },
+    // For manual entry, save locally immediately and skip Supabase to avoid errors
+    if (manualAnalysisResult) {
+      try {
+        await addExtraFood(offlineExtra);
+        Alert.alert('Added Successfully!', `${offlineExtra.name} saved to your daily log.`, [
           { text: 'OK', onPress: () => router.back() }
         ]);
-      } else if (manualAnalysisResult) {
-        const now = new Date();
-        const dayKeyLocal = now.toLocaleDateString('en-CA');
-        const portionQty = manualAnalysisResult.items?.[0]?.quantity ?? manualEntry.portionSize;
-
-        const insertManual: any = {
-          user_id: session!.user!.id,
-          occurred_at_utc: now.toISOString(),
-          day_key_local: dayKeyLocal,
-          name: manualAnalysisResult.items.map(i => i.name).join(', '),
-          calories: Math.round(manualAnalysisResult.totals.kcal),
-          protein: manualAnalysisResult.totals.protein_g,
-          carbs: manualAnalysisResult.totals.carbs_g,
-          fat: manualAnalysisResult.totals.fat_g,
-          portion: portionQty,
-          portion_weight_g: null,
-          confidence: manualAnalysisResult.confidence ?? null,
-          notes: extraNotes.trim() || manualAnalysisResult.notes || null,
-          source: 'manual',
-          idempotency_key: idem,
-        };
-
-        const row: any = await upsertFoodExtras(insertManual);
-
-        await addExtraFood({
-          name: row.name,
-          calories: row.calories,
-          protein: row.protein,
-          fat: row.fat,
-          carbs: row.carbs,
-          confidence: row.confidence ?? undefined,
-          notes: row.notes ?? undefined,
-          imageUri: undefined,
-          imagePath: row.image_path || undefined,
-          source: 'manual',
-          serverId: row.id,
-        });
-
-        Alert.alert('Added Successfully!', `${row.name} added.`, [
-          { text: 'Undo', style: 'destructive', onPress: async () => { try { await removeExtraFood(row.id); } catch {}; router.back(); } },
-          { text: 'OK', onPress: () => router.back() }
-        ]);
-      } else {
+        return;
+      } catch (error: any) {
+        console.error('[snap-food] Error saving manual entry locally:', error);
+        Alert.alert('Error', 'Failed to save entry. Please try again.');
         return;
       }
-    } catch (error: any) {
-      console.error('[snap-food] Error adding extra food:', {
-        error,
-        code: error?.code,
-        status: error?.status,
-        message: error?.message
-      });
-      reportError(error);
-      Alert.alert('Error', friendlyErrorMessage(error) || 'Failed to add food to extras. Please try again.');
     }
-  }, [analysisResult, manualAnalysisResult, manualEntry, extraNotes, capturedImageUri, uploadedImagePath, makeId, supabase, session, addExtraFood, removeExtraFood, uploadImageToStorage]);
+
+    // For snap/photo entries, try Supabase first then fallback to local
+    try {
+      const idem = makeId();
+      let imagePath = uploadedImagePath;
+      if (capturedImageUri && !imagePath) {
+        imagePath = await uploadImageToStorage(capturedImageUri);
+        setUploadedImagePath(imagePath);
+      }
+
+      const now = new Date();
+      const dayKeyLocal = now.toLocaleDateString('en-CA');
+      const portionQty = analysisResult?.items?.[0]?.quantity ?? null;
+
+      const insertSnap: any = {
+        user_id: session!.user!.id,
+        occurred_at_utc: now.toISOString(),
+        day_key_local: dayKeyLocal,
+        name: analysisResult!.items.map(i => i.name).join(', '),
+        calories: Math.round(analysisResult!.totals.kcal),
+        protein: analysisResult!.totals.protein_g,
+        carbs: analysisResult!.totals.carbs_g,
+        fat: analysisResult!.totals.fat_g,
+        portion: portionQty,
+        portion_weight_g: null,
+        confidence: analysisResult!.confidence ?? null,
+        notes: extraNotes.trim() || analysisResult!.notes || null,
+        source: 'snap',
+        idempotency_key: idem,
+      };
+      if (imagePath) insertSnap.image_path = imagePath;
+
+      const row: any = await upsertFoodExtras(insertSnap);
+
+      await addExtraFood({
+        name: row.name,
+        calories: row.calories,
+        protein: row.protein,
+        fat: row.fat,
+        carbs: row.carbs,
+        confidence: row.confidence ?? undefined,
+        notes: row.notes ?? undefined,
+        imageUri: capturedImageUri || undefined,
+        imagePath: row.image_path || undefined,
+        source: 'snap',
+        serverId: row.id,
+      });
+
+      Alert.alert('Added Successfully!', `${row.name} added.`, [
+        { text: 'Undo', style: 'destructive', onPress: async () => { try { await removeExtraFood(row.id); } catch {}; router.back(); } },
+        { text: 'OK', onPress: () => router.back() }
+      ]);
+    } catch (error: any) {
+      console.error('[snap-food] Error adding snap to Supabase, saving locally:', error);
+      
+      // Save locally as fallback
+      await addExtraFood(offlineExtra);
+      Alert.alert(
+        'Saved locally',
+        "This meal has been stored on your device. We'll sync it automatically once you're back online.",
+        [{ text: 'OK', onPress: () => router.back() }]
+      );
+    }
+  }, [
+    analysisResult,
+    manualAnalysisResult,
+    manualEntry,
+    extraNotes,
+    capturedImageUri,
+    uploadedImagePath,
+    makeId,
+    session,
+    addExtraFood,
+    removeExtraFood,
+    uploadImageToStorage,
+    buildLocalExtraFromAnalysis,
+    router,
+    upsertFoodExtras,
+  ]);
 
   const handleAnalyzeManualEntry = useCallback(async () => {
     if (!manualEntry.name.trim() || !manualEntry.portionSize.trim()) {
@@ -710,7 +766,15 @@ export default function SnapFoodScreen() {
             </TouchableOpacity>
             <Text style={styles.modalTitle}>Manual Entry</Text>
             <TouchableOpacity 
-              onPress={manualAnalysisResult ? handleAddToExtras : handleAnalyzeManualEntry}
+              onPress={() => {
+                if (manualAnalysisResult && manualAnalysisResult.items && manualAnalysisResult.items.length > 0) {
+                  handleAddToExtras();
+                } else if (manualEntry.name.trim() && manualEntry.portionSize.trim()) {
+                  handleAnalyzeManualEntry();
+                } else {
+                  Alert.alert('Missing Information', 'Please enter food name and portion size, then calculate nutrition.');
+                }
+              }}
               disabled={isAnalyzingManual}
             >
               <Check size={24} color={theme.color.accent.green} />
@@ -736,10 +800,6 @@ export default function SnapFoodScreen() {
                 placeholder="e.g., 1 piece, 200g, 1 cup"
                 placeholderTextColor={theme.color.muted}
               />
-
-              <Text style={styles.portionHint}>
-                We&apos;ll use AI to calculate the nutritional information based on the food name and portion size.
-              </Text>
 
               {!manualAnalysisResult && !isAnalyzingManual && (
                 <Button
@@ -966,7 +1026,15 @@ export default function SnapFoodScreen() {
               </TouchableOpacity>
               <Text style={styles.modalTitle}>Manual Entry</Text>
               <TouchableOpacity 
-                onPress={manualAnalysisResult ? handleAddToExtras : handleAnalyzeManualEntry}
+                onPress={() => {
+                  if (manualAnalysisResult && manualAnalysisResult.items && manualAnalysisResult.items.length > 0) {
+                    handleAddToExtras();
+                  } else if (manualEntry.name.trim() && manualEntry.portionSize.trim()) {
+                    handleAnalyzeManualEntry();
+                  } else {
+                    Alert.alert('Missing Information', 'Please enter food name and portion size, then calculate nutrition.');
+                  }
+                }}
                 disabled={isAnalyzingManual}
               >
                 <Check size={24} color={theme.color.accent.green} />
@@ -992,10 +1060,6 @@ export default function SnapFoodScreen() {
                   placeholder="e.g., 1 piece, 200g, 1 cup"
                   placeholderTextColor={theme.color.muted}
                 />
-
-                <Text style={styles.portionHint}>
-                  We&apos;ll use AI to calculate the nutritional information based on the food name and portion size.
-                </Text>
 
                 {!manualAnalysisResult && !isAnalyzingManual && (
                   <Button

@@ -11,6 +11,7 @@ interface PerformanceMetrics {
   errorRate: number;
   tokenUsage: number;
   timestamp: string;
+  validationCorrectionCount?: number; // Track corrected plans
 }
 
 interface UserFeedback {
@@ -35,7 +36,7 @@ class ProductionMonitor {
   private maxMetricsHistory = 100;
   private alertThresholds = {
     minSuccessRate: 0.85,
-    maxResponseTime: 120000, // 120 seconds to align with DeepSeek timeout
+    maxResponseTime: 180000, // 180 seconds to align with DeepSeek timeout
     maxErrorRate: 0.15,
     minSatisfactionScore: 3.5
   };
@@ -49,7 +50,8 @@ class ProductionMonitor {
     aiUsed: boolean,
     validationPassed: boolean,
     tokenCount: number = 0,
-    errors: string[] = []
+    errors: string[] = [],
+    correctionsApplied: number = 0
   ): void {
     const endTime = Date.now();
     const generationTime = endTime - startTime;
@@ -61,7 +63,8 @@ class ProductionMonitor {
       userSatisfactionScore: 0, // Will be updated when user provides feedback
       errorRate: errors.length > 0 ? 1 : 0,
       tokenUsage: tokenCount,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      validationCorrectionCount: correctionsApplied
     };
 
     this.metrics.push(metric);
@@ -72,7 +75,7 @@ class ProductionMonitor {
     }
 
     // Log performance
-    console.log(`📊 Performance: ${generationTime}ms, AI: ${aiUsed}, Success: ${success}, Tokens: ${tokenCount}`);
+    console.log(`📊 Performance: ${generationTime}ms, AI: ${aiUsed}, Success: ${success}, Tokens: ${tokenCount}, Corrections: ${correctionsApplied}`);
 
     // Check for alerts
     this.checkAlerts(metric, errors);
@@ -114,7 +117,8 @@ class ProductionMonitor {
           userSatisfactionScore: 5,
           errorRate: 0,
           tokenUsage: 0,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          validationCorrectionCount: 0
         },
         issues: []
       };
@@ -165,6 +169,7 @@ class ProductionMonitor {
       avgGenerationTime: this.calculateAverage(recentMetrics.map(m => m.planGenerationTime)),
       aiSuccessRate: this.calculateAverage(recentMetrics.map(m => m.aiSuccessRate)),
       validationSuccessRate: this.calculateAverage(recentMetrics.map(m => m.validationSuccessRate)),
+      avgCorrectionCount: this.calculateAverage(recentMetrics.map(m => m.validationCorrectionCount || 0)),
       avgSatisfactionScore: this.calculateAverage(
         recentFeedback.map(f => f.rating).filter(r => r > 0)
       ),
@@ -212,7 +217,8 @@ class ProductionMonitor {
         userSatisfactionScore: 5,
         errorRate: 0,
         tokenUsage: 0,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        validationCorrectionCount: 0
       };
     }
 
@@ -225,7 +231,8 @@ class ProductionMonitor {
       ),
       errorRate: this.calculateAverage(metrics.map(m => m.errorRate)),
       tokenUsage: this.calculateAverage(metrics.map(m => m.tokenUsage)),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      validationCorrectionCount: this.calculateAverage(metrics.map(m => m.validationCorrectionCount || 0))
     };
   }
 
@@ -291,6 +298,7 @@ export function monitorPerformance<T extends (...args: any[]) => Promise<any>>(
     let aiUsed = false;
     let validationPassed = false;
     let tokenCount = 0;
+    let correctionsApplied = 0;
     const errors: string[] = [];
 
     try {
@@ -298,6 +306,11 @@ export function monitorPerformance<T extends (...args: any[]) => Promise<any>>(
       success = true;
       aiUsed = true; // Assume AI was used if function completed
       validationPassed = true; // Assume validation passed if no errors
+      
+      // Try to detect if corrections were applied (if result has correction metadata)
+      if (result && typeof result === 'object' && 'correctionsApplied' in result) {
+        correctionsApplied = result.correctionsApplied;
+      }
       
       console.log(`✅ ${functionName} completed successfully`);
       return result;
@@ -312,7 +325,8 @@ export function monitorPerformance<T extends (...args: any[]) => Promise<any>>(
         aiUsed,
         validationPassed,
         tokenCount,
-        errors
+        errors,
+        correctionsApplied
       );
     }
   }) as T;
@@ -334,6 +348,7 @@ export function startSystemMonitoring(): void {
     console.log(`Generations: ${analytics.totalGenerations}`);
     console.log(`Avg Response Time: ${analytics.avgGenerationTime.toFixed(0)}ms`);
     console.log(`AI Success Rate: ${(analytics.aiSuccessRate * 100).toFixed(1)}%`);
+    console.log(`Avg Corrections: ${analytics.avgCorrectionCount.toFixed(1)} per plan`);
     console.log(`User Satisfaction: ${analytics.avgSatisfactionScore.toFixed(1)}/5`);
     
     if (health.issues.length > 0) {
@@ -347,6 +362,3 @@ export function startSystemMonitoring(): void {
 
 // Types for external use
 export type { PerformanceMetrics, UserFeedback, SystemHealth };
-
-
-

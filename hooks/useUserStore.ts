@@ -50,6 +50,7 @@ interface PlanCompletionDay {
   date: string;
   completedMeals: string[];
   completedExercises: string[];
+  completedSupplements: string[];
 }
 
 // Base storage keys (now namespaced per Supabase user below)
@@ -393,7 +394,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
               supplementNotes: (profileRecord.supplement_notes as string | null) ?? undefined,
               personalGoals: (profileRecord.personal_goals as string[] | null) ?? undefined,
               perceivedLacks: (profileRecord.perceived_lacks as string[] | null) ?? undefined,
-              preferredExercises: (profileRecord.preferred_exercises as string[] | null) ?? undefined,
+              trainingStylePreferences: (profileRecord.preferred_exercises as string[] | null) ?? undefined,
               avoidExercises: (profileRecord.avoid_exercises as string[] | null) ?? undefined,
               preferredTrainingTime: (profileRecord.preferred_training_time as string | null) ?? undefined,
               checkInReminderTime: (profileRecord as any).checkin_reminder_time ?? undefined,
@@ -558,6 +559,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             .eq('user_id', uid)
             .gte('date', fmt(since90))
             .order('date', { ascending: true })
+            .order('created_at', { ascending: true })
         ),
         retrySupabaseOperation(async () =>
           await supabase
@@ -607,6 +609,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Map and persist check-ins
       try {
         if (Array.isArray(dbCheckins) && dbCheckins.length > 0) {
+          // Map and persist check-ins with deduplication
+          const uniqueCheckins = new Map<string, CheckinData>();
           const mapped = dbCheckins.map((c: any) => ({
             id: c.id,
             mode: c.mode,
@@ -637,11 +641,17 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             busyBlocks: c.busy_blocks ?? undefined,
             travelYN: c.travel_yn ?? undefined,
             workoutIntensity: c.workout_intensity ?? undefined,
+            yesterdayWorkoutQuality: c.yesterday_workout_quality ?? undefined,
+            specialRequest: c.special_request ?? undefined,
           })) as CheckinData[];
 
-          setCheckins(mapped);
-          await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(mapped));
-          console.log('[Hydrate] Check-ins loaded:', mapped.length);
+          // Deduplicate by date, keeping the latest entry (last one in the list if sorted by created_at/id, but here mostly just unique date matters)
+          mapped.forEach(c => uniqueCheckins.set(c.date, c));
+          const deduped = Array.from(uniqueCheckins.values()).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+          setCheckins(deduped);
+          await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(deduped));
+          console.log('[Hydrate] Check-ins loaded:', deduped.length);
         }
       } catch (e) {
         console.warn('[Hydrate] Failed to map/persist check-ins', e);
@@ -650,17 +660,31 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Map and persist daily plans
       try {
         if (Array.isArray(dbPlans) && dbPlans.length > 0) {
-          const mapped = dbPlans.map((p: any) => ({
+          const mapped = dbPlans.map((p: any) => {
+            // Ensure workout has proper structure with blocks array
+            let workout = p.workout ?? undefined;
+            if (workout && (!workout.blocks || !Array.isArray(workout.blocks))) {
+              console.warn('[Hydrate] Plan has workout without blocks, fixing structure for date:', p.date);
+              workout = { ...workout, blocks: workout.blocks || [] };
+            }
+            
+            return {
             id: p.id,
             date: p.date,
-            workout: p.workout ?? undefined,
+              workout,
             nutrition: p.nutrition ?? undefined,
             recovery: p.recovery ?? undefined,
             motivation: p.motivation ?? undefined,
             adherence: p.adherence ?? undefined,
             adjustments: p.adjustments ?? undefined,
+              nutritionAdjustments: p.nutrition_adjustments ?? undefined,
+            memoryAdjustments: p.memory_adjustments ?? undefined,
             isFromBasePlan: p.is_from_base_plan ?? undefined,
-          })) as DailyPlan[];
+            isAiAdjusted: p.is_ai_adjusted ?? undefined,
+            flags: p.flags ?? undefined,
+            memorySnapshot: p.memory ?? undefined,
+            };
+          }) as DailyPlan[];
 
           setPlans(mapped);
           await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(mapped));
@@ -852,9 +876,67 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
   const addCheckin = useCallback(async (checkin: CheckinData) => {
     try {
-      const updatedCheckins = [...checkins, checkin];
+      // Robust upsert: filter out ANY existing check-ins for this date first
+      // This prevents duplicates even if multiple exist due to race conditions or bugs
+      const otherCheckins = checkins.filter(c => c.date !== checkin.date);
+      
+        // Add new check-in
+      const updatedCheckins = [...otherCheckins, checkin];
+      
+      // Sort by date for consistency
+      updatedCheckins.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      
       setCheckins(updatedCheckins);
       await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(updatedCheckins));
+      
+      // Sync to Supabase immediately
+      if (uid && supabase) {
+        try {
+          const row = {
+            user_id: uid,
+            date: checkin.date,
+            mode: checkin.mode,
+            body_weight: checkin.bodyWeight ?? null,
+            current_weight: checkin.currentWeight ?? null,
+            mood: checkin.mood ?? null,
+            mood_character: checkin.moodCharacter ?? null,
+            energy: checkin.energy ?? null,
+            sleep_hrs: checkin.sleepHrs ?? null,
+            sleep_quality: checkin.sleepQuality ?? null,
+            woke_feeling: checkin.wokeFeeling ?? null,
+            soreness: checkin.soreness ?? null,
+            appearance: checkin.appearance ?? null,
+            digestion: checkin.digestion ?? null,
+            stress: checkin.stress ?? null,
+            water_l: checkin.waterL ?? null,
+            salt_yn: checkin.saltYN ?? null,
+            supps_yn: checkin.suppsYN ?? null,
+            steps: checkin.steps ?? null,
+            kcal_est: checkin.kcalEst ?? null,
+            caffeine_yn: checkin.caffeineYN ?? null,
+            alcohol_yn: checkin.alcoholYN ?? null,
+            motivation: checkin.motivation ?? null,
+            hr: checkin.hr ?? null,
+            hrv: checkin.hrv ?? null,
+            injuries: checkin.injuries ?? null,
+            busy_blocks: checkin.busyBlocks ?? null,
+            travel_yn: checkin.travelYN ?? null,
+            workout_intensity: checkin.workoutIntensity ?? null,
+            yesterday_workout_quality: checkin.yesterdayWorkoutQuality ?? null,
+            special_request: checkin.specialRequest ?? null,
+          };
+          
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('checkins')
+              .upsert(row as any, { onConflict: 'user_id,date' })
+          );
+          console.log('[UserStore] ✅ Check-in synced to Supabase:', checkin.date);
+        } catch (syncErr) {
+          console.warn('[UserStore] ⚠️ Check-in Supabase sync failed:', syncErr);
+        }
+      }
+      
       // Milestone notifications: streaks
       try {
         const prefs = await getNotificationPreferences();
@@ -877,7 +959,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Log success in production
       const config = getProductionConfig();
       if (config.isProduction) {
-        logProductionMetric('data', 'checkin_added', { date: checkin.date });
+        logProductionMetric('data', 'checkin_added', { date: checkin.date, isRedo: existingIdx >= 0 });
       }
     } catch (error) {
       console.error('Error saving checkin:', error);
@@ -887,10 +969,35 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         logProductionMetric('error', 'checkin_save_failed', { error: String(error) });
       }
     }
-  }, [checkins, KEYS.CHECKINS]);
+  }, [checkins, KEYS.CHECKINS, uid, supabase]);
 
   const addPlan = useCallback(async (plan: DailyPlan) => {
     try {
+      // Validate plan structure before saving
+      if (!plan.workout || !plan.workout.blocks || !Array.isArray(plan.workout.blocks)) {
+        console.warn('[UserStore] ⚠️ Plan has invalid workout structure, fixing:', plan.date);
+        plan = {
+          ...plan,
+          workout: {
+            ...plan.workout,
+            focus: plan.workout?.focus || ['General'],
+            blocks: plan.workout?.blocks || [],
+          },
+        };
+      }
+      
+      if (!plan.nutrition || typeof plan.nutrition.total_kcal !== 'number') {
+        console.warn('[UserStore] ⚠️ Plan has invalid nutrition structure:', plan.date);
+      }
+      
+      // Log plan structure for debugging
+      console.log('[UserStore] Saving plan for date:', plan.date, {
+        hasWorkout: !!plan.workout,
+        workoutBlocksCount: plan.workout?.blocks?.length || 0,
+        hasNutrition: !!plan.nutrition,
+        hasMeals: plan.nutrition?.meals?.length || 0,
+      });
+      
       // Upsert by date to avoid duplicates when generation runs twice
       const idx = plans.findIndex(p => p.date === plan.date);
       let updatedPlans: DailyPlan[];
@@ -902,6 +1009,38 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       }
       setPlans(updatedPlans);
       await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(updatedPlans));
+      
+      // Immediately sync to Supabase for persistence across refreshes
+      if (uid && supabase) {
+        try {
+          const row = {
+            user_id: uid,
+            date: plan.date,
+            workout: plan.workout ?? null,
+            nutrition: plan.nutrition ?? null,
+            recovery: plan.recovery ?? null,
+            motivation: plan.motivation ?? null,
+            adherence: plan.adherence ?? null,
+            adjustments: plan.adjustments ?? [],
+            nutrition_adjustments: plan.nutritionAdjustments ?? [],
+            memory_adjustments: plan.memoryAdjustments ?? [],
+            is_from_base_plan: plan.isFromBasePlan ?? false,
+            is_ai_adjusted: plan.isAiAdjusted ?? false,
+            flags: plan.flags ?? [],
+            memory: plan.memorySnapshot ?? null,
+          };
+          
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('daily_plans')
+              .upsert(row as any, { onConflict: 'user_id,date' })
+          );
+          console.log('[UserStore] ✅ Daily plan synced to Supabase:', plan.date);
+        } catch (syncErr) {
+          console.warn('[UserStore] ⚠️ Daily plan Supabase sync failed (will retry on next sync):', syncErr);
+        }
+      }
+      
       // Milestone notifications: plan completed (adherence)
       try {
         const prefs = await getNotificationPreferences();
@@ -924,7 +1063,64 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         logProductionMetric('error', 'plan_save_failed', { error: String(error), date: plan.date });
       }
     }
-  }, [plans, KEYS.PLANS]);
+  }, [plans, KEYS.PLANS, uid, supabase]);
+
+  // Delete today's plan (used when re-doing check-in)
+  const deleteTodayPlan = useCallback(async () => {
+    const todayKey = new Date().toISOString().split('T')[0];
+    console.log('[UserStore] Deleting today\'s plan and check-in for date:', todayKey);
+    
+    try {
+      // Remove plan from local state
+      const updatedPlans = plans.filter(p => p.date !== todayKey);
+      setPlans(updatedPlans);
+      await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(updatedPlans));
+      
+      // Remove check-in from local state (filter out ALL entries for today)
+      const updatedCheckins = checkins.filter(c => c.date !== todayKey);
+      setCheckins(updatedCheckins);
+      await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(updatedCheckins));
+      
+      // Delete from Supabase
+      if (uid && supabase) {
+        try {
+          // Delete plan
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('daily_plans')
+              .delete()
+              .eq('user_id', uid)
+              .eq('date', todayKey)
+          );
+
+          // Delete check-in
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('checkins')
+              .delete()
+              .eq('user_id', uid)
+              .eq('date', todayKey)
+          );
+          
+          console.log('[UserStore] ✅ Today\'s plan and check-in deleted from Supabase');
+        } catch (delErr) {
+          console.warn('[UserStore] ⚠️ Failed to delete data from Supabase:', delErr);
+        }
+      }
+      
+      // Also clear today's completed meals/exercises
+      const updatedCompletions = { ...completionsByDate };
+      delete updatedCompletions[todayKey];
+      setCompletionsByDate(updatedCompletions);
+      await AsyncStorage.setItem(KEYS.COMPLETIONS, JSON.stringify(updatedCompletions));
+      
+      console.log('[UserStore] ✅ Today\'s data fully cleaned up');
+      return true;
+    } catch (error) {
+      console.error('[UserStore] ❌ Error deleting today\'s data:', error);
+      return false;
+    }
+  }, [plans, checkins, KEYS.PLANS, KEYS.CHECKINS, KEYS.COMPLETIONS, uid, supabase, completionsByDate]);
 
   const addBasePlan = useCallback(async (basePlan: WeeklyBasePlan) => {
     try {
@@ -1071,7 +1267,12 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           motivation: p.motivation ?? null,
           adherence: p.adherence ?? null,
           adjustments: p.adjustments ?? [],
+          nutrition_adjustments: p.nutritionAdjustments ?? [],
+          memory_adjustments: p.memoryAdjustments ?? [],
           is_from_base_plan: p.isFromBasePlan ?? false,
+          is_ai_adjusted: p.isAiAdjusted ?? false,
+          flags: p.flags ?? [],
+          memory: p.memorySnapshot ?? null,
         }));
 
         try {
@@ -1110,6 +1311,37 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       return { success: false, reason: 'exception' };
     }
   }, [uid, supabase, checkins, plans, getCurrentBasePlan]);
+
+  const updateWeeklyBasePlan = useCallback(async (updatedPlan: WeeklyBasePlan) => {
+    try {
+      const updatedBasePlans = basePlans.map(plan => 
+        plan.id === updatedPlan.id ? updatedPlan : plan
+      );
+      setBasePlans(updatedBasePlans);
+      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
+      
+      if (uid) {
+        try {
+          await retrySupabaseOperation(async () =>
+            await supabase
+              .from('weekly_base_plans')
+              .update({ days: updatedPlan.days as any })
+              .eq('id', updatedPlan.id)
+          );
+          // Update profile snapshot
+          await retrySupabaseOperation(async () =>
+            await supabase.from('profiles').update({ base_plan: updatedPlan as any }).eq('id', uid)
+          );
+        } catch (e) {
+          console.warn('[UserStore] Failed to sync base plan update', e);
+        }
+      }
+      return true;
+    } catch (error) {
+      console.error('Error updating base plan:', error);
+      return false;
+    }
+  }, [basePlans, KEYS.BASE_PLANS, uid, supabase]);
 
   const updateBasePlanDay = useCallback(async (dayKey: string, dayData: { workout: WorkoutPlan; nutrition: NutritionPlan; recovery: RecoveryPlan }) => {
     try {
@@ -1300,6 +1532,10 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     return completionsByDate[date]?.completedExercises ?? [];
   }, [completionsByDate]);
 
+  const getCompletedSupplementsForDate = useCallback((date: string) => {
+    return completionsByDate[date]?.completedSupplements ?? [];
+  }, [completionsByDate]);
+
   const persistCompletions = useCallback(async (next: Record<string, PlanCompletionDay>) => {
     setCompletionsByDate(next);
     try {
@@ -1364,13 +1600,22 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   }, [completionsByDate, persistCompletions, updatePlanAdherenceAndSync]);
 
   const toggleExerciseCompleted = useCallback(async (date: string, exerciseId: string) => {
-    const prev = completionsByDate[date] || { date, completedMeals: [], completedExercises: [] } as PlanCompletionDay;
+    const prev = completionsByDate[date] || { date, completedMeals: [], completedExercises: [], completedSupplements: [] } as PlanCompletionDay;
     const nextSet = new Set(prev.completedExercises);
     if (nextSet.has(exerciseId)) nextSet.delete(exerciseId); else nextSet.add(exerciseId);
     const next = { ...completionsByDate, [date]: { ...prev, completedExercises: Array.from(nextSet) } };
     await persistCompletions(next);
     updatePlanAdherenceAndSync(date);
   }, [completionsByDate, persistCompletions, updatePlanAdherenceAndSync]);
+
+  const toggleSupplementCompleted = useCallback(async (date: string, supplementName: string) => {
+    const prev = completionsByDate[date] || { date, completedMeals: [], completedExercises: [], completedSupplements: [] } as PlanCompletionDay;
+    const nextSet = new Set(prev.completedSupplements || []);
+    if (nextSet.has(supplementName)) nextSet.delete(supplementName); else nextSet.add(supplementName);
+    const next = { ...completionsByDate, [date]: { ...prev, completedSupplements: Array.from(nextSet) } };
+    await persistCompletions(next);
+    // Note: Adherence currently only tracks workout/nutrition, could add supplements later
+  }, [completionsByDate, persistCompletions]);
   const getTodayFoodLog = useCallback(() => {
     const today = new Date().toISOString().split('T')[0];
     return foodLogs.find(log => log.date === today);
@@ -1624,8 +1869,10 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     updateUser,
     addCheckin,
     addPlan,
+    deleteTodayPlan,
     addBasePlan,
     updateBasePlanDay,
+    updateWeeklyBasePlan,
     getCurrentBasePlan,
     getRecentCheckins,
     getTodayCheckin,
@@ -1642,14 +1889,16 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     getWeightProgress,
     getCompletedMealsForDate,
     getCompletedExercisesForDate,
+    getCompletedSupplementsForDate,
     toggleMealCompleted,
     toggleExerciseCompleted,
+    toggleSupplementCompleted,
     clearAllData,
     syncLocalToBackend,
     loadUserData,
     processFoodOpsQueue,
     hydrateFromDatabase,
-  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted, clearAllData, syncLocalToBackend, loadUserData, processFoodOpsQueue, hydrateFromDatabase]);
+  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, deleteTodayPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, clearAllData, syncLocalToBackend, loadUserData, processFoodOpsQueue, hydrateFromDatabase]);
 
   return value;
 });

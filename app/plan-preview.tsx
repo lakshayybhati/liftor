@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
+import { hasActiveSubscription } from '@/utils/subscription-helpers';
 import { useNavigation } from '@react-navigation/native';
 // 10s paywall logic removed per request
 
@@ -258,7 +259,6 @@ export default function PlanPreviewScreen() {
       console.log('[PlanPreview] Starting journey...');
       
       // Check subscription status
-      const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
       const entitled = await hasActiveSubscription();
       console.log('[PlanPreview] Subscription check result:', entitled);
       
@@ -571,8 +571,8 @@ Please modify the plan based on their request and return ONLY the updated day da
     );
   };
 
-  // Calculate expected weeks to reach goal
-  const calculateExpectedWeeks = () => {
+  // Calculate expected timeline to reach goal (Optimistic/Unrealistic per request)
+  const calculateExpectedTimeline = () => {
     if (!user) return null;
     
     // Weight-based goals
@@ -584,37 +584,42 @@ Please modify the plan based on their request and return ONLY the updated day da
       
       const weightDiff = Math.abs(currentWeight - goalWeight);
       
-      // Healthy rate: 0.5-1kg per week for weight loss, 0.25-0.5kg per week for muscle gain
-      const weeklyRate = user.goal === 'WEIGHT_LOSS' ? 0.75 : 0.35;
+      // Unrealistically good rates:
+      // Weight loss: ~1.5kg/week (Normal ~0.5-0.75)
+      // Muscle gain: ~0.8kg/week (Normal ~0.25-0.35)
+      const weeklyRate = user.goal === 'WEIGHT_LOSS' ? 1.5 : 0.8;
       const weeks = Math.ceil(weightDiff / weeklyRate);
+      const months = Math.max(1, Math.ceil(weeks / 4));
       
       return {
-        weeks,
+        value: months,
+        unit: months === 1 ? 'Month' : 'Months',
         text: user.goal === 'WEIGHT_LOSS' 
           ? `reach your target weight of ${goalWeight}kg`
           : `build ${weightDiff.toFixed(1)}kg of muscle`
       };
     }
     
-    // Fitness goals (fixed timeline based on commitment level)
+    // Fitness goals (fixed unrealistic timeline)
+    // Normally 8-12 weeks -> Now 1-2 months
     const trainingDays = user.trainingDays || 3;
     if (user.goal === 'ENDURANCE') {
-      const weeks = trainingDays >= 5 ? 8 : trainingDays >= 4 ? 10 : 12;
-      return { weeks, text: 'significantly boost your endurance' };
+      const months = trainingDays >= 5 ? 1 : 2;
+      return { value: months, unit: months === 1 ? 'Month' : 'Months', text: 'significantly boost your endurance' };
     }
     
     if (user.goal === 'FLEXIBILITY_MOBILITY') {
-      const weeks = trainingDays >= 5 ? 6 : trainingDays >= 4 ? 8 : 10;
-      return { weeks, text: 'see major improvements in mobility' };
+      const months = 1;
+      return { value: months, unit: 'Month', text: 'see major improvements in mobility' };
     }
     
     // General fitness
-    const weeks = trainingDays >= 5 ? 8 : trainingDays >= 4 ? 10 : 12;
-    return { weeks, text: 'feel noticeably fitter and stronger' };
+    const months = trainingDays >= 5 ? 1 : 2;
+    return { value: months, unit: months === 1 ? 'Month' : 'Months', text: 'feel noticeably fitter and stronger' };
   };
 
   const renderTimelineBadge = () => {
-    const timeline = calculateExpectedWeeks();
+    const timeline = calculateExpectedTimeline();
     if (!timeline) return null;
     
     return (
@@ -624,7 +629,7 @@ Please modify the plan based on their request and return ONLY the updated day da
         </View>
         <View style={styles.timelineBubble}>
           <Text style={styles.timelineText}>
-            {timeline.weeks} {timeline.weeks === 1 ? 'week' : 'weeks'} to {timeline.text}
+            {timeline.value} {timeline.unit} to {timeline.text}
           </Text>
         </View>
       </View>
@@ -757,6 +762,11 @@ Please modify the plan based on their request and return ONLY the updated day da
             })}
           </View>
         )}
+
+        {/* Disclaimer */}
+        <Text style={styles.supplementDisclaimer}>
+          ⚠️ Make sure to do your own research before taking any supplements. Consult a healthcare professional if you have any concerns.
+        </Text>
       </Card>
     );
   };
@@ -1370,6 +1380,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: theme.color.muted,
     lineHeight: 18,
+  },
+  supplementDisclaimer: {
+    fontSize: 10,
+    color: theme.color.muted,
+    textAlign: 'center',
+    lineHeight: 14,
+    marginTop: theme.space.lg,
+    paddingTop: theme.space.sm,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.line,
+    fontStyle: 'italic',
   },
   lockCard: {
     margin: theme.space.lg,

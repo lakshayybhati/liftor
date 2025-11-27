@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  ScrollView, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  SafeAreaView,
+  TouchableOpacity,
   TextInput,
   useWindowDimensions,
   Animated,
@@ -23,15 +23,15 @@ import { Chip } from '@/components/ui/Chip';
 import Constants from 'expo-constants';
 
 import { useUserStore } from '@/hooks/useUserStore';
-import { 
-  GOALS, 
-  EQUIPMENT_OPTIONS, 
+import {
+  GOALS,
+  EQUIPMENT_OPTIONS,
   DIETARY_PREFS,
   ACTIVITY_LEVELS,
   COMMON_SUPPLEMENTS,
   PERSONAL_GOALS,
   PERCEIVED_LACKS,
-  PREFERRED_EXERCISES,
+  TRAINING_STYLE_PREFERENCES,
   AVOID_EXERCISES,
   TRAINING_TIMES,
   SESSION_LENGTHS,
@@ -123,7 +123,7 @@ export default function OnboardingScreen() {
   }
 
   const { signOut } = auth;
-  
+
   // Form state
   const [name] = useState('');
   const [goal, setGoal] = useState<Goal>('GENERAL_FITNESS');
@@ -131,7 +131,7 @@ export default function OnboardingScreen() {
   const [dietaryPrefs, setDietaryPrefs] = useState<DietaryPref[]>([]);
   const [dietaryNotes, setDietaryNotes] = useState('');
   const [trainingDays, setTrainingDays] = useState(3);
-  
+
   // Body stats
   const [age, setAge] = useState('');
   const [sex, setSex] = useState<Sex>('Male');
@@ -141,15 +141,15 @@ export default function OnboardingScreen() {
   const [dailyCalorieTarget, setDailyCalorieTarget] = useState('');
   const [calorieSource, setCalorieSource] = useState<'auto' | 'manual'>('auto');
   const [showCalorieEdit, setShowCalorieEdit] = useState(false);
-  
+
   // Supplementation & personal needs
   const [supplements, setSupplements] = useState<string[]>([]);
   const [supplementNotes, setSupplementNotes] = useState('');
   const [personalGoals, setPersonalGoals] = useState<string[]>([]);
   const [perceivedLacks, setPerceivedLacks] = useState<string[]>([]);
-  
+
   // New specifics state
-  const [preferredExercises, setPreferredExercises] = useState<string[]>([]);
+  const [trainingStylePreferences, setTrainingStylePreferences] = useState<string[]>([]);
   const [avoidExercises, setAvoidExercises] = useState<string[]>([]);
   const [preferredTrainingTime, setPreferredTrainingTime] = useState('');
   const [sessionLength, setSessionLength] = useState(45);
@@ -165,7 +165,7 @@ export default function OnboardingScreen() {
   const [workoutIntensity, setWorkoutIntensity] = useState<WorkoutIntensity>('Optimal');
   const [trainingLevel, setTrainingLevel] = useState<TrainingLevel>('Beginner');
   const [includeReasoning, setIncludeReasoning] = useState(true);
-  
+
   // Removed VMN transcription per requirements
 
   // Animate step change
@@ -194,19 +194,19 @@ export default function OnboardingScreen() {
         sex
       );
       const tdee = calculateTDEE(bmr, activityLevel);
-      
+
       // Adjust based on goal
       let adjusted = tdee;
       if (goal === 'WEIGHT_LOSS') adjusted = Math.round(tdee * 0.85);
       else if (goal === 'MUSCLE_GAIN') adjusted = Math.round(tdee * 1.15);
-      
+
       setDailyCalorieTarget(adjusted.toString());
     }
   }, [age, weight, height, sex, activityLevel, goal, calorieSource]);
 
   const handleEquipmentToggle = (item: Equipment) => {
-    setEquipment(prev => 
-      prev.includes(item) 
+    setEquipment(prev =>
+      prev.includes(item)
         ? prev.filter(e => e !== item)
         : [...prev, item]
     );
@@ -241,11 +241,11 @@ export default function OnboardingScreen() {
     );
   };
 
-  const handlePreferredExerciseToggle = (exercise: string) => {
-    setPreferredExercises(prev =>
-      prev.includes(exercise)
-        ? prev.filter(e => e !== exercise)
-        : [...prev, exercise]
+  const handleTrainingStyleToggle = (style: string) => {
+    setTrainingStylePreferences(prev =>
+      prev.includes(style)
+        ? prev.filter(s => s !== style)
+        : [...prev, style]
     );
   };
 
@@ -260,52 +260,52 @@ export default function OnboardingScreen() {
   // Validation logic for required fields
   const getRequiredFieldsForStep = (stepIndex: number): { isValid: boolean; missingFields: string[] } => {
     const missingFields: string[] = [];
-    
+
     switch (stepIndex) {
       case 0: // Goal selection
         if (!goal) missingFields.push('Fitness Goal');
         break;
-        
+
       case 1: // Equipment
         if (equipment.length === 0) missingFields.push('Equipment');
         break;
-        
+
       case 2: // Dietary preferences (required)
         if (dietaryPrefs.length === 0) missingFields.push('Dietary Preference');
         break;
-        
+
       case 3: // Body stats - REQUIRED FIELDS
         if (!age || !age.trim()) missingFields.push('Age');
         if (!weight || !weight.trim()) missingFields.push('Weight');
         if (!height || !height.trim()) missingFields.push('Height');
         if (!sex) missingFields.push('Gender');
         break;
-        
+
       case 4: // Training days
         if (!trainingDays || trainingDays < 1) missingFields.push('Training Days');
         break;
-        
+
       case 5: // Supplements & personal needs
         if (personalGoals.length === 0) missingFields.push('Personal Goals');
         break;
-        
+
       case 6: // Specifics
-        if (preferredExercises.length === 0) missingFields.push('Preferred Exercises');
+        if (trainingStylePreferences.length === 0) missingFields.push('Training Style Preferences');
         if (avoidExercises.length === 0) missingFields.push('Exercises to Avoid');
         if (!preferredTrainingTime) missingFields.push('Preferred Training Time');
         if (!sessionLength || sessionLength <= 0) missingFields.push('Session Length');
         if (!Number.isFinite(travelDays)) missingFields.push('Travel Days');
         if (!Number.isFinite(stepTarget)) missingFields.push('Step Target');
-        if (!fastingWindow) missingFields.push('Fasting Window');
+
         if (!mealCount || mealCount < 1) missingFields.push('Meals Per Day');
         if (!trainingLevel) missingFields.push('Training Level');
         if (!goalWeight || !goalWeight.trim()) missingFields.push('Goal Weight');
         break;
-        
+
       default:
         break;
     }
-    
+
     return {
       isValid: missingFields.length === 0,
       missingFields
@@ -315,27 +315,27 @@ export default function OnboardingScreen() {
   // Check if current step is valid
   const currentStepValidation = getRequiredFieldsForStep(step);
   const canProceed = currentStepValidation.isValid;
-  
+
   // Generic guidance instead of listing all missing fields
   const stackedRequiredLabel = !canProceed ? 'Fill\nall\nfields' : '';
 
   const handleComplete = async () => {
     // Prevent multiple simultaneous saves
     if (isSaving) return;
-    
+
     setIsSaving(true);
     setSaveError(null);
-    
+
     const mappedDietaryPrefs = dietaryPrefs.length > 0 ? dietaryPrefs : ['Non-veg' as DietaryPref];
 
     // Get user's name from session metadata (set during signup) or email
     const sessionUserName = auth?.session?.user?.user_metadata?.name as string | undefined;
     const userEmail = auth?.session?.user?.email || '';
     const emailLocalPart = userEmail.split('@')[0] || '';
-    
+
     // Fallback chain: form name → session name → email local-part → 'User'
     const resolvedName = (name?.trim() || sessionUserName?.trim() || emailLocalPart || 'User');
-    
+
     console.log('[Onboarding] Name resolution:', {
       formName: name?.trim() || null,
       sessionName: sessionUserName?.trim() || null,
@@ -363,7 +363,7 @@ export default function OnboardingScreen() {
       supplementNotes: supplementNotes || undefined,
       personalGoals: personalGoals.length > 0 ? personalGoals : undefined,
       perceivedLacks: perceivedLacks.length > 0 ? perceivedLacks : undefined,
-      preferredExercises: preferredExercises.length > 0 ? preferredExercises : undefined,
+      trainingStylePreferences: trainingStylePreferences.length > 0 ? trainingStylePreferences : undefined,
       avoidExercises: avoidExercises.length > 0 ? avoidExercises : undefined,
       preferredTrainingTime: preferredTrainingTime || undefined,
       sessionLength: sessionLength || undefined,
@@ -413,7 +413,7 @@ export default function OnboardingScreen() {
       supplement_notes: supplementNotes || null,
       personal_goals: personalGoals,
       perceived_lacks: perceivedLacks,
-      preferred_exercises: preferredExercises,
+      training_style_preferences: trainingStylePreferences,
       avoid_exercises: avoidExercises,
       preferred_training_time: preferredTrainingTime || null,
       session_length: sessionLength,
@@ -432,15 +432,15 @@ export default function OnboardingScreen() {
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           console.log(`[Onboarding] Save attempt ${attempt}/${maxRetries}`);
-          
+
           // Save to database first (most critical)
           await updateProfile(profileData);
           console.log('[Onboarding] ✅ Profile synced to Supabase');
-          
+
           // Force refetch to ensure cache is up to date
           await refetchProfile();
           console.log('[Onboarding] ✅ Profile cache refreshed');
-          
+
           // Update local store (this is less critical, can fail without blocking)
           try {
             await updateUser(userData);
@@ -448,12 +448,12 @@ export default function OnboardingScreen() {
           } catch (localError) {
             console.warn('[Onboarding] Local store update failed (non-critical):', localError);
           }
-          
+
           return true; // Success!
-          
+
         } catch (error: any) {
           console.error(`[Onboarding] Save attempt ${attempt} failed:`, error);
-          
+
           // If this isn't the last attempt, wait before retrying
           if (attempt < maxRetries) {
             const delay = attempt * 1000; // Progressive delay: 1s, 2s, 3s
@@ -473,7 +473,7 @@ export default function OnboardingScreen() {
 
     // Attempt to save with retries
     const success = await saveWithRetry(3);
-    
+
     if (success) {
       // Only proceed if save was successful
       console.log('[Onboarding] ✅ Onboarding complete, proceeding to plan generation');
@@ -751,50 +751,50 @@ export default function OnboardingScreen() {
 
           {/* Always show the calorie card; keep the input visible even if empty */}
           <View style={styles.calorieResult}>
-              <Text style={styles.calorieLabel}>Your Daily Target</Text>
-              <TouchableOpacity
-                style={styles.calorieDisplay}
-                onPress={() => setShowCalorieEdit(true)}
-              >
-                {showCalorieEdit ? (
-                  <TextInput
-                    style={styles.calorieEditInput}
-                    value={dailyCalorieTarget}
-                    onChangeText={setDailyCalorieTarget}
-                    keyboardType="numeric"
-                    onBlur={async () => {
-                      const baseline = (() => {
-                        const a = parseFloat(age || '');
-                        const w = parseFloat(weight || '');
-                        const h = parseFloat(height || '');
-                        if (!isFinite(a) || !isFinite(w) || !isFinite(h)) return null;
-                        const bmr = calculateBMR(w, h, a, sex);
-                        let reco = calculateTDEE(bmr, activityLevel);
-                        if (goal === 'WEIGHT_LOSS') reco = Math.round(reco * 0.85);
-                        else if (goal === 'MUSCLE_GAIN') reco = Math.round(reco * 1.15);
-                        return reco;
-                      })();
+            <Text style={styles.calorieLabel}>Your Daily Target</Text>
+            <TouchableOpacity
+              style={styles.calorieDisplay}
+              onPress={() => setShowCalorieEdit(true)}
+            >
+              {showCalorieEdit ? (
+                <TextInput
+                  style={styles.calorieEditInput}
+                  value={dailyCalorieTarget}
+                  onChangeText={setDailyCalorieTarget}
+                  keyboardType="numeric"
+                  onBlur={async () => {
+                    const baseline = (() => {
+                      const a = parseFloat(age || '');
+                      const w = parseFloat(weight || '');
+                      const h = parseFloat(height || '');
+                      if (!isFinite(a) || !isFinite(w) || !isFinite(h)) return null;
+                      const bmr = calculateBMR(w, h, a, sex);
+                      let reco = calculateTDEE(bmr, activityLevel);
+                      if (goal === 'WEIGHT_LOSS') reco = Math.round(reco * 0.85);
+                      else if (goal === 'MUSCLE_GAIN') reco = Math.round(reco * 1.15);
+                      return reco;
+                    })();
 
-                      if (dailyCalorieTarget && dailyCalorieTarget.trim()) {
-                        const v = await confirmCaloriesWithBaseline(dailyCalorieTarget, baseline, 0.25, 0.5);
-                        if (v !== null) {
-                          setDailyCalorieTarget(String(Math.round(v)));
-                          setCalorieSource('manual');
-                        }
-                      } else if (baseline) {
-                        setDailyCalorieTarget(String(baseline));
-                        setCalorieSource('auto');
+                    if (dailyCalorieTarget && dailyCalorieTarget.trim()) {
+                      const v = await confirmCaloriesWithBaseline(dailyCalorieTarget, baseline, 0.25, 0.5);
+                      if (v !== null) {
+                        setDailyCalorieTarget(String(Math.round(v)));
+                        setCalorieSource('manual');
                       }
-                      setShowCalorieEdit(false);
-                    }}
-                    autoFocus
-                  />
-                ) : (
-                  <Text style={styles.calorieValue}>{dailyCalorieTarget ? `${dailyCalorieTarget} kcal` : 'Tap to set'}</Text>
-                )}
-              </TouchableOpacity>
-              <Text style={styles.calorieHint}>Tap to adjust if needed</Text>
-            </View>
+                    } else if (baseline) {
+                      setDailyCalorieTarget(String(baseline));
+                      setCalorieSource('auto');
+                    }
+                    setShowCalorieEdit(false);
+                  }}
+                  autoFocus
+                />
+              ) : (
+                <Text style={styles.calorieValue}>{dailyCalorieTarget ? `${dailyCalorieTarget} kcal` : 'Tap to set'}</Text>
+              )}
+            </TouchableOpacity>
+            <Text style={styles.calorieHint}>Tap to adjust if needed</Text>
+          </View>
         </View>
       ),
     },
@@ -853,7 +853,7 @@ export default function OnboardingScreen() {
               />
             ))}
           </View>
-          
+
           <TextInput
             style={[styles.textInput, { marginTop: theme.space.sm }]}
             value={supplementNotes}
@@ -910,20 +910,34 @@ export default function OnboardingScreen() {
       content: (
         <View>
           <LabelWithInfo
-            label="Exercises you prefer"
+            label="Training Style / Vibe"
             required
-            infoText="We’ll prioritize exercises you enjoy to boost consistency."
+            infoText="Select the training styles that resonate with you."
             labelStyle={styles.sectionLabel}
           />
-          <View style={styles.chipsContainer}>
-            {PREFERRED_EXERCISES.map((exercise) => (
-              <Chip
-                key={exercise}
-                label={exercise}
-                selected={preferredExercises.includes(exercise)}
-                onPress={() => handlePreferredExerciseToggle(exercise)}
-                color={theme.color.accent.green}
-              />
+          <View style={styles.optionsContainer}>
+            {TRAINING_STYLE_PREFERENCES.map((style) => (
+              <TouchableOpacity
+                key={style.id}
+                style={[
+                  styles.goalOption,
+                  trainingStylePreferences.includes(style.id) && styles.selectedGoal,
+                ]}
+                onPress={() => handleTrainingStyleToggle(style.id)}
+              >
+                <Text style={[
+                  styles.goalTitle,
+                  trainingStylePreferences.includes(style.id) && styles.selectedGoalText,
+                ]}>
+                  {style.label}
+                </Text>
+                <Text style={[
+                  styles.goalDescription,
+                  trainingStylePreferences.includes(style.id) && styles.selectedGoalText,
+                ]}>
+                  {style.description}
+                </Text>
+              </TouchableOpacity>
             ))}
           </View>
 
@@ -1028,9 +1042,9 @@ export default function OnboardingScreen() {
                 infoText="Daily steps support recovery and calorie balance."
               />
               <TextInput
-              style={styles.numberInput}
-              value={stepTargetInput}
-              onChangeText={setStepTargetInput}
+                style={styles.numberInput}
+                value={stepTargetInput}
+                onChangeText={setStepTargetInput}
                 placeholder="8000"
                 placeholderTextColor={theme.color.muted}
                 keyboardType="numeric"
@@ -1087,25 +1101,7 @@ export default function OnboardingScreen() {
             </View>
           </View>
 
-          <View style={{ marginTop: theme.space.lg }}>
-            <LabelWithInfo
-              label="Fasting window"
-              required
-              infoText="If you fast, we’ll time meals and training accordingly."
-              labelStyle={styles.sectionLabel}
-            />
-          </View>
-          <View style={styles.chipsContainer}>
-            {FASTING_WINDOWS.map((window) => (
-              <Chip
-                key={window}
-                label={window}
-                selected={fastingWindow === window}
-                onPress={() => setFastingWindow(window)}
-                color={theme.color.accent.blue}
-              />
-            ))}
-          </View>
+
 
           <LabelWithInfo
             label="Meals per day"
@@ -1157,7 +1153,7 @@ export default function OnboardingScreen() {
             />
             <View style={styles.sliderContainer}>
               <Text style={styles.sliderValue}>
-                {intensityLevel}/10 
+                {intensityLevel}/10
                 {intensityLevel <= 3 ? ' (Light)' : intensityLevel <= 6 ? ' (Moderate)' : ' (High Intensity)'}
               </Text>
               <Slider
@@ -1240,14 +1236,14 @@ export default function OnboardingScreen() {
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
       />
-      
+
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.topBar}>
           <TouchableOpacity onPress={handleSignOutPress} accessibilityLabel="Sign out" accessibilityRole="button" style={styles.powerButton}>
             <Power color={theme.color.ink} size={20} />
           </TouchableOpacity>
         </View>
-        <ScrollView 
+        <ScrollView
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           bounces={true}
@@ -1261,15 +1257,15 @@ export default function OnboardingScreen() {
             <Text style={styles.subtitle}>Your AI-powered fitness companion</Text>
           </View>
 
-          <Animated.View style={[styles.fadeWrapper, { opacity: fadeAnim }]}> 
+          <Animated.View style={[styles.fadeWrapper, { opacity: fadeAnim }]}>
             <Card style={styles.stepCard}>
               <View style={styles.progressContainer}>
                 <View style={styles.progressBar}>
-                  <View 
+                  <View
                     style={[
-                      styles.progressFill, 
+                      styles.progressFill,
                       { width: `${((step + 1) / steps.length) * 100}%` }
-                    ]} 
+                    ]}
                   />
                 </View>
                 <Text style={styles.stepText}>
@@ -1321,10 +1317,10 @@ export default function OnboardingScreen() {
                     isSaving
                       ? "Saving..."
                       : !canProceed && currentStepValidation.missingFields.length > 0
-                      ? stackedRequiredLabel
-                      : step === steps.length - 1 
-                        ? "Build My Journey" 
-                        : "Next"
+                        ? stackedRequiredLabel
+                        : step === steps.length - 1
+                          ? "Build My Journey"
+                          : "Next"
                   }
                   onPress={step === steps.length - 1 ? handleComplete : () => setStep(step + 1)}
                   disabled={!canProceed || isSaving}

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { User } from '@/types/user';
 
 // Exercise schema
 export const ExerciseSchema = z.object({
@@ -145,7 +146,7 @@ export function validateDailyPlan(data: unknown): {
 /**
  * Attempts to fix common validation errors in plan data
  */
-export function repairPlanData(data: any, targetCalories: number, targetProtein: number): any {
+export function repairPlanData(data: any, targetCalories: number, targetProtein: number, user?: User): any {
   if (!data || typeof data !== 'object') return data;
 
   // Fix nutrition values
@@ -210,6 +211,14 @@ export function repairPlanData(data: any, targetCalories: number, targetProtein:
     data.recovery.sleep = Array.isArray(data.recovery.sleep) 
       ? data.recovery.sleep 
       : ['7-8 hours recommended'];
+
+    // Ensure supplementCard structure exists (but let AI decide the contents)
+    if (!data.recovery.supplementCard) {
+      data.recovery.supplementCard = {
+        current: [],
+        addOns: []
+      };
+    }
   }
 
   return data;

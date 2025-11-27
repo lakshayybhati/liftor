@@ -66,7 +66,7 @@ export function getProductionConfig(): ProductionConfig {
   // Priority: DeepSeek (EXPO_PUBLIC_AI_API_KEY) → Gemini (EXPO_PUBLIC_GEMINI_API_KEY) → Rork
   const aiApiKey = extra.EXPO_PUBLIC_AI_API_KEY || '';
   const geminiApiKey = extra.EXPO_PUBLIC_GEMINI_API_KEY || '';
-  const aiTimeoutMs = Number(extra.EXPO_PUBLIC_AI_TIMEOUT_MS) || 120000;
+  const aiTimeoutMs = Number(extra.EXPO_PUBLIC_AI_TIMEOUT_MS) || 180000;
   
   const aiProvider = extra.EXPO_PUBLIC_AI_PROVIDER || 
                     (aiApiKey ? 'deepseek' : geminiApiKey ? 'gemini' : 'rork');

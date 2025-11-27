@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet, ViewStyle } from 'react-native';
+import { View, StyleSheet, ViewStyle, StyleProp } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { theme } from '@/constants/colors';
 
@@ -7,7 +7,7 @@ interface CardProps {
   children: React.ReactNode;
   gradient?: boolean;
   gradientColors?: [string, string, ...string[]];
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 }
 
 export function Card({ children, gradient = false, gradientColors, style }: CardProps) {

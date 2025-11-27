@@ -24,7 +24,7 @@ export interface Profile {
   supplement_notes: string | null;
   personal_goals: string[];
   perceived_lacks: string[];
-  preferred_exercises: string[];
+  training_style_preferences: string[];
   avoid_exercises: string[];
   preferred_training_time: string | null;
   session_length: number | null;
@@ -72,7 +72,14 @@ export function useProfile() {
         .eq('id', session.user.id)
         .maybeSingle();
       if (error) throw error;
-      return data as Profile;
+      
+      // Map legacy DB column to new field
+      const profile = data as any;
+      if (profile) {
+        profile.training_style_preferences = profile.preferred_exercises;
+        // keep original for safety or delete if purely using new name
+      }
+      return profile as Profile;
     },
     staleTime: 0,
     gcTime: 0,
@@ -81,14 +88,27 @@ export function useProfile() {
   const updateProfileMutation = useMutation({
     mutationFn: async (updates: Partial<Profile>) => {
       if (!session?.user?.id) throw new Error('No user session');
-      const payload = { ...updates, id: session.user.id } as Partial<Profile> & { id: string };
+      
+      const payload: any = { ...updates, id: session.user.id };
+      // Map new field to legacy DB column
+      if (payload.training_style_preferences !== undefined) {
+        payload.preferred_exercises = payload.training_style_preferences;
+        delete payload.training_style_preferences;
+      }
+
       const { data, error } = await supabase
         .from('profiles')
         .upsert(payload, { onConflict: 'id' })
         .select('*')
         .maybeSingle();
       if (error) throw error;
-      return data as Profile;
+      
+      // Map result back
+      const profile = data as any;
+      if (profile) {
+        profile.training_style_preferences = profile.preferred_exercises;
+      }
+      return profile as Profile;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['profile', session?.user?.id] });

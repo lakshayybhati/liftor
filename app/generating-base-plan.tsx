@@ -1,49 +1,100 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, Platform, BackHandler } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, Platform, BackHandler, ActivityIndicator, Dimensions, TouchableOpacity } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
 import { theme } from '@/constants/colors';
-import { Dumbbell, Apple, Heart, Calendar } from 'lucide-react-native';
-import { generateWeeklyBasePlan } from '@/services/plan-generation';
+import { Dumbbell, Apple, Heart, Calendar, Check, Lightbulb, Brain, Sparkles, RefreshCw } from 'lucide-react-native';
+import { generateWeeklyBasePlan, BasePlanGenerationError } from '@/services/plan-generation';
 import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
 import Purchases from 'react-native-purchases';
 import Constants from 'expo-constants';
+import { BasePlanSkeleton } from '@/components/BasePlanSkeleton';
 
-const LOADING_MESSAGES = [
-  "📚 Gathering research and references tailored to your goals…",
-  "🔎 Reviewing your profile and preferences to narrow options…",
-  "🧭 Selecting evidence‑based training, nutrition, and recovery strategies…",
-  "🛠️ Custom‑fitting your weekly structure and targets…",
-  "✅ Finalizing your foundational base plan…",
-  "🧭 this might take a moment please don't leave this screen"
+const GENERATION_PHASES = [
+  { id: 0, text: "Analyzing your profile & goals", icon: Brain },
+  { id: 1, text: "Structuring weekly workout splits", icon: Dumbbell },
+  { id: 2, text: "Verifying plan accuracy", icon: Apple },
+  { id: 3, text: "Finalizing your custom plan", icon: Sparkles },
+];
+
+const HEALTH_TIPS = [
+  "Consistency beats intensity. It's about showing up every day.",
+  "Muscle tissue burns more calories at rest than fat tissue does.",
+  "Sleep is when your muscles actually repair and grow stronger.",
+  "Drinking water before meals can help manage appetite.",
+  "Protein is essential for recovery, not just for bodybuilders.",
+  "Active recovery days help reduce soreness and improve mobility."
 ];
 
 const SLOW_PROMPTS = [
-  'Your data’s one of a kind we’re tailoring this plan just right',
-  'This one’s special. Give us a moment to fine-tune everything',
-  'Your plan’s being crafted with extra care. give us a moment',
-  'this isn’t just any plan… it’s yours. Hold tight',
-  'We’re refining every detail to make this match you perfectly',
-  'Unique input calls for a custom touch just a few seconds more',
+  "Your data is one of a kind – we're tailoring this plan just right",
+  "This one is special. Give us a moment to fine-tune everything",
+  "Your plan is being crafted with extra care. Give us a moment",
+  "This isn't just any plan… it's yours. Hold tight",
+  "We're refining every detail to make this match you perfectly",
+  "Unique input calls for a custom touch – just a few seconds more",
 ];
 
 export default function GeneratingBasePlanScreen() {
   const { user, addBasePlan } = useUserStore();
-  const [messageIndex, setMessageIndex] = useState(0);
-  const [, setIsGenerating] = useState(true);
+  const [currentPhase, setCurrentPhase] = useState(0);
+  const [currentTipIndex, setCurrentTipIndex] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [lastRetryTime, setLastRetryTime] = useState<number | null>(null);
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
+  const tipFadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
   const navigation = useNavigation();
-  const [showFeaturePreview, setShowFeaturePreview] = useState(false);
-  const featureFade = useMemo(() => new Animated.Value(0), []);
-  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [navLocked, setNavLocked] = useState(true);
   const navLockedRef = useRef(true);
   const unlockNavigation = () => { navLockedRef.current = false; setNavLocked(false); };
+
+  // Minimum time between retries (3 minutes)
+  const MIN_RETRY_INTERVAL_MS = 3 * 60 * 1000;
+
+  const canRetry = useCallback(() => {
+    if (!lastRetryTime) return true;
+    const elapsed = Date.now() - lastRetryTime;
+    return elapsed >= MIN_RETRY_INTERVAL_MS;
+  }, [lastRetryTime]);
+
+  const getRetryWaitTime = useCallback(() => {
+    if (!lastRetryTime) return 0;
+    const elapsed = Date.now() - lastRetryTime;
+    const remaining = MIN_RETRY_INTERVAL_MS - elapsed;
+    return Math.max(0, Math.ceil(remaining / 1000));
+  }, [lastRetryTime]);
+
+  const handleRetry = useCallback(() => {
+    if (!canRetry()) {
+      const waitSeconds = getRetryWaitTime();
+      const minutes = Math.floor(waitSeconds / 60);
+      const seconds = waitSeconds % 60;
+      Alert.alert(
+        'Please Wait',
+        `To ensure the best experience, please wait ${minutes > 0 ? `${minutes} minute${minutes > 1 ? 's' : ''} and ` : ''}${seconds} second${seconds !== 1 ? 's' : ''} before trying again.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
+    // Reset state and retry
+    setHasError(false);
+    setIsGenerating(true);
+    setCurrentPhase(0);
+    setRetryCount(prev => prev + 1);
+    setLastRetryTime(Date.now());
+    startedRef.current = false;
+    
+    // Trigger generation again
+    generatePlan();
+  }, [canRetry, getRetryWaitTime]);
 
   const generatePlan = useCallback(async () => {
     try {
@@ -54,6 +105,7 @@ export default function GeneratingBasePlanScreen() {
       console.log('[GeneratePlan] Starting plan generation...');
       console.log('[GeneratePlan] Environment:', isDev ? 'development' : 'production');
       console.log('[GeneratePlan] Config valid:', config.isValid);
+      console.log('[GeneratePlan] Retry count:', retryCount);
       
       // Check for critical missing configuration
       if (!config.isValid && !isDev) {
@@ -63,7 +115,7 @@ export default function GeneratingBasePlanScreen() {
         if (config.errors.some(e => e.includes('AI'))) {
           Alert.alert(
             'Service Configuration',
-            'AI service is not fully configured. Using basic plan generation.',
+            'AI service is not fully configured. Please try again later.',
             [{ text: 'OK' }]
           );
         }
@@ -88,8 +140,11 @@ export default function GeneratingBasePlanScreen() {
           Alert.alert(
             'Network Issue',
             'Unable to reach AI services. Please check your internet connection.',
-            [{ text: 'Continue Anyway', onPress: () => {} }]
+            [{ text: 'OK' }]
           );
+          setHasError(true);
+          setIsGenerating(false);
+          return;
         }
       }
       
@@ -100,24 +155,31 @@ export default function GeneratingBasePlanScreen() {
         throw new Error('No user data available');
       }
 
-      // Use the new AI service for plan generation
+      // Use the new AI service for plan generation (two-stage pipeline)
       const startTime = Date.now();
+      
       // Show a friendly message if generation exceeds 45 seconds
-      const slowTimer = setTimeout(() => {
+      slowTimerRef.current = setTimeout(() => {
         const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
         Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
       }, 45000);
 
       const basePlan = await generateWeeklyBasePlan(user);
+      
+      // When complete, ensure we show the final phase briefly
+      setCurrentPhase(3);
+      
       const generationTime = Date.now() - startTime;
-      clearTimeout(slowTimer);
-      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
-      setShowFeaturePreview(false);
+      if (slowTimerRef.current) {
+        clearTimeout(slowTimerRef.current);
+        slowTimerRef.current = null;
+      }
       
       // Log successful generation
       await logPlanGenerationAttempt('base', true, null, {
         generationTime,
-        planDays: Object.keys(basePlan.days || {}).length
+        planDays: Object.keys(basePlan.days || {}).length,
+        retryCount
       });
       
       console.log('[GenerateBasePlan] 💾 Saving plan to store...');
@@ -135,16 +197,15 @@ export default function GeneratingBasePlanScreen() {
       // Update state
       console.log('[GenerateBasePlan] 🔄 Updating state...');
       setIsGenerating(false);
+      setHasError(false);
       
       // Wait extra time to ensure state propagates through React and AsyncStorage
-      // React state updates are asynchronous and batched
       console.log('[GenerateBasePlan] ⏳ Waiting for state propagation...');
       
       // Navigation approach - Always go to plan-preview
       setTimeout(async () => {
         try {
           unlockNavigation();
-          // Try plan-preview first
           console.log('[GenerateBasePlan] 🚀 Attempting navigation to plan-preview');
           router.push('/plan-preview');
           console.log('[GenerateBasePlan] ✅ Navigation push executed');
@@ -164,91 +225,160 @@ export default function GeneratingBasePlanScreen() {
             try { router.replace('/plan-preview'); } catch {}
           }, 100);
         }
-      }, 1500); // Increased to 1500ms for better reliability
+      }, 1500);
 
     } catch (error) {
-      try { /* ensure timer cleared if set */ } catch {}
+      // Clear timers
+      if (slowTimerRef.current) {
+        clearTimeout(slowTimerRef.current);
+        slowTimerRef.current = null;
+      }
+      
       console.error('❌ Error in plan generation screen:', error);
+      
+      // Determine error details
+      const isBasePlanError = error instanceof BasePlanGenerationError;
+      const errorStage = isBasePlanError ? (error as BasePlanGenerationError).stage : 'unknown';
+      const errorDetails = isBasePlanError ? (error as BasePlanGenerationError).details : [];
 
       // Log the failure
       await logPlanGenerationAttempt('base', false, error, {
         userDataPresent: !!user,
         errorMessage: String(error),
-        errorType: error instanceof Error ? error.name : 'Unknown'
+        errorType: error instanceof Error ? error.name : 'Unknown',
+        errorStage,
+        retryCount
       });
 
-      // Failure UX: do not save any plan, do not navigate
+      // Update state to show error UI
+      setIsGenerating(false);
+      setHasError(true);
+      setLastRetryTime(Date.now());
+
+      // Show error alert - NO FALLBACK, user stays on screen
       Alert.alert(
-        'We\'re experiencing high demand',
-        "Due to high demand we're having an issue. Try again in a bit; contact us if this persists.",
+        "We're experiencing high demand",
+        "Due to high demand, we're having trouble generating your plan. Please try again shortly.",
         [
-          { text: 'Go Back', onPress: () => { try { unlockNavigation(); router.replace('/(tabs)/home'); } catch {} } },
-          { text: 'Try Again', onPress: () => { try { generatePlan(); } catch {} } },
+          { 
+            text: 'Go Home', 
+            onPress: () => { 
+              unlockNavigation(); 
+              router.replace('/(tabs)/home'); 
+            },
+            style: 'cancel'
+          },
+          { 
+            text: 'Try Again', 
+            onPress: handleRetry
+          },
         ],
-        { cancelable: true }
+        { cancelable: false }
       );
     }
-  }, [user, addBasePlan]);
-
-  // Emergency fallback removed per NO-FALLBACK policy
+  }, [user, addBasePlan, retryCount, handleRetry]);
 
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    const messageInterval = setInterval(() => {
-      Animated.sequence([
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-      ]).start();
+    // Animate through phases to simulate progress
+    // Updated timing for two-stage pipeline (Generation + Verification)
+    const phaseTimings = [3000, 10000, 18000]; // Faster progression
+    
+    const timeouts = phaseTimings.map((time, index) => {
+      return setTimeout(() => {
+        if (isGenerating && !hasError) {
+          setCurrentPhase(index + 1);
+        }
+      }, time);
+    });
 
-      setMessageIndex(prev => (prev + 1) % LOADING_MESSAGES.length);
-    }, 2500);
+    // Cycle health tips every 5 seconds
+    const tipInterval = setInterval(() => {
+      if (!hasError) {
+        Animated.sequence([
+          Animated.timing(tipFadeAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
+          Animated.timing(tipFadeAnim, { toValue: 1, duration: 300, useNativeDriver: true })
+        ]).start();
+        
+        setTimeout(() => {
+          setCurrentTipIndex(prev => (prev + 1) % HEALTH_TIPS.length);
+        }, 300);
+      }
+    }, 5000);
 
     generatePlan();
 
-    // Start 30s timer to reveal feature preview overlay
-    previewTimerRef.current = setTimeout(() => {
-      setShowFeaturePreview(true);
-      Animated.timing(featureFade, { toValue: 1, duration: 450, useNativeDriver: true }).start();
-    }, 30000);
-
     return () => {
-      clearInterval(messageInterval);
-      if (previewTimerRef.current) { try { clearTimeout(previewTimerRef.current); } catch {} previewTimerRef.current = null; }
+      timeouts.forEach(clearTimeout);
+      clearInterval(tipInterval);
+      if (slowTimerRef.current) {
+        clearTimeout(slowTimerRef.current);
+        slowTimerRef.current = null;
+      }
     };
   }, []);
 
   // Ensure back/gesture takes user to home, not check-in or previous steps
   useEffect(() => {
     const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
-      if (navLockedRef.current) {
+      if (navLockedRef.current && !hasError) {
         e.preventDefault();
         return;
       }
     });
     const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (hasError) {
+        unlockNavigation();
+        router.replace('/(tabs)/home');
+        return true;
+      }
       return navLockedRef.current; // true => block
     });
     return () => {
       try { unsubBeforeRemove(); } catch {}
       try { backSub.remove(); } catch {}
     };
-  }, [navigation]);
+  }, [navigation, hasError]);
+
+  // Helper to render phase item
+  const renderPhaseItem = (phase: typeof GENERATION_PHASES[0], index: number) => {
+    const isActive = index === currentPhase && !hasError;
+    const isCompleted = index < currentPhase && !hasError;
+    const isPending = index > currentPhase || hasError;
+    const Icon = phase.icon;
+
+    return (
+      <View key={phase.id} style={styles.phaseRow}>
+        <View style={[
+          styles.phaseIconContainer, 
+          isActive && styles.phaseIconActive,
+          isCompleted && styles.phaseIconCompleted,
+          hasError && styles.phaseIconError
+        ]}>
+          {isCompleted ? (
+            <Check size={16} color="#FFFFFF" strokeWidth={3} />
+          ) : isActive ? (
+            <ActivityIndicator size="small" color={theme.color.accent.primary} />
+          ) : (
+            <View style={styles.phaseDot} />
+          )}
+        </View>
+        <Text style={[
+          styles.phaseText, 
+          isActive && styles.phaseTextActive,
+          isCompleted && styles.phaseTextCompleted,
+          isPending && styles.phaseTextPending
+        ]}>
+          {phase.text}
+        </Text>
+      </View>
+    );
+  };
 
   return (
-    <LinearGradient
-      colors={['#FF5C5C', '#FF4444', '#FF2222', '#1A1A1A', '#0C0C0D']}
-      style={styles.container}
-    >
+    <View style={styles.container}>
       <Stack.Screen 
         options={{ 
           headerShown: false,
@@ -256,215 +386,222 @@ export default function GeneratingBasePlanScreen() {
         }} 
       />
       
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.content}>
-          <View style={styles.loadingContainer}>
-            <View style={styles.spinner}>
-              <View style={styles.spinnerInner} />
-            </View>
-            
-            <Text style={styles.title}>Building Your Journey</Text>
-            
-            <Animated.View style={[styles.messageContainer, { opacity: fadeAnim }]}>
-              <Text style={styles.message}>
-                {LOADING_MESSAGES[messageIndex]}
-              </Text>
-            </Animated.View>
+      <BasePlanSkeleton />
 
-            <Text style={styles.hint}>This might take a moment — please don’t leave this screen.</Text>
-
-            <View style={styles.dotsContainer}>
-              <View style={[styles.dot, styles.dot1]} />
-              <View style={[styles.dot, styles.dot2]} />
-              <View style={[styles.dot, styles.dot3]} />
-            </View>
+      <SafeAreaView style={styles.overlayContainer} pointerEvents="box-none">
+        {/* Progress Card */}
+        <View style={[styles.progressCard, hasError && styles.progressCardError]}>
+          <Text style={styles.progressTitle}>
+            {hasError ? 'Generation Paused' : 'Creating Your Plan'}
+          </Text>
+          <View style={styles.phasesContainer}>
+            {GENERATION_PHASES.map((phase, index) => renderPhaseItem(phase, index))}
           </View>
+          
+          {/* Error state with retry button */}
+          {hasError && (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>
+                We encountered an issue generating your plan.
+              </Text>
+              <TouchableOpacity 
+                style={styles.retryButton} 
+                onPress={handleRetry}
+                activeOpacity={0.7}
+              >
+                <RefreshCw size={18} color="#FFFFFF" />
+                <Text style={styles.retryButtonText}>Try Again</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.homeButton} 
+                onPress={() => {
+                  unlockNavigation();
+                  router.replace('/(tabs)/home');
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.homeButtonText}>Go Home</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
-        {/* Timed Feature Preview Overlay (shows after 30s) */}
-        {showFeaturePreview && (
-          <Animated.View style={[styles.previewOverlay, { opacity: featureFade }]}> 
-            <View style={styles.previewCardContainer}>
-              <Text style={styles.previewTitle}>Almost there… here’s a quick peek</Text>
-              <View style={styles.previewGrid}>
-                <View style={styles.previewCard}>
-                  <View style={styles.previewHeaderRow}>
-                    <Dumbbell size={20} color={theme.color.accent.primary} />
-                    <Text style={styles.previewHeaderText}>Workout</Text>
-                  </View>
-                  <Text style={styles.previewLine}>• Upper Body focus</Text>
-                  <Text style={styles.previewLine}>• 3×8–12 Main Lifts</Text>
-                  <Text style={styles.previewLine}>• Warm-up & Cool‑down</Text>
-                </View>
-                <View style={styles.previewCard}>
-                  <View style={styles.previewHeaderRow}>
-                    <Apple size={20} color={theme.color.accent.green} />
-                    <Text style={styles.previewHeaderText}>Nutrition</Text>
-                  </View>
-                  <Text style={styles.previewLine}>Calories matched to your goal</Text>
-                  <Text style={styles.previewLine}>Balanced meals for the day</Text>
-                  <Text style={styles.previewLine}>Hydration reminders</Text>
-                </View>
-                <View style={styles.previewCard}>
-                  <View style={styles.previewHeaderRow}>
-                    <Heart size={20} color={theme.color.accent.blue} />
-                    <Text style={styles.previewHeaderText}>Recovery</Text>
-                  </View>
-                  <Text style={styles.previewLine}>Mobility work</Text>
-                  <Text style={styles.previewLine}>Sleep guidance</Text>
-                  <Text style={styles.previewLine}>Light activity tips</Text>
-                </View>
-              </View>
-              <View style={styles.previewFooterRow}>
-                <Calendar size={18} color={theme.color.muted} />
-                <Text style={styles.previewFooterText}>Your 7‑day base plan will appear here soon</Text>
-              </View>
+        {/* Floating Tip Card - hide on error */}
+        {!hasError && (
+          <Animated.View style={[styles.tipCard, { opacity: tipFadeAnim }]}>
+            <View style={styles.tipHeader}>
+              <Lightbulb size={16} color={theme.color.accent.primary} fill={theme.color.accent.primary + '20'} />
+              <Text style={styles.tipLabel}>DID YOU KNOW?</Text>
             </View>
+            <Text style={styles.tipText}>
+              {HEALTH_TIPS[currentTipIndex]}
+            </Text>
           </Animated.View>
         )}
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: theme.color.bg,
   },
-  safeArea: {
-    flex: 1,
-  },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
+  overlayContainer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 40,
+    paddingVertical: 60,
+    zIndex: 10,
   },
-  loadingContainer: {
-    alignItems: 'center',
+  progressCard: {
+    backgroundColor: theme.color.card,
+    borderRadius: 24,
+    padding: 24,
+    width: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+    borderWidth: 1,
+    borderColor: theme.color.line,
   },
-  spinner: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 40,
+  progressCardError: {
+    borderColor: theme.color.accent.red || '#FF6B6B',
   },
-  spinnerInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-  },
-  title: {
-    fontSize: 28,
+  progressTitle: {
+    fontSize: 20,
     fontWeight: '700',
-    color: '#FFFFFF',
+    color: theme.color.ink,
+    marginBottom: 20,
     textAlign: 'center',
-    marginBottom: 16,
   },
-  messageContainer: {
-    minHeight: 24,
-    justifyContent: 'center',
+  phasesContainer: {
+    gap: 16,
   },
-  message: {
-    fontSize: 16,
-    color: '#FFFFFF',
-    opacity: 0.9,
-    textAlign: 'center',
-    marginBottom: 40,
-  },
-  hint: {
-    fontSize: 12,
-    color: '#FFFFFF',
-    opacity: 0.75,
-    textAlign: 'center',
-    marginTop: -28,
-    marginBottom: 36,
-  },
-  dotsContainer: {
+  phaseRow: {
     flexDirection: 'row',
-    gap: 8,
+    alignItems: 'center',
+    gap: 12,
   },
-  dot: {
+  phaseIconContainer: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: theme.color.bg,
+    borderWidth: 1.5,
+    borderColor: theme.color.line,
+  },
+  phaseIconActive: {
+    borderColor: theme.color.accent.primary,
+    backgroundColor: theme.color.bg,
+  },
+  phaseIconCompleted: {
+    backgroundColor: theme.color.accent.primary,
+    borderColor: theme.color.accent.primary,
+  },
+  phaseIconError: {
+    borderColor: theme.color.muted,
+    opacity: 0.5,
+  },
+  phaseDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: theme.color.muted,
+    opacity: 0.3,
   },
-  dot1: {
-    opacity: 0.4,
+  phaseText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: theme.color.ink,
   },
-  dot2: {
-    opacity: 0.7,
+  phaseTextActive: {
+    color: theme.color.ink,
+    fontWeight: '600',
   },
-  dot3: {
-    opacity: 1,
+  phaseTextCompleted: {
+    color: theme.color.muted,
+    textDecorationLine: 'line-through',
   },
-  previewOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: theme.color.bg + 'F2',
-    justifyContent: 'center',
+  phaseTextPending: {
+    color: theme.color.muted,
+    opacity: 0.6,
+  },
+  
+  // Error state styles
+  errorContainer: {
+    marginTop: 24,
     alignItems: 'center',
+    gap: 12,
+  },
+  errorText: {
+    fontSize: 14,
+    color: theme.color.muted,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: theme.color.accent.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    width: '100%',
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  homeButton: {
+    paddingVertical: 12,
     paddingHorizontal: 24,
   },
-  previewCardContainer: {
-    width: '100%',
-    maxWidth: 520,
-    backgroundColor: theme.color.card,
-    borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.color.line,
-    padding: 18,
-  },
-  previewTitle: {
-    textAlign: 'center',
-    fontSize: 18,
-    fontWeight: '700',
-    color: theme.color.ink,
-    marginBottom: 12,
-  },
-  previewGrid: {
-    gap: 10,
-  },
-  previewCard: {
-    backgroundColor: theme.color.bg,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: theme.color.line,
-    padding: 12,
-  },
-  previewHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
-  },
-  previewHeaderText: {
+  homeButtonText: {
     fontSize: 14,
-    fontWeight: '600',
-    color: theme.color.ink,
-  },
-  previewLine: {
-    fontSize: 12,
+    fontWeight: '500',
     color: theme.color.muted,
-    marginBottom: 2,
   },
-  previewFooterRow: {
+  
+  // Tip Card Styles
+  tipCard: {
+    backgroundColor: '#2A2A2A',
+    borderRadius: 16,
+    padding: 16,
+    width: '90%',
+    maxWidth: 400,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    marginBottom: 20,
+  },
+  tipHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 10,
-    justifyContent: 'center',
+    marginBottom: 8,
   },
-  previewFooterText: {
+  tipLabel: {
     fontSize: 12,
-    color: theme.color.muted,
+    fontWeight: '700',
+    color: theme.color.accent.primary,
+    letterSpacing: 1,
+  },
+  tipText: {
+    fontSize: 14,
+    color: '#FFFFFF',
+    textAlign: 'center',
+    lineHeight: 20,
+    fontWeight: '500',
   },
 });

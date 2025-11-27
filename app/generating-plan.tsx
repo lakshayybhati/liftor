@@ -1,11 +1,11 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { View, Text, StyleSheet, SafeAreaView, Animated, Alert, BackHandler } from 'react-native';
-import { router, Stack } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { DailyPlan } from '@/types/user';
-import { generateDailyPlan } from '@/services/documented-ai-service';
+import { generateDailyPlan } from '@/services/plan-generation';
 import { logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
 
@@ -27,7 +27,7 @@ const SLOW_PROMPTS = [
 ];
 
 export default function GeneratingPlanScreen() {
-  const { user, getRecentCheckins, getTodayCheckin, getTodayPlan, addPlan, getCurrentBasePlan } = useUserStore();
+  const { user, getRecentCheckins, getTodayCheckin, getTodayPlan, addPlan, getCurrentBasePlan, getCompletedSupplementsForDate } = useUserStore();
   const [messageIndex, setMessageIndex] = useState(0);
   const [, setIsGenerating] = useState(true);
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
@@ -36,15 +36,23 @@ export default function GeneratingPlanScreen() {
   const [navLocked] = useState(true);
   const navLockedRef = useRef(true);
   const unlockNavigation = () => { navLockedRef.current = false; };
+  
+  // Support forced regeneration via params
+  const params = useLocalSearchParams<{ force?: string }>();
+  const forceRegen = params.force === 'true';
 
   const generatePlan = useCallback(async () => {
     try {
-      // If a plan for today already exists, skip regeneration
+      // If a plan for today already exists and NOT forced, skip regeneration
       const existing = getTodayPlan();
-      if (existing) {
-        console.log('[GenerateDailyPlan] Plan already exists for today, navigating...');
+      if (existing && !forceRegen) {
+        console.log('[GenerateDailyPlan] Plan already exists for today (and not forced), navigating...');
         router.replace('/plan');
         return;
+      }
+      
+      if (forceRegen && existing) {
+        console.log('[GenerateDailyPlan] 🔄 Force regeneration requested - will replace existing plan');
       }
 
       // Validate configuration
@@ -92,7 +100,14 @@ export default function GeneratingPlanScreen() {
         const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
         Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
       }, 45000);
-      const planData = await generateDailyPlan(user, todayCheckin, recentCheckins, basePlan);
+
+      // Get yesterday's supplement data
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayKey = yesterday.toISOString().split('T')[0];
+      const yesterdaySupplements = getCompletedSupplementsForDate(yesterdayKey);
+
+      const planData = await generateDailyPlan(user, todayCheckin, recentCheckins, basePlan, yesterdaySupplements);
       const generationTime = Date.now() - startTime;
       clearTimeout(slowTimer);
       
@@ -150,7 +165,7 @@ export default function GeneratingPlanScreen() {
     } catch (error) {
       // Ensure slowTimer is cleared on error
       try { /* no-op if not set */ } catch {}
-      console.error('Error generating plan:', error);
+      console.error('Error generating daily plan:', error);
       
       // Log the failure
       const todayCheckinData = getTodayCheckin();
@@ -162,183 +177,32 @@ export default function GeneratingPlanScreen() {
         errorType: error instanceof Error ? error.name : 'Unknown'
       });
       
-      // Determine error type for user message
-      const errorMessage = String(error);
-      const isNetworkError = errorMessage.includes('network') || 
-                            errorMessage.includes('fetch') || 
-                            errorMessage.includes('timeout');
-      const isConfigError = errorMessage.includes('API key') || 
-                           errorMessage.includes('configuration');
-      
-      // Create an emergency fallback plan
-      const basePlan = getCurrentBasePlan();
-      
-      if (!user || !todayCheckinData) {
-        // If critical data is missing, redirect to home
-        console.error('Critical data missing for plan generation');
-        Alert.alert(
-          'Data Missing',
-          'Please complete your daily check-in first.',
-          [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }]
-        );
-        return;
-      }
-      
-      // Show user-friendly error
-      if (isNetworkError) {
-        Alert.alert(
-          'Connection Issue',
-          'Unable to reach AI services. Using your base plan with today\'s adjustments.',
-          [{ text: 'OK' }]
-        );
-      } else if (isConfigError) {
-        Alert.alert(
-          'Service Issue',
-          'Using your base plan adapted for today\'s check-in.',
-          [{ text: 'OK' }]
-        );
-      } else {
-        // Don't show alert for successful fallback
-        console.log('📋 Using fallback plan based on check-in data');
-      }
-      
-      const fallbackPlan = createEmergencyFallbackPlan(todayCheckinData);
-      await addPlan(fallbackPlan);
-      
-      console.log('[GenerateDailyPlan] ✅ Fallback plan saved successfully');
-      
-      // Set generating to false first
-      setIsGenerating(false);
-      
-      // Wait for state to propagate before navigating
-      console.log('[GenerateDailyPlan] ⏳ Waiting for state propagation (fallback)...');
-      
-      setTimeout(() => {
-        try {
-          // Use push + replace combo for all environments (dev and production)
-          console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation (fallback)');
-          unlockNavigation();
-          router.push('/plan?celebrate=1');
-          setTimeout(() => {
-            console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace (fallback)');
-            router.replace('/plan?celebrate=1');
-          }, 500);
-        } catch (navError) {
-          console.error('[GenerateDailyPlan] ❌ Navigation error (fallback):', navError);
-          // Fallback 1: Try without celebrate parameter
-          setTimeout(() => {
-            console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
-            try {
-              unlockNavigation();
-              router.push('/plan');
-              setTimeout(() => router.replace('/plan'), 300);
-            } catch (fallbackError) {
-              // Fallback 2: Navigate to home as last resort
-              console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+      // NO FALLBACK - Show error to user
+      // Daily plan generation should not fail since it just applies
+      // check-in adjustments to the existing base plan (no AI call)
+      Alert.alert(
+        'Unable to Generate Plan',
+        'There was an issue creating your daily plan. Please try again.',
+        [
+          { 
+            text: 'Go Home', 
+            onPress: () => {
               unlockNavigation();
               router.replace('/(tabs)/home');
             }
-          }, 100);
-        }
-      }, 2000); // Increased from 1500ms to 2000ms for better reliability in production
+          },
+          { 
+            text: 'Try Again', 
+            onPress: () => {
+              startedRef.current = false;
+              generatePlan();
+            }
+          },
+        ],
+        { cancelable: false }
+      );
     }
   }, [user, getTodayCheckin, getRecentCheckins, addPlan, getCurrentBasePlan, getTodayPlan]);
-
-  // Emergency fallback function
-  const createEmergencyFallbackPlan = (checkin: any): DailyPlan => {
-    const targetCalories = user?.dailyCalorieTarget || 2000;
-    const targetProtein = user?.weight ? Math.round(user.weight * 2.2 * 0.9) : 150;
-        const isLowEnergy = (checkin.energy || 5) < 5;
-    const hasEquipment = user?.equipment?.some((eq: string) => eq !== 'Bodyweight') || false;
-        
-        return {
-          id: Date.now().toString(),
-          date: new Date().toISOString().split('T')[0],
-          workout: {
-        focus: isLowEnergy ? ['Recovery', 'Mobility'] : ['Full Body'],
-            blocks: [
-              {
-                name: 'Warm-up',
-                items: [
-                  { exercise: 'Dynamic stretching', sets: 1, reps: '5-8 min', RIR: 0 }
-                ]
-              },
-              {
-                name: isLowEnergy ? 'Light Movement' : 'Main Workout',
-                items: isLowEnergy ? [
-                  { exercise: 'Gentle yoga flow', sets: 1, reps: '15-20 min', RIR: 0 },
-                  { exercise: 'Walking', sets: 1, reps: '10-15 min', RIR: 0 }
-                ] : hasEquipment ? [
-                  { exercise: 'Compound movement', sets: 3, reps: '8-12', RIR: 2 },
-                  { exercise: 'Accessory work', sets: 3, reps: '10-15', RIR: 2 }
-                ] : [
-                  { exercise: 'Bodyweight Squats', sets: 3, reps: '10-15', RIR: 2 },
-                  { exercise: 'Push-ups', sets: 3, reps: '8-12', RIR: 2 },
-                  { exercise: 'Plank', sets: 3, reps: '30-60s', RIR: 1 }
-                ]
-              }
-            ],
-        notes: `Adaptive plan based on ${checkin.energy}/10 energy level.`
-          },
-          nutrition: {
-        total_kcal: targetCalories,
-            protein_g: targetProtein,
-            meals: [
-              {
-                name: 'Breakfast',
-            items: [
-              { food: 'High-protein breakfast', qty: '1 serving' },
-              { food: 'Complex carbs', qty: '1 serving' }
-                ]
-              },
-              {
-                name: 'Lunch',
-            items: [
-              { food: 'Lean protein', qty: '150g' },
-              { food: 'Whole grains', qty: '1 cup' },
-              { food: 'Vegetables', qty: '2 cups' }
-                ]
-              },
-              {
-                name: 'Post-Workout',
-            items: [
-                  { food: 'Protein shake', qty: '1 scoop' },
-                  { food: 'Banana', qty: '1 medium' }
-                ]
-              },
-              {
-                name: 'Dinner',
-            items: [
-              { food: 'Quality protein', qty: '150g' },
-              { food: 'Complex carbs', qty: '1 cup' },
-              { food: 'Salad', qty: '2 cups' }
-                ]
-              }
-            ],
-            hydration_l: 2.5
-          },
-          recovery: {
-            mobility: isLowEnergy ? [
-              'Gentle stretching (10 min)',
-              'Deep breathing exercises (5 min)'
-            ] : [
-              'Post-workout stretching (10 min)',
-              'Foam rolling if available (5-10 min)'
-            ],
-            sleep: [
-              `Target: ${Math.max(7, 9 - (checkin.stress || 3))} hours tonight`,
-              'Create a calming bedtime routine',
-              checkin.stress && checkin.stress > 6 ? 'Consider meditation before bed' : 'Avoid screens 1 hour before bed'
-            ]
-          },
-          motivation: isLowEnergy ? 
-            "Rest is part of progress. Listen to your body and be gentle with yourself today. 🌱" :
-        "Every rep counts toward your fitness journey. Stay consistent! 💪",
-          adherence: 0,
-      adjustments: [],
-      isFromBasePlan: true,
-    };
-  };
 
   useEffect(() => {
     if (startedRef.current) return;

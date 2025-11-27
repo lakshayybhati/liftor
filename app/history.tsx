@@ -92,8 +92,17 @@ export default function HistoryScreen() {
   
   // Memoized data selectors for performance
   const memoizedData = useMemo(() => {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+    const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+
     const recentCheckins = getRecentCheckins(days);
-    const recentPlans = plans.slice(-days);
+    // Filter plans by date range instead of just slicing the array
+    // This ensures we only look at relevant plans and handle sparse data correctly
+    const recentPlans = plans
+      .filter(p => p.date >= cutoffDateStr)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    
     const weightData = getWeightData();
     const weightProgress = getWeightProgress();
     
@@ -135,38 +144,47 @@ export default function HistoryScreen() {
     const getCompletionRate = () => {
       // Prefer adherence when available: weighted average giving more importance to recent days
       const plansWithAdherence = recentPlans.filter(p => typeof p.adherence === 'number');
+      
       if (plansWithAdherence.length > 0) {
-        // Use weighted average: recent days have more weight
-        // Most recent day has weight 1.0, second most recent 0.9, etc.
+        // Sort chronologically to ensure we weight the correct days
+        plansWithAdherence.sort((a, b) => a.date.localeCompare(b.date));
+        
         let weightedSum = 0;
         let totalWeight = 0;
+        const n = plansWithAdherence.length;
         
         plansWithAdherence.forEach((p, index) => {
-          // Calculate weight: more recent = higher weight
-          const weight = 1 - (index * 0.1); // Decreases by 10% for each day back
-          const actualWeight = Math.max(0.3, weight); // Minimum weight of 0.3
+          // Calculate weight: more recent (higher index) = higher weight
+          // index n-1 is the most recent day -> weight 1.0
+          const distFromEnd = (n - 1) - index;
+          const weight = Math.max(0.3, 1.0 - (distFromEnd * 0.1));
           
-          weightedSum += (p.adherence || 0) * actualWeight;
-          totalWeight += actualWeight;
+          weightedSum += (p.adherence || 0) * weight;
+          totalWeight += weight;
         });
         
         const avg = totalWeight > 0 ? weightedSum / totalWeight : 0;
         return Math.round(avg * 100);
       }
 
-      // Fallback: compute completion as coverage of days with a check-in
+      // Fallback: compute completion based on check-ins vs active days range
       if (hasCheckins) {
+        // Only consider the range from the first check-in within the window to today
+        // This avoids penalizing new users who just started 2 days ago
+        const checkinDates = recentCheckins.map(c => c.date).sort();
+        if (checkinDates.length === 0) return 0;
+
+        const firstCheckinDate = new Date(checkinDates[0]);
         const today = new Date();
-        const dateKeys = new Set<string>();
-        for (let i = 0; i < days; i++) {
-          const d = new Date(today);
-          d.setDate(today.getDate() - i);
-          dateKeys.add(d.toISOString().split('T')[0]);
-        }
-        const checkinDates = new Set(recentCheckins.map(c => c.date));
-        let covered = 0;
-        dateKeys.forEach(d => { if (checkinDates.has(d)) covered++; });
-        return Math.round((covered / Math.max(days, 1)) * 100);
+        
+        // Calculate days between first check-in and today (inclusive)
+        const timeDiff = today.getTime() - firstCheckinDate.getTime();
+        const daysActive = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+        // Clamp daysActive to be at least 1 and at most the selected range 'days'
+        const denominator = Math.min(days, Math.max(1, daysActive));
+
+        const covered = new Set(checkinDates).size;
+        return Math.round((covered / denominator) * 100);
       }
 
       return 0;
@@ -235,6 +253,40 @@ export default function HistoryScreen() {
       </Card>
     </View>
   );
+
+  const renderCompletionSlider = () => {
+    const rate = statistics.completionRate || 0;
+    // Determine motivational text based on 5% increments
+    const getMotivationText = (r: number) => {
+      if (r === 0) return "Let's get started!";
+      if (r >= 100) return "Perfect score! Keep it up! 🔥";
+      if (r >= 95) return "Almost perfect! You're crushing it! 💪";
+      if (r >= 90) return "Outstanding consistency! 🌟";
+      if (r >= 85) return "Great work! Keep pushing! 🚀";
+      if (r >= 80) return "Solid progress! Stay focused! 🎯";
+      
+      // For lower percentages, give specific next-step encouragement
+      const nextMilestone = Math.ceil((r + 1) / 5) * 5;
+      return `Push to ${nextMilestone}%! You got this!`;
+    };
+
+    return (
+      <Card style={styles.sliderCard}>
+        <View style={styles.sliderHeader}>
+          <Text style={styles.sliderTitle}>Overall Completion</Text>
+          <Text style={styles.sliderValue}>{rate}%</Text>
+        </View>
+        
+        <View style={styles.sliderTrack}>
+          <View style={[styles.sliderFill, { width: `${Math.min(100, Math.max(0, rate))}%` }]} />
+        </View>
+        
+        <Text style={styles.motivationText}>
+          {getMotivationText(rate)}
+        </Text>
+      </Card>
+    );
+  };
 
   const renderWeightChart = () => {
     if (!hasWeightData) {
@@ -520,6 +572,7 @@ export default function HistoryScreen() {
         >
           {renderTimeRangeSelector()}
           {renderStatsCards()}
+          {renderCompletionSlider()}
           {renderWeightChart()}
           {renderEnergyChart()}
           {renderRecentCheckins()}
@@ -711,6 +764,45 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontStyle: 'italic',
     marginTop: 20,
+  },
+  // Completion Slider
+  sliderCard: {
+    marginBottom: 20,
+    padding: 20,
+  },
+  sliderHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  sliderTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: theme.color.ink,
+  },
+  sliderValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.accent.primary,
+  },
+  sliderTrack: {
+    height: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  sliderFill: {
+    height: '100%',
+    backgroundColor: theme.color.accent.primary,
+    borderRadius: 6,
+  },
+  motivationText: {
+    fontSize: 14,
+    color: theme.color.muted,
+    fontStyle: 'italic',
+    textAlign: 'center',
   },
   // Weight chart styles
   weightCard: {

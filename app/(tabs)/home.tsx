@@ -141,37 +141,46 @@ export default function HomeScreen() {
     }
   }, [isLoading, isProfileLoading, onboardingCompleteFlag, subscriptionActive]);
 
-  // Delayed paywall gate after Home is opened (5s), to avoid interrupting login/launch
+  // Delayed paywall gate after Home is opened (5s), run only once per session in the background
+  const paywallCheckedRef = useRef(false);
   const paywallCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useFocusEffect(
-    useCallback(() => {
-      // Only run when not hydrating and onboarding isn't redirecting
-      const isReadyForGate = !isLoading && !isProfileLoading && !!auth;
-      if (!isReadyForGate) return;
-      // Clear any existing timer before scheduling a new one
+
+  useEffect(() => {
+    // Wait until auth/profile are done hydrating and we have a user
+    if (isLoading || isProfileLoading || !auth?.session?.user?.id) {
+      return;
+    }
+
+    // Ensure we only schedule the paywall check once per Home mount/session
+    if (paywallCheckedRef.current) {
+      return;
+    }
+    paywallCheckedRef.current = true;
+
+    // Schedule background entitlement check; UI stays responsive
+    paywallCheckTimerRef.current = setTimeout(async () => {
+      try {
+        const entitled = await hasActiveSubscription();
+        if (!entitled) {
+          router.replace({
+            pathname: '/paywall',
+            params: { next: '/(tabs)/home', blocking: 'true' } as any,
+          });
+        }
+      } catch {
+        // On error, fail open to avoid interrupting the session unnecessarily
+      }
+    }, 5000);
+
+    return () => {
       if (paywallCheckTimerRef.current) {
-        try { clearTimeout(paywallCheckTimerRef.current); } catch {}
+        try {
+          clearTimeout(paywallCheckTimerRef.current);
+        } catch {}
         paywallCheckTimerRef.current = null;
       }
-      paywallCheckTimerRef.current = setTimeout(async () => {
-        try {
-          const { hasActiveSubscription } = await import('@/utils/subscription-helpers');
-          const entitled = await hasActiveSubscription();
-          if (!entitled) {
-            router.replace({ pathname: '/paywall', params: { next: '/(tabs)/home', blocking: 'true' } as any });
-          }
-        } catch (e) {
-          // On error, do nothing to avoid interrupting the session unnecessarily
-        }
-      }, 5000);
-      return () => {
-        if (paywallCheckTimerRef.current) {
-          try { clearTimeout(paywallCheckTimerRef.current); } catch {}
-          paywallCheckTimerRef.current = null;
-        }
-      };
-    }, [isLoading, isProfileLoading, auth?.session?.user?.id])
-  );
+    };
+  }, [isLoading, isProfileLoading, auth?.session?.user?.id]);
 
   // Flags for UI states; do not early-return to keep hook order consistent
   const isHydrating = isLoading || isProfileLoading || !auth;

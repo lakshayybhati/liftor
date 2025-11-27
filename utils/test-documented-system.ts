@@ -3,7 +3,7 @@
  * Tests the exact implementation from the documentation
  */
 
-import { generateWeeklyBasePlan, generateDailyPlan } from '@/services/documented-ai-service';
+import { generateWeeklyBasePlan, generateDailyPlan } from '@/services/plan-generation';
 import type { User, CheckinData } from '@/types/user';
 
 // Test user with comprehensive profile (40+ data points)
@@ -24,7 +24,7 @@ const comprehensiveTestUser: User = {
   
   // Equipment & Preferences
   equipment: ['Gym', 'Dumbbells'],
-  preferredExercises: ['Bench Press', 'Squats', 'Deadlifts'],
+  trainingStylePreferences: ['Strength', 'Hypertrophy'],
   avoidExercises: ['Overhead Press'],
   
   // Dietary Preferences

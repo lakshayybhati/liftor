@@ -8,9 +8,11 @@ type Constraints = {
   goal?: string;
   injuries?: string;
   personalGoals?: string[];
-  preferredExercises?: string[];
+  trainingStylePreferences?: string[];
   avoidExercises?: string[];
   dietaryPrefs?: string[];
+  supplements?: string[];
+  supplementNotes?: string;
   calorieTarget: number;
   proteinTarget: number;
 };
@@ -29,9 +31,11 @@ export function buildBasePlanPrompts(
     goal: user.goal,
     injuries: user.injuries || undefined,
     personalGoals: user.personalGoals || undefined,
-    preferredExercises: user.preferredExercises || [],
+    trainingStylePreferences: user.trainingStylePreferences || [],
     avoidExercises: user.avoidExercises || [],
     dietaryPrefs: user.dietaryPrefs || [],
+    supplements: user.supplements || [],
+    supplementNotes: user.supplementNotes || undefined,
     calorieTarget,
     proteinTarget,
   };
@@ -48,7 +52,9 @@ export function buildBasePlanPrompts(
     `- Dietary prefs: ${(constraints.dietaryPrefs || []).join(', ') || 'None'}`,
     `- Injuries/Avoid: ${constraints.injuries || 'None'}, ${(constraints.avoidExercises || []).join(', ')}`,
     `- Personal goals: ${(constraints.personalGoals || []).join(', ') || 'None'}`,
-    `- Preferred exercises: ${(constraints.preferredExercises || []).join(', ') || 'None'}`,
+    `- Training Style/Vibe: ${(constraints.trainingStylePreferences || []).join(', ') || 'None'}`,
+    `- Current supplements: ${(constraints.supplements || []).join(', ') || 'None'}`,
+    `- Supplement notes: ${constraints.supplementNotes || 'None'}`,
     '',
     'TASK:',
     'Design an optimal weekly training split for this user. Choose the best split pattern based on their training days and goals. Select exercises that match their equipment and training level. Vary exercises across days. Design meals that match their dietary preferences and calorie/protein targets.',
@@ -60,6 +66,10 @@ export function buildBasePlanPrompts(
     '- Avoid exercises/foods they listed to avoid and accommodate injuries',
     '- NO duplicate exercises within a day',
     '- Vary exercises between consecutive training days',
+    '- If you include supplements, ONLY use common, legal, over-the-counter options (e.g., creatine, whey/plant protein, magnesium, vitamin D, omega-3, basic electrolytes).',
+    '- NEVER recommend illegal, grey-market, or prescription-only compounds (e.g., SARMs, prohormones, steroids, clenbuterol, DMAA/DMBA, etc.).',
+    '- If the user already takes certain supplements, keep those as part of the core stack; do NOT re-add the same compounds as separate “new” add-ons.',
+    '- Keep the supplement stack consistent across the week; you may vary timing/emphasis in the recovery notes, but avoid randomly changing compounds day to day.',
     "- Do NOT copy the JSON example verbatim; synthesize based on THIS user's data",
     "- make sure that every workout has multiple excersices according to the user's data and dont just stick to few make sure the whole week it is a complete workout plan.",
     "- make sure that every day has a complete nutrition plan according to the user's data and dont just stick to few make sure the whole week it is a complete nutrition plan.",

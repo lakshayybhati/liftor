@@ -27,6 +27,23 @@ interface AuthState {
 function getSupabaseCredentials() {
   // Use centralized production configuration
   const config = getProductionConfig();
+
+  // Utility: demote noisy network errors to warnings during development
+  function logAuthError(label: string, error: any) {
+    const msg = String((error && (error.message || error)) || '');
+    const isNetwork =
+      /network request failed/i.test(msg) ||
+      /AuthRetryableFetchError/i.test(msg) ||
+      /TypeError: Network request failed/i.test(msg);
+    // Avoid red error overlay spam for transient network issues in dev
+    if (__DEV__ && isNetwork) {
+      console.warn(`[Auth] ${label}`, error);
+    } else {
+      console.error(`[Auth] ${label}`, error);
+    }
+  }
+  // Expose globally within this module
+  (global as any).__AUTH_LOG_ERROR__ = logAuthError;
   
   const url = config.supabaseUrl;
   const key = config.supabaseAnonKey;
@@ -105,7 +122,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         console.log('[Auth] Fetching initial session');
         const { data, error } = await supabase.auth.getSession();
         if (error) {
-          console.error('[Auth] getSession error', error);
+          (global as any).__AUTH_LOG_ERROR__?.('getSession error', error);
           logProductionMetric('error', 'session_fetch_failed', { error: error.message });
         }
         if (mounted) {
@@ -121,7 +138,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
           }
         }
       } catch (e) {
-        console.error('[Auth] init error', e);
+        (global as any).__AUTH_LOG_ERROR__?.('init error', e);
         logProductionMetric('error', 'session_init_failed', { error: String(e) });
       } finally {
         if (mounted) {
@@ -175,7 +192,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         console.log('[Auth] Deep link received, exchanging code for session');
         const { error } = await supabase.auth.exchangeCodeForSession(code as string);
         if (error) {
-          console.error('[Auth] exchangeCodeForSession error', error);
+          (global as any).__AUTH_LOG_ERROR__?.('exchangeCodeForSession error', error);
         }
 
         const { data } = await supabase.auth.getSession();
@@ -189,7 +206,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
           router.replace('/auth/login');
         }
       } catch (e) {
-        console.error('[Auth] Deep link handling exception', e);
+        (global as any).__AUTH_LOG_ERROR__?.('Deep link handling exception', e);
       }
     };
 
@@ -230,8 +247,8 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         .eq('id', uid)
         .maybeSingle();
       
-      if (fetchErr) {
-        console.error('[Auth] Profile fetch error:', fetchErr);
+        if (fetchErr) {
+          (global as any).__AUTH_LOG_ERROR__?.('Profile fetch error', fetchErr);
         logProductionMetric('error', 'profile_fetch_failed', { error: fetchErr.message, uid });
         
         // If RLS blocks select but insert is allowed, attempt upsert of own row
@@ -251,9 +268,9 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
               console.log('[Auth] ✅ Profile upserted after RLS denial');
               return true;
             }
-            console.warn('[Auth] Upsert after RLS denial failed:', upErrFallback);
+            (global as any).__AUTH_LOG_ERROR__?.('Upsert after RLS denial failed', upErrFallback);
           } catch (e) {
-            console.warn('[Auth] Upsert attempt after RLS denial threw:', e);
+            (global as any).__AUTH_LOG_ERROR__?.('Upsert attempt after RLS denial threw', e);
           }
         }
         
@@ -278,7 +295,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
           }, { onConflict: 'id' });
         
         if (upErr) {
-          console.error('[Auth] Profile creation error:', upErr);
+          (global as any).__AUTH_LOG_ERROR__?.('Profile creation error', upErr);
           logProductionMetric('error', 'profile_create_failed', { error: upErr.message, uid });
           
           // Retry on transient errors
@@ -304,13 +321,13 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
             .update({ name: name || email || 'User' })
             .eq('id', uid);
           if (upErr2) {
-            console.warn('[Auth] Backfill name error:', upErr2);
+            (global as any).__AUTH_LOG_ERROR__?.('Backfill name error', upErr2);
           }
         }
         return true;
       }
     } catch (e) {
-      console.error('[Auth] ensureProfileExists exception:', e);
+      (global as any).__AUTH_LOG_ERROR__?.('ensureProfileExists exception', e);
       logProductionMetric('error', 'profile_ensure_exception', { error: String(e), uid });
       
       // Retry on unexpected errors
@@ -435,7 +452,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       logProductionMetric('auth', 'signin_success', { uid });
       return { success: true };
     } catch (e) {
-      console.error('[Auth] signIn exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('signIn exception', e);
       logProductionMetric('error', 'signin_exception', { error: String(e) });
       return { success: false, error: 'Unexpected error. Please try again.' };
     } finally {
@@ -485,7 +502,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       logProductionMetric('auth', 'signup_success', { uid: createdUserId, needsConfirmation: needsEmailConfirmation });
       return { success: true, needsEmailConfirmation };
     } catch (e) {
-      console.error('[Auth] signUp exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('signUp exception', e);
       logProductionMetric('error', 'signup_exception', { error: String(e) });
       return { success: false, error: 'Unexpected error. Please try again.' };
     } finally {
@@ -564,7 +581,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       logProductionMetric('auth', 'google_signin_success', {});
       return { success: true };
     } catch (e) {
-      console.error('[Auth] googleSignIn exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('googleSignIn exception', e);
       logProductionMetric('error', 'google_signin_exception', { error: String(e) });
       return { success: false, error: 'Unexpected error. Please try again.' };
     } finally {
@@ -583,7 +600,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       }
       return { success: true };
     } catch (e) {
-      console.error('[Auth] resend exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('resend exception', e);
       return { success: false, error: 'Failed to send email. Try again.' };
     }
   }, [supabase]);
@@ -600,7 +617,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       }
       return { success: true };
     } catch (e) {
-      console.error('[Auth] reset password exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('reset password exception', e);
       return { success: false, error: 'Failed to send reset email. Try again.' };
     }
   }, [supabase]);
@@ -611,7 +628,7 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       const { error } = await supabase.auth.signOut();
       if (error) console.error('[Auth] signOut error', error);
     } catch (e) {
-      console.error('[Auth] signOut exception', e);
+      (global as any).__AUTH_LOG_ERROR__?.('signOut exception', e);
     } finally {
       setIsAuthLoading(false);
     }

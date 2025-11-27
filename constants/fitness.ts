@@ -70,23 +70,23 @@ export const MOOD_CHARACTERS = [
     label: 'Excited',
     color: '#FF69B4',
     shape: 'circle' as const,
-    eyes: 'happy' as const,
-    mouth: 'smile' as const,
+    eyes: 'excited' as const,
+    mouth: 'bigSmile' as const,
   },
   {
     id: 'joyful',
     label: 'Joyful',
     color: '#FF1493',
     shape: 'flower' as const,
-    eyes: 'happy' as const,
-    mouth: 'smile' as const,
+    eyes: 'joyful' as const,
+    mouth: 'softSmile' as const,
   },
   {
     id: 'grateful',
     label: 'Grateful',
     color: '#8A2BE2',
     shape: 'rounded-square' as const,
-    eyes: 'sleepy' as const,
+    eyes: 'happy' as const,
     mouth: 'smile' as const,
   },
   {
@@ -94,32 +94,32 @@ export const MOOD_CHARACTERS = [
     label: 'Energized',
     color: '#9370DB',
     shape: 'rounded-square' as const,
-    eyes: 'happy' as const,
-    mouth: 'tongue' as const,
+    eyes: 'energized' as const,
+    mouth: 'upbeat' as const,
   },
   {
     id: 'sensitive',
     label: 'Sensitive',
     color: '#00BFFF',
     shape: 'rounded-square' as const,
-    eyes: 'sleepy' as const,
-    mouth: 'tongue' as const,
+    eyes: 'sensitive' as const,
+    mouth: 'neutral' as const,
   },
   {
     id: 'confused',
     label: 'Confused',
     color: '#4169E1',
     shape: 'hexagon' as const,
-    eyes: 'dizzy' as const,
-    mouth: 'none' as const,
+    eyes: 'confused' as const,
+    mouth: 'slightFrown' as const,
   },
   {
     id: 'bored',
     label: 'Bored',
     color: '#228B22',
     shape: 'circle' as const,
-    eyes: 'wide' as const,
-    mouth: 'none' as const,
+    eyes: 'bored' as const,
+    mouth: 'flat' as const,
   },
   {
     id: 'stressed',
@@ -127,7 +127,7 @@ export const MOOD_CHARACTERS = [
     color: '#32CD32',
     shape: 'triangle' as const,
     eyes: 'stressed' as const,
-    mouth: 'line' as const,
+    mouth: 'wavy' as const,
   },
   {
     id: 'angry',
@@ -202,17 +202,13 @@ export const WOKE_FEELING_OPTIONS = [
 ] as const;
 
 // New constants for specifics step
-export const PREFERRED_EXERCISES = [
-  'Squats',
-  'Deadlifts',
-  'Bench Press',
-  'Pull-ups',
-  'Push-ups',
-  'Lunges',
-  'Planks',
-  'Burpees',
-  'Mountain Climbers',
-  'Yoga',
+export const TRAINING_STYLE_PREFERENCES = [
+  { id: 'pump_hypertrophy', label: 'Pump & Hypertrophy', description: 'Pump focused, high volume, machines, feeling the burn' },
+  { id: 'strength_prs', label: 'Strength & PRs', description: 'Low reps, heavy compound lifts, chasing PRs' },
+  { id: 'cardio_endurance', label: 'Cardio & Endurance', description: 'Running, cycling, steps, conditioning, heart health' },
+  { id: 'athletic_performance', label: 'Athletic Performance', description: 'Explosive stuff: sprints, jumps, agility, sports performance' },
+  { id: 'mobility_recovery', label: 'Mobility & Recovery', description: 'Stretching, yoga-style flows, light movement, joint health' },
+  { id: 'quick_minimal', label: 'Quick & Minimal', description: 'Short, time-efficient sessions, minimal equipment' },
 ] as const;
 
 export const AVOID_EXERCISES = [

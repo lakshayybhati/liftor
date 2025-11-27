@@ -1,15 +1,90 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Platform, Modal, Animated, Easing, BackHandler, ActivityIndicator } from 'react-native';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Platform, Modal, Animated, Easing, BackHandler, ActivityIndicator, Alert } from 'react-native';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
-import { Dumbbell, Apple, Heart, Sparkles, CheckCircle, Check, Camera, ChevronDown, ChevronLeft } from 'lucide-react-native';
+import { Dumbbell, Apple, Heart, Sparkles, CheckCircle, Check, Camera, ChevronDown, ChevronLeft, RefreshCw, Zap, Trophy, Flame, Pill, Gauge, AlertCircle, History } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { useNavigation } from '@react-navigation/native';
+import { MoodCharacter } from '@/components/ui/MoodCharacter';
+import { MOOD_CHARACTERS } from '@/constants/fitness';
 
 type PlanTab = 'workout' | 'nutrition' | 'recovery' | 'motivation';
+
+// Solid colors that roughly match the header gradients for each tab
+const TAB_COLORS: Record<PlanTab, string> = {
+  workout: '#FF512F',   // matches workout header gradient start
+  nutrition: '#11998e', // matches nutrition header gradient start
+  recovery: '#8E2DE2',  // matches recovery header gradient start
+  motivation: '#EF4444' // matches motivation header gradient start
+};
+
+// Animation Helper Component
+const FadeInView = ({ children, delay = 0, style }: { children: React.ReactNode, delay?: number, style?: any }) => {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(20)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 500,
+        delay,
+        useNativeDriver: true,
+        easing: Easing.out(Easing.ease),
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 500,
+        delay,
+        useNativeDriver: true,
+        easing: Easing.out(Easing.back(1.5)),
+      }),
+    ]).start();
+  }, [delay, fadeAnim, translateY]);
+
+  return (
+    <Animated.View style={[{ opacity: fadeAnim, transform: [{ translateY }] }, style]}>
+      {children}
+    </Animated.View>
+  );
+};
+
+// Bouncy Checkbox Component
+const BouncyCheckbox = ({ checked, onPress, color = theme.color.accent.green }: { checked: boolean, onPress: () => void, color?: string }) => {
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const handlePress = () => {
+    Animated.sequence([
+      Animated.timing(scaleAnim, { toValue: 0.8, duration: 100, useNativeDriver: true }),
+      Animated.timing(scaleAnim, { toValue: 1.2, duration: 150, useNativeDriver: true }),
+      Animated.timing(scaleAnim, { toValue: 1, duration: 100, useNativeDriver: true }),
+    ]).start();
+    onPress();
+  };
+
+  return (
+    <TouchableOpacity onPress={handlePress} activeOpacity={0.8} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+      <Animated.View style={[
+        {
+          width: 32,
+          height: 32,
+          borderRadius: 16,
+          borderWidth: 2,
+          borderColor: checked ? color : theme.color.muted,
+          backgroundColor: checked ? color : 'transparent',
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        { transform: [{ scale: scaleAnim }] }
+      ]}>
+        {checked && <Check size={18} color={theme.color.bg} strokeWidth={3} />}
+      </Animated.View>
+    </TouchableOpacity>
+  );
+};
 
 interface MockFood {
   name: string;
@@ -43,19 +118,53 @@ interface ExtraFood {
 }
 
 export default function PlanScreen() {
-  const { user, plans, foodLogs, getCompletedMealsForDate, getCompletedExercisesForDate, toggleMealCompleted, toggleExerciseCompleted } = useUserStore();
+  const { user, plans, checkins, foodLogs, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, addCheckin, deleteTodayPlan } = useUserStore();
   const { tab, celebrate } = useLocalSearchParams<{ tab?: string; celebrate?: string }>();
   const [activeTab, setActiveTab] = useState<PlanTab>('workout');
   const [completedExercises, setCompletedExercises] = useState<Set<string>>(new Set());
   const [completedMeals, setCompletedMeals] = useState<Set<string>>(new Set());
+  const [completedSupplements, setCompletedSupplements] = useState<Set<string>>(new Set());
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
   const [showConfetti, setShowConfetti] = useState(celebrate === '1');
   const [confettiAnim] = useState(new Animated.Value(0));
   const [isWaitingForPlan, setIsWaitingForPlan] = useState(false);
   const navigation = useNavigation();
+
+  // ...
+
+  const handleRetryPlan = async () => {
+    if (isRetrying) return;
+    
+    const todayKey = new Date().toISOString().split('T')[0];
+    if (selectedDate !== todayKey) return; // Only allow for today
+
+    Alert.alert(
+      "Re-do Today's Check-in?",
+      "This will delete today's plan and previous check-in data, letting you start fresh.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Re-do Check-in", 
+          style: "destructive", 
+          onPress: async () => {
+            // Delete today's plan, check-in and completions first
+            try {
+              await deleteTodayPlan();
+              console.log('[Plan] Today\'s data deleted, navigating to check-in');
+            } catch (e) {
+              console.warn('[Plan] Failed to delete today\'s data:', e);
+            }
+            // Navigate to check-in screen for a fresh start
+            router.push('/checkin');
+          }
+        }
+      ]
+    );
+  };
 
   // Set initial tab from URL parameter
   useEffect(() => {
@@ -95,12 +204,16 @@ export default function PlanScreen() {
       Animated.delay(1200),
       Animated.timing(confettiAnim, { toValue: 0, duration: 300, easing: Easing.in(Easing.ease), useNativeDriver: true }),
     ]).start(() => {
-      setShowConfetti(false);
-      try { router.setParams({ celebrate: undefined as any }); } catch {}
+      // Defer state updates to avoid "useInsertionEffect must not schedule updates" error
+      setTimeout(() => {
+        setShowConfetti(false);
+        try { router.setParams({ celebrate: undefined as any }); } catch {}
+      }, 0);
     });
   }, [showConfetti, confettiAnim]);
 
   const plan = useMemo(() => plans.find(p => p.date === selectedDate), [plans, selectedDate]);
+  const todayCheckin = useMemo(() => checkins.find(c => c.date === selectedDate), [checkins, selectedDate]);
   const dayExtras = useMemo(() => (foodLogs.find(l => l.date === selectedDate)?.extras) || [], [foodLogs, selectedDate]);
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
 
@@ -141,56 +254,113 @@ export default function PlanScreen() {
   useEffect(() => {
     const meals = new Set(getCompletedMealsForDate(selectedDate));
     const ex = new Set(getCompletedExercisesForDate(selectedDate));
+    const supps = new Set(getCompletedSupplementsForDate(selectedDate));
     setCompletedMeals(meals);
     setCompletedExercises(ex);
-  }, [selectedDate, getCompletedMealsForDate, getCompletedExercisesForDate]);
+    setCompletedSupplements(supps);
+  }, [selectedDate, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate]);
 
   const totalCalorieTarget = plan?.nutrition?.total_kcal || 2000;
   const proteinTarget = plan?.nutrition?.protein_g || 150;
   const fatTarget = Math.round((totalCalorieTarget * 0.25) / 9);
   const carbTarget = Math.round((totalCalorieTarget - (proteinTarget * 4) - (fatTarget * 9)) / 4);
   
-  // Generate dynamic meals based on user preferences
+  // Generate dynamic meals based on user preferences (supports 1-8 meals)
   const generateMealsData = useCallback(() => {
-    const mealCount = user?.mealCount || 3;
-    const baseCalorieDistribution = {
+    // Priority: 1) Actual meals in the plan, 2) User's mealCount preference, 3) Default to 3
+    const planMealsCount = plan?.nutrition?.meals?.length || 0;
+    const userMealCount = user?.mealCount || 3;
+    
+    // Use plan's actual meal count if available and valid (1-8), otherwise use user preference
+    const mealCount = Math.min(8, Math.max(1, planMealsCount > 0 ? planMealsCount : userMealCount));
+    
+    // Calorie distributions for 1-8 meals
+    // Designed to distribute calories appropriately throughout the day
+    const baseCalorieDistribution: Record<number, number[]> = {
+      1: [1.0], // OMAD - single feeding window
+      2: [0.45, 0.55], // Two meals - brunch/dinner style
       3: [0.3, 0.4, 0.3], // breakfast, lunch, dinner
-      4: [0.25, 0.15, 0.35, 0.25], // breakfast, snack, lunch, dinner
-      5: [0.25, 0.125, 0.35, 0.1, 0.275], // breakfast, morning snack, lunch, afternoon snack, dinner
-      6: [0.2, 0.1, 0.3, 0.1, 0.25, 0.05] // breakfast, morning snack, lunch, afternoon snack, dinner, evening snack
+      4: [0.25, 0.35, 0.15, 0.25], // breakfast, lunch, snack, dinner
+      5: [0.22, 0.08, 0.35, 0.10, 0.25], // breakfast, morning snack, lunch, afternoon snack, dinner
+      6: [0.20, 0.08, 0.30, 0.10, 0.25, 0.07], // breakfast, morning snack, lunch, afternoon snack, dinner, evening snack
+      7: [0.18, 0.07, 0.25, 0.08, 0.22, 0.08, 0.12], // 7 meals - bodybuilder style
+      8: [0.15, 0.06, 0.20, 0.07, 0.18, 0.07, 0.15, 0.12], // 8 meals - frequent feeding
     };
     
-    const mealTemplates = [
-      { name: 'Breakfast', insight: 'All you need is some breakfast ☀️', emoji: '🍳', mealType: 'breakfast' },
-      { name: 'Morning Snack', insight: 'Get energized by grabbing a morning snack 🥜', emoji: '🥨', mealType: 'morning_snack' },
-      { name: 'Lunch', insight: "Don't miss lunch 😋 It's time to get a tasty meal", emoji: '🍽️', mealType: 'lunch' },
-      { name: 'Afternoon Snack', insight: 'Perfect time for a healthy snack 🍎', emoji: '🥗', mealType: 'afternoon_snack' },
-      { name: 'Dinner', insight: 'End your day with a nutritious dinner 🌙', emoji: '🍲', mealType: 'dinner' },
-      { name: 'Evening Snack', insight: 'A light evening treat before bed 🌜', emoji: '🍪', mealType: 'evening_snack' }
-    ];
+    // Comprehensive meal templates for all possible meal slots
+    const mealTemplates: Record<number, { name: string; insight: string; emoji: string; mealType: string }[]> = {
+      1: [
+        { name: 'Main Meal', insight: 'Your complete daily nutrition in one satisfying meal 🍽️', emoji: '🥘', mealType: 'main_meal' },
+      ],
+      2: [
+        { name: 'First Meal', insight: 'Start your feeding window strong 💪', emoji: '🍳', mealType: 'first_meal' },
+        { name: 'Second Meal', insight: 'Finish the day with a nourishing meal 🌙', emoji: '🍲', mealType: 'second_meal' },
+      ],
+      3: [
+        { name: 'Breakfast', insight: 'All you need is some breakfast ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Lunch', insight: "Don't miss lunch 😋 It's time to get a tasty meal", emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Dinner', insight: 'End your day with a nutritious dinner 🌙', emoji: '🍲', mealType: 'dinner' },
+      ],
+      4: [
+        { name: 'Breakfast', insight: 'Fuel your morning right ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Lunch', insight: 'Power through your day 💪', emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Afternoon Snack', insight: 'Keep your energy steady 🍎', emoji: '🥗', mealType: 'afternoon_snack' },
+        { name: 'Dinner', insight: 'Wind down with a great meal 🌙', emoji: '🍲', mealType: 'dinner' },
+      ],
+      5: [
+        { name: 'Breakfast', insight: 'Start strong with breakfast ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Morning Snack', insight: 'Quick energy boost 🥜', emoji: '🥨', mealType: 'morning_snack' },
+        { name: 'Lunch', insight: 'Midday fuel for peak performance 💪', emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Afternoon Snack', insight: 'Beat the afternoon slump 🍎', emoji: '🥗', mealType: 'afternoon_snack' },
+        { name: 'Dinner', insight: 'Recover and refuel 🌙', emoji: '🍲', mealType: 'dinner' },
+      ],
+      6: [
+        { name: 'Breakfast', insight: 'Rise and shine with breakfast ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Morning Snack', insight: 'Keep metabolism humming 🥜', emoji: '🥨', mealType: 'morning_snack' },
+        { name: 'Lunch', insight: 'Power lunch time 💪', emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Afternoon Snack', insight: 'Stay fueled through the day 🍎', emoji: '🥗', mealType: 'afternoon_snack' },
+        { name: 'Dinner', insight: 'Evening nourishment 🌙', emoji: '🍲', mealType: 'dinner' },
+        { name: 'Evening Snack', insight: 'Light bite before rest 🌜', emoji: '🍪', mealType: 'evening_snack' },
+      ],
+      7: [
+        { name: 'Breakfast', insight: 'First meal of the day ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Mid-Morning', insight: 'Keep the gains coming 💪', emoji: '🥜', mealType: 'mid_morning' },
+        { name: 'Lunch', insight: 'Midday protein hit 🍽️', emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Afternoon Snack', insight: 'Pre-workout fuel 🔥', emoji: '🍌', mealType: 'afternoon_snack' },
+        { name: 'Post-Workout', insight: 'Recovery window nutrition 🏋️', emoji: '🥤', mealType: 'post_workout' },
+        { name: 'Dinner', insight: 'Evening muscle fuel 🌙', emoji: '🍲', mealType: 'dinner' },
+        { name: 'Before Bed', insight: 'Overnight recovery support 😴', emoji: '🥛', mealType: 'before_bed' },
+      ],
+      8: [
+        { name: 'Breakfast', insight: 'Wake up your metabolism ☀️', emoji: '🍳', mealType: 'breakfast' },
+        { name: 'Snack 1', insight: 'Keep blood sugar stable 📈', emoji: '🥜', mealType: 'snack_1' },
+        { name: 'Lunch', insight: 'Main midday meal 🍽️', emoji: '🍽️', mealType: 'lunch' },
+        { name: 'Snack 2', insight: 'Afternoon energy boost ⚡', emoji: '🍎', mealType: 'snack_2' },
+        { name: 'Pre-Workout', insight: 'Fuel for training 🔥', emoji: '🍌', mealType: 'pre_workout' },
+        { name: 'Post-Workout', insight: 'Recovery starts now 🏋️', emoji: '🥤', mealType: 'post_workout' },
+        { name: 'Dinner', insight: 'Evening nourishment 🌙', emoji: '🍲', mealType: 'dinner' },
+        { name: 'Before Bed', insight: 'Casein time for overnight gains 😴', emoji: '🥛', mealType: 'before_bed' },
+      ],
+    };
     
-    const distribution = baseCalorieDistribution[mealCount as keyof typeof baseCalorieDistribution] || baseCalorieDistribution[3];
+    const distribution = baseCalorieDistribution[mealCount] || baseCalorieDistribution[3];
+    const templates = mealTemplates[mealCount] || mealTemplates[3];
     
-    // Select appropriate meals based on count
-    let selectedMeals: typeof mealTemplates = [];
+    // If the plan has meals from AI, try to use their names
+    const planMeals = plan?.nutrition?.meals || [];
     
-    if (mealCount === 3) {
-      selectedMeals = [mealTemplates[0], mealTemplates[2], mealTemplates[4]]; // breakfast, lunch, dinner
-    } else if (mealCount === 4) {
-      selectedMeals = [mealTemplates[0], mealTemplates[1], mealTemplates[2], mealTemplates[4]]; // breakfast, morning snack, lunch, dinner
-    } else if (mealCount === 5) {
-      selectedMeals = [mealTemplates[0], mealTemplates[1], mealTemplates[2], mealTemplates[3], mealTemplates[4]]; // all except evening snack
-    } else if (mealCount === 6) {
-      selectedMeals = mealTemplates; // all meals
-    } else {
-      selectedMeals = [mealTemplates[0], mealTemplates[2], mealTemplates[4]]; // default to 3 meals
-    }
-    
-    return selectedMeals.map((meal, index) => ({
-      ...meal,
-      targetCalories: Math.round(totalCalorieTarget * distribution[index]),
-    }));
-  }, [user?.mealCount, totalCalorieTarget]);
+    return templates.map((template, index) => {
+      // Use AI-generated meal name if available, otherwise use template
+      const aiMealName = planMeals[index]?.name;
+      const displayName = aiMealName && aiMealName.length > 0 ? aiMealName : template.name;
+      
+      return {
+        ...template,
+        name: displayName,
+        targetCalories: Math.round(totalCalorieTarget * distribution[index]),
+      };
+    });
+  }, [user?.mealCount, totalCalorieTarget, plan?.nutrition?.meals, plan?.nutrition?.meals?.length]);
   
   // Calculate totals from completed meals + extras
   const completedMealTotals = useMemo(() => {
@@ -267,6 +437,19 @@ export default function PlanScreen() {
     });
   };
 
+  const toggleSupplementComplete = (supplementName: string) => {
+    if (Platform.OS !== 'web') {
+      Haptics.selectionAsync();
+    }
+    setCompletedSupplements(prev => {
+      const next = new Set(prev);
+      if (next.has(supplementName)) next.delete(supplementName); else next.add(supplementName);
+      // Persist in background
+      toggleSupplementCompleted(selectedDate, supplementName);
+      return next;
+    });
+  };
+
 
 
   const renderTabBar = () => (
@@ -276,136 +459,122 @@ export default function PlanScreen() {
         { id: 'nutrition', icon: Apple, label: 'Nutrition' },
         { id: 'recovery', icon: Heart, label: 'Recovery' },
         { id: 'motivation', icon: Sparkles, label: 'Motivation' },
-      ].map((tab) => (
-        <TouchableOpacity
-          key={tab.id}
-          style={[
-            styles.tabButton,
-            activeTab === tab.id && styles.activeTab,
-          ]}
-          onPress={() => setActiveTab(tab.id as PlanTab)}
-        >
-          <tab.icon 
-            size={20} 
-            color={activeTab === tab.id ? theme.color.bg : theme.color.muted} 
-          />
-          <Text style={[
-            styles.tabText,
-            activeTab === tab.id && styles.activeTabText,
-          ]}>
-            {tab.label}
-          </Text>
-        </TouchableOpacity>
-      ))}
+      ].map((tab) => {
+        const tabId = tab.id as PlanTab;
+        const isActive = activeTab === tabId;
+        const activeColor = TAB_COLORS[tabId];
+        return (
+          <TouchableOpacity
+            key={tab.id}
+            style={[
+              styles.tabButton,
+              isActive && styles.activeTab,
+              isActive && { backgroundColor: activeColor },
+            ]}
+            onPress={() => setActiveTab(tabId)}
+            activeOpacity={0.7}
+          >
+            <tab.icon size={16} color={isActive ? '#FFFFFF' : theme.color.muted} />
+            {isActive && <Text style={styles.activeTabText}>{tab.label}</Text>}
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 
   const renderWorkout = () => {
     if (!plan?.workout) {
-    return (
-      <ScrollView 
-        style={styles.tabContent}
-        showsVerticalScrollIndicator={false}
-        bounces={true}
-        scrollEventThrottle={16}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-      >
-        <Card style={styles.headerCard}>
-          <Text style={styles.headerTitle}>No Workout Plan</Text>
-          <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
-        </Card>
-      </ScrollView>
-    );
+      return (
+        <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} bounces={true} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+          <FadeInView>
+            <Card style={styles.headerCard}>
+              <Text style={[styles.headerTitle, { color: theme.color.ink }]}>No Workout Plan</Text>
+              <Text style={[styles.headerSubtitle, { color: theme.color.muted }]}>Complete a check-in to generate today's plan</Text>
+            </Card>
+          </FadeInView>
+        </ScrollView>
+      );
     }
 
+    const workoutBlocks = plan?.workout?.blocks || [];
+    const hasAdjustments = (plan?.adjustments?.length || 0) + (plan?.memoryAdjustments?.length || 0) > 0;
+
     return (
-      <ScrollView 
-        style={styles.tabContent}
-        showsVerticalScrollIndicator={false}
-        bounces={true}
-        scrollEventThrottle={16}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-      >
-        <Card gradient gradientColors={['#FF6B9D', '#C147E9']} style={styles.headerCard}>
-          <Text style={styles.headerTitle}>Today&apos;s Workout</Text>
-          {plan && (
-            <Text style={styles.headerSubtitle}>
-              Focus: {plan.workout?.focus?.join(', ') || 'General'}
-            </Text>
-          )}
-          {plan?.isFromBasePlan && (
-            <Text style={styles.basePlanIndicator}>
-              Based on your week • adjusted today
-            </Text>
-          )}
-          {plan?.workout?.notes && (
-            <Text style={styles.headerNotes}>{plan.workout.notes}</Text>
-          )}
-        </Card>
-
-        {plan?.adjustments && plan.adjustments.length > 0 && (
-          <Card style={styles.adjustmentCard}>
-            <Text style={styles.adjustmentTitle}>🎯 Adjusted Today</Text>
-            {plan.adjustments.map((adjustment, index) => (
-              <Text key={index} style={styles.adjustmentItem}>
-                • {adjustment}
-              </Text>
-            ))}
-          </Card>
-        )}
-
-        {(plan?.workout?.blocks || []).map((block, blockIndex) => (
-        <Card key={blockIndex} style={styles.blockCard}>
-          <Text style={styles.blockTitle}>{block?.name || 'Block'}</Text>
-          {(block?.items || []).map((item, itemIndex) => {
-            const exerciseId = `${blockIndex}-${itemIndex}`;
-            const isCompleted = completedExercises.has(exerciseId);
-            
-            return (
-              <View key={itemIndex} style={styles.exerciseItem}>
-                <View style={styles.exerciseInfo}>
-                  <Text style={[
-                    styles.exerciseName,
-                    isCompleted && styles.completedText,
-                  ]}>
-                    {item.exercise || item.type}
-                  </Text>
-                  {item.sets && item.reps && (
-                    <Text style={styles.exerciseDetails}>
-                      {item.sets} sets × {item.reps} {item.RIR ? `(RIR ${item.RIR})` : ''}
-                    </Text>
-                  )}
-                  {item.duration_min && (
-                    <Text style={styles.exerciseDetails}>
-                      {item.duration_min} minutes
-                    </Text>
-                  )}
-                </View>
-                <TouchableOpacity
-                  style={[
-                    styles.checkButton,
-                    isCompleted && styles.checkedButton,
-                  ]}
-                  onPress={() => toggleExerciseComplete(exerciseId)}
-                >
-                  <CheckCircle 
-                    size={24} 
-                    color={isCompleted ? theme.color.bg : theme.color.muted} 
-                  />
-                </TouchableOpacity>
+      <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} bounces={true} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+        <FadeInView delay={0}>
+          <Card gradient gradientColors={['#FF512F', '#DD2476']} style={styles.headerCard}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 8, gap: 8 }}>
+              <Flame fill="#fff" color="#fff" size={24} />
+              <Text style={styles.headerTitle}>Today's Workout</Text>
+            </View>
+            <Text style={styles.headerSubtitle}>Focus: {plan.workout?.focus?.join(', ') || 'General'}</Text>
+            {plan?.isFromBasePlan ? (
+              <View style={styles.tagContainer}>
+                <Text style={styles.tagText}>Based on your week - adjusted today</Text>
               </View>
-            );
-          })}
-        </Card>
+            ) : null}
+            {plan?.workout?.notes ? <Text style={styles.headerNotes}>{plan.workout.notes}</Text> : null}
+          </Card>
+        </FadeInView>
+        {hasAdjustments ? (
+          <FadeInView delay={100}>
+            <Card style={styles.adjustmentCard}>
+              <View style={styles.adjustmentHeader}>
+                <Zap size={20} color={theme.color.accent.yellow} fill={theme.color.accent.yellow} />
+                <Text style={styles.adjustmentTitle}>Smart Adjustments</Text>
+              </View>
+              <View style={{ paddingBottom: 8 }}>
+                {(plan?.adjustments || []).map((adjustment, index) => (
+                  <View key={`adj-${index}`} style={styles.adjustmentRow}>
+                    <View style={styles.bullet} />
+                    <Text style={styles.adjustmentItem}>{adjustment}</Text>
+                  </View>
+                ))}
+                {(plan?.memoryAdjustments || []).map((adjustment, index) => (
+                  <View key={`mem-${index}`} style={styles.adjustmentRow}>
+                    <View style={[styles.bullet, { backgroundColor: theme.color.accent.primary }]} />
+                    <Text style={[styles.adjustmentItem, { color: theme.color.accent.primary, fontWeight: '500' }]}>{adjustment}</Text>
+                  </View>
+                ))}
+              </View>
+            </Card>
+          </FadeInView>
+        ) : null}
+        {workoutBlocks.map((block, blockIndex) => (
+          <FadeInView key={blockIndex} delay={200 + (blockIndex * 100)}>
+            <Card style={styles.blockCard}>
+              <Text style={styles.blockTitle}>{block?.name || 'Block'}</Text>
+              {(block?.items || []).map((item, itemIndex) => {
+                const exerciseId = `${blockIndex}-${itemIndex}`;
+                const isCompleted = completedExercises.has(exerciseId);
+                const showSetsReps = item.sets && item.reps;
+                const showRIR = item.RIR;
+                const showDuration = item.duration_min;
+                return (
+                  <View key={itemIndex} style={styles.exerciseItem}>
+                    <View style={styles.exerciseInfo}>
+                      <Text style={[styles.exerciseName, isCompleted && styles.completedText]}>{item.exercise || item.type}</Text>
+                      <View style={styles.exerciseMetaContainer}>
+                        {showSetsReps ? <View style={styles.metaTag}><Text style={styles.metaText}>{item.sets} x {item.reps}</Text></View> : null}
+                        {showRIR ? <View style={[styles.metaTag, { backgroundColor: theme.color.bg }]}><Text style={styles.metaText}>RIR {item.RIR}</Text></View> : null}
+                        {showDuration ? <View style={styles.metaTag}><Text style={styles.metaText}>{item.duration_min} min</Text></View> : null}
+                      </View>
+                    </View>
+                    <BouncyCheckbox checked={isCompleted} onPress={() => toggleExerciseComplete(exerciseId)} />
+                  </View>
+                );
+              })}
+            </Card>
+          </FadeInView>
         ))}
+        <View style={{ height: 40 }} />
       </ScrollView>
     );
   };
 
   const renderNutrition = () => {
     const mealsData = generateMealsData();
+    const hasNutritionAdjustments = (plan?.nutritionAdjustments?.length || 0) > 0;
 
     return (
       <ScrollView 
@@ -417,30 +586,64 @@ export default function PlanScreen() {
         keyboardDismissMode="on-drag"
       >
         {/* Calorie Summary */}
-        <Card gradient gradientColors={['#4ECDC4', '#44A08D']} style={styles.headerCard}>
-          <Text style={styles.headerTitle}>Nutrition Plan</Text>
-          <View style={styles.calorieHeader}>
-            <Text style={styles.calorieCount}>
-              {currentCalories} of {totalCalorieTarget.toLocaleString()}
-            </Text>
-            <Text style={styles.calorieLabel}>Cal Eaten</Text>
-          </View>
-          
-          <View style={styles.macroInsights}>
-            <Text style={styles.insightsTitle}>Insights</Text>
-            <Text style={styles.macroBreakdown}>
-              {Math.round(currentProtein)}g Protein / {Math.round(currentFat)}g Fat / {Math.round(currentCarbs)}g Carb
-            </Text>
-            <Text style={styles.macroTargets}>
-              Target: {proteinTarget}g / {fatTarget}g / {carbTarget}g
-            </Text>
-            {extraTotals.calories > 0 && (
-              <Text style={styles.extrasLine}>
-                Extras: {extraTotals.calories} Cal
+        <FadeInView delay={0}>
+          <Card gradient gradientColors={['#11998e', '#38ef7d']} style={styles.headerCard}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+              <Apple fill="#fff" color="#fff" size={24} />
+              <Text style={styles.headerTitle}>Nutrition Plan</Text>
+            </View>
+            <View style={styles.calorieHeader}>
+              <Text style={styles.calorieCount}>
+                {currentCalories} <Text style={{ fontSize: 16, fontWeight: '500', opacity: 0.8 }}>/ {totalCalorieTarget.toLocaleString()} kcal</Text>
               </Text>
-            )}
-          </View>
-        </Card>
+            </View>
+            
+            <View style={styles.macroInsights}>
+              <View style={styles.macroRow}>
+                <View style={styles.macroItem}>
+                  <Text style={styles.macroValue}>{Math.round(currentProtein)}g</Text>
+                  <Text style={styles.macroLabel}>Protein</Text>
+                  <Text style={styles.macroTarget}>/{proteinTarget}g</Text>
+                </View>
+                <View style={styles.macroItem}>
+                  <Text style={styles.macroValue}>{Math.round(currentFat)}g</Text>
+                  <Text style={styles.macroLabel}>Fat</Text>
+                  <Text style={styles.macroTarget}>/{fatTarget}g</Text>
+                </View>
+                <View style={styles.macroItem}>
+                  <Text style={styles.macroValue}>{Math.round(currentCarbs)}g</Text>
+                  <Text style={styles.macroLabel}>Carbs</Text>
+                  <Text style={styles.macroTarget}>/{carbTarget}g</Text>
+                </View>
+              </View>
+              {extraTotals.calories > 0 && (
+                <Text style={styles.extrasLine}>
+                  + {extraTotals.calories} Cal from extras
+                </Text>
+              )}
+            </View>
+          </Card>
+        </FadeInView>
+
+        {/* Nutrition Smart Adjustments Card */}
+        {hasNutritionAdjustments ? (
+          <FadeInView delay={100}>
+            <Card style={styles.adjustmentCard}>
+              <View style={styles.adjustmentHeader}>
+                <Zap size={20} color={theme.color.accent.green} fill={theme.color.accent.green} />
+                <Text style={styles.adjustmentTitle}>Today's Nutrition Adjustments</Text>
+              </View>
+              <View style={{ paddingBottom: 8 }}>
+                {(plan?.nutritionAdjustments || []).map((adjustment, index) => (
+                  <View key={`nutr-adj-${index}`} style={styles.adjustmentRow}>
+                    <View style={[styles.bullet, { backgroundColor: theme.color.accent.green }]} />
+                    <Text style={styles.adjustmentItem}>{adjustment}</Text>
+                  </View>
+                ))}
+              </View>
+            </Card>
+          </FadeInView>
+        ) : null}
 
         {/* Meals List with Checkbox Actions */}
         <View style={styles.mealsContainer}>
@@ -448,121 +651,107 @@ export default function PlanScreen() {
             const isCompleted = completedMeals.has(meal.mealType);
             
             return (
-              <Card key={meal.name} style={[styles.mealCard, isCompleted ? styles.completedMealCard : undefined] as any}>
-                <View style={styles.mealHeader}>
-                  <View style={styles.mealInfo}>
-                    <Text style={[styles.mealName, isCompleted && styles.completedMealText]}>
-                      {meal.name}
-                    </Text>
-                    <Text style={[styles.mealCalories, isCompleted && styles.completedMealText]}>
-                      {meal.targetCalories} Cal {isCompleted ? '✓ Eaten' : ''}
-                    </Text>
+              <FadeInView key={meal.name} delay={100 + (index * 50)}>
+                <Card style={[styles.mealCard, isCompleted ? styles.completedMealCard : undefined] as any}>
+                  <View style={styles.mealHeader}>
+                    <View style={styles.mealInfo}>
+                      <Text style={[styles.mealName, isCompleted && styles.completedMealText]}>
+                        {meal.name}
+                      </Text>
+                      <Text style={[styles.mealCalories, isCompleted && styles.completedMealText]}>
+                        {meal.targetCalories} Cal {isCompleted ? '✓ Eaten' : ''}
+                      </Text>
+                    </View>
+                    
+                    <BouncyCheckbox 
+                      checked={isCompleted} 
+                      onPress={() => toggleMealComplete(meal.mealType)}
+                      color={theme.color.accent.green}
+                    />
                   </View>
                   
-                  <TouchableOpacity 
-                    onPress={() => toggleMealComplete(meal.mealType)}
-                    style={[styles.checkboxButton, isCompleted && styles.checkedMealButton]}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <Check 
-                      color={isCompleted ? theme.color.bg : theme.color.muted} 
-                      size={20} 
-                    />
-                  </TouchableOpacity>
-                </View>
-                
-                {/* Meal Insight */}
-                <View style={styles.insightContainer}>
-                  <Text style={[styles.insightText, isCompleted && styles.completedMealText]}>
-                    {meal.insight}
-                  </Text>
-                </View>
-
-                {/* Show planned meals if available */}
-                {plan?.nutrition?.meals && plan.nutrition.meals[index] && (
-                  <View style={styles.plannedMealsContainer}>
-                    <Text style={[styles.plannedMealsTitle, isCompleted && styles.completedMealText]}>
-                      Suggested:
+                  {/* Meal Insight */}
+                  <View style={styles.insightContainer}>
+                    <Text style={[styles.insightText, isCompleted && styles.completedMealText]}>
+                      {meal.insight}
                     </Text>
-                    {(plan.nutrition.meals[index]?.items || []).map((item, itemIndex) => (
-                      <Text key={itemIndex} style={[styles.plannedMealItem, isCompleted && styles.completedMealText]}>
-                        • {item?.food || 'Item'} - {item?.qty || ''}
-                      </Text>
-                    ))}
                   </View>
-                )}
-              </Card>
+
+                  {/* Show planned meals if available */}
+                  {plan?.nutrition?.meals && plan.nutrition.meals[index] && (
+                    <View style={styles.plannedMealsContainer}>
+                      <Text style={[styles.plannedMealsTitle, isCompleted && styles.completedMealText]}>
+                        Suggested:
+                      </Text>
+                      {(plan.nutrition.meals[index]?.items || []).map((item, itemIndex) => (
+                        <Text key={itemIndex} style={[styles.plannedMealItem, isCompleted && styles.completedMealText]}>
+                          • {item?.food || 'Item'} - {item?.qty || ''}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+                </Card>
+              </FadeInView>
             );
           })}
         </View>
         
-        {/* MANUAL ENTRIES Card */}
-        <Card style={styles.manualCard}> 
-          <TouchableOpacity 
-            onPress={handleManualEntry}
-            style={styles.snapFoodButton}
-            disabled={isLoading}
-            accessibilityRole="button"
-            accessibilityLabel="Add manual food entry"
-          >
-            <View style={styles.snapFoodContent}>
-              <Apple color={theme.color.accent.green} size={24} />
-              <View style={styles.snapFoodTextContainer}>
-                <Text style={styles.snapFoodTitle}>MANUAL ENTRIES</Text>
-                <Text style={styles.snapFoodSubtitle}>
-                  {manualEntries.length === 0 
-                    ? 'NO MANUAL ENTRY (additional from the plan)'
-                    : `${manualEntries.length} entr${manualEntries.length > 1 ? 'ies' : 'y'} added`}
+        {/* Quick Actions Row */}
+        <FadeInView delay={400}>
+          <View style={styles.quickActionsContainer}>
+            {/* Manual Entry */}
+            <Card style={styles.quickActionCard}>
+              <TouchableOpacity 
+                onPress={() => router.push('/food-entries')}
+                style={styles.quickHistoryButton}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <History size={16} color={theme.color.muted} />
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                onPress={handleManualEntry}
+                style={styles.quickActionContent}
+                disabled={isLoading}
+              >
+                <View style={[styles.quickIconCircle, { backgroundColor: theme.color.accent.green + '15' }]}>
+                  <Apple color={theme.color.accent.green} size={24} />
+                </View>
+                <Text style={styles.quickActionTitle}>Manual Entry</Text>
+                <Text style={styles.quickActionSubtitle}>
+                  {manualEntries.length > 0 ? `${manualEntries.length} added` : 'Log text'}
                 </Text>
-              </View>
-            </View>
-          </TouchableOpacity>
+              </TouchableOpacity>
+            </Card>
 
-          <TouchableOpacity 
-            onPress={() => router.push('/food-entries')}
-            style={[styles.snapFoodButton, { marginTop: 8 }]}
-            accessibilityRole="button"
-            accessibilityLabel="Manage your manual entries"
-          >
-            <View style={styles.snapFoodContent}>
-              <Text style={[styles.snapFoodSubtitle, { color: theme.color.accent.blue }]}>Manage entries</Text>
-            </View>
-          </TouchableOpacity>
-        </Card>
+            {/* Snap Food AI */}
+            <Card style={styles.quickActionCard}>
+              <TouchableOpacity 
+                onPress={() => router.push('/food-snaps')}
+                style={styles.quickHistoryButton}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <History size={16} color={theme.color.muted} />
+              </TouchableOpacity>
 
-        {/* SNAP FOOD Card */}
-        <Card style={styles.snapFoodCard}>
-          <TouchableOpacity 
-            onPress={handleSnapFood}
-            style={styles.snapFoodButton}
-            disabled={isLoading}
-            accessibilityLabel="Open Snap Food camera"
-          >
-            <View style={styles.snapFoodContent}>
-              <Camera color={theme.color.accent.primary} size={24} />
-              <View style={styles.snapFoodTextContainer}>
-                <Text style={styles.snapFoodTitle}>SNAP FOOD</Text>
-                <Text style={styles.snapFoodSubtitle}>
-                  {snapEntries.length === 0 
-                    ? 'NO FOOD SNAP (additional from the plan)' 
-                    : `${snapEntries.length} snap${snapEntries.length > 1 ? 's' : ''} added`
-                  }
+              <TouchableOpacity 
+                onPress={handleSnapFood}
+                style={styles.quickActionContent}
+                disabled={isLoading}
+              >
+                <View style={[styles.quickIconCircle, { backgroundColor: theme.color.accent.primary + '15' }]}>
+                  <Camera color={theme.color.accent.primary} size={24} />
+                </View>
+                <Text style={styles.quickActionTitle}>Snap AI</Text>
+                <Text style={styles.quickActionSubtitle}>
+                  {snapEntries.length > 0 ? `${snapEntries.length} added` : 'Scan food'}
                 </Text>
-              </View>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            onPress={() => router.push('/food-snaps')}
-            style={[styles.snapFoodButton, { marginTop: 8 }]}
-            accessibilityRole="button"
-            accessibilityLabel="Manage your food snaps"
-          >
-            <View style={styles.snapFoodContent}>
-              <Text style={[styles.snapFoodSubtitle, { color: theme.color.accent.blue }]}>Manage snaps</Text>
-            </View>
-          </TouchableOpacity>
-        </Card>
+              </TouchableOpacity>
+            </Card>
+          </View>
+        </FadeInView>
+        
+        <View style={{ height: 40 }} />
       </ScrollView>
     );
   };
@@ -577,10 +766,12 @@ export default function PlanScreen() {
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
         >
-          <Card style={styles.headerCard}>
-            <Text style={styles.headerTitle}>No Recovery Plan</Text>
-            <Text style={styles.headerSubtitle}>Complete a check-in to generate today&apos;s plan</Text>
-          </Card>
+          <FadeInView>
+            <Card style={styles.headerCard}>
+              <Text style={[styles.headerTitle, { color: theme.color.ink }]}>No Recovery Plan</Text>
+              <Text style={[styles.headerSubtitle, { color: theme.color.muted }]}>Complete a check-in to generate today's plan</Text>
+            </Card>
+          </FadeInView>
         </ScrollView>
       );
     }
@@ -593,55 +784,101 @@ export default function PlanScreen() {
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
       >
-        <Card gradient gradientColors={['#667eea', '#764ba2']} style={styles.headerCard}>
-          <Text style={styles.headerTitle}>Recovery Plan</Text>
-          <Text style={styles.headerSubtitle}>
-            Rest and recharge for tomorrow
-          </Text>
-        </Card>
-
-        <Card style={styles.recoveryCard}>
-          <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility & Movement</Text>
-          {(plan?.recovery?.mobility || []).map((item, index) => (
-            <Text key={index} style={styles.recoveryItem}>
-              • {item}
+        <FadeInView delay={0}>
+          <Card gradient gradientColors={['#8E2DE2', '#4A00E0']} style={styles.headerCard}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+              <Heart fill="#fff" color="#fff" size={24} />
+              <Text style={styles.headerTitle}>Recovery Plan</Text>
+            </View>
+            <Text style={styles.headerSubtitle}>
+              Rest and recharge for tomorrow
             </Text>
-          ))}
-        </Card>
+          </Card>
+        </FadeInView>
 
-        <Card style={styles.recoveryCard}>
-          <Text style={styles.recoveryTitle}>😴 Sleep Optimization</Text>
-          {(plan?.recovery?.sleep || []).map((item, index) => (
-            <Text key={index} style={styles.recoveryItem}>
-              • {item}
-            </Text>
-          ))}
-        </Card>
-
-        {/* Supplements Card */}
-        {(plan?.recovery?.supplements && plan.recovery.supplements.length > 0) && (
+        <FadeInView delay={100}>
           <Card style={styles.recoveryCard}>
-            <Text style={styles.recoveryTitle}>💊 Today's Supplements</Text>
-            {plan.recovery.supplements.map((item: string, index: number) => (
+            <Text style={styles.recoveryTitle}>🧘‍♀️ Mobility & Movement</Text>
+            {(plan?.recovery?.mobility || []).map((item, index) => (
               <Text key={index} style={styles.recoveryItem}>
                 • {item}
               </Text>
             ))}
           </Card>
+        </FadeInView>
+
+        <FadeInView delay={200}>
+          <Card style={styles.recoveryCard}>
+            <Text style={styles.recoveryTitle}>😴 Sleep Optimization</Text>
+            {(plan?.recovery?.sleep || []).map((item, index) => (
+              <Text key={index} style={styles.recoveryItem}>
+                • {item}
+              </Text>
+            ))}
+          </Card>
+        </FadeInView>
+
+        {/* Supplements Card */}
+        {(plan?.recovery?.supplements && plan.recovery.supplements.length > 0) && (
+          <FadeInView delay={300}>
+            <Card style={styles.recoveryCard}>
+              <Text style={styles.recoveryTitle}>💊 Today's Supplements</Text>
+              {plan.recovery.supplements.map((item: string, index: number) => {
+                const isCompleted = completedSupplements.has(item);
+                return (
+                  <View key={index} style={styles.supplementRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.recoveryItem, isCompleted && styles.completedText, { marginBottom: 0 }]}>
+                        {item}
+                      </Text>
+                    </View>
+                    <BouncyCheckbox 
+                      checked={isCompleted} 
+                      onPress={() => toggleSupplementComplete(item)} 
+                      color={theme.color.accent.primary} // Purple for recovery tab
+                    />
+                  </View>
+                );
+              })}
+            </Card>
+          </FadeInView>
         )}
 
-        {/* Personal Message Card */}
+        {/* Daily Debrief Card */}
         {plan?.recovery?.careNotes && (
-          <Card style={styles.recoveryCard}>
-            <Text style={styles.recoveryTitle}>✨ Personal Message</Text>
-            <Text style={styles.careNotesText}>{plan.recovery.careNotes}</Text>
-          </Card>
+          <FadeInView delay={400}>
+            <Card style={styles.recoveryCard}>
+              <Text style={styles.recoveryTitle}>Daily Debrief</Text>
+              <Text style={styles.careNotesText}>{plan.recovery.careNotes}</Text>
+            </Card>
+          </FadeInView>
         )}
+        <View style={{ height: 40 }} />
       </ScrollView>
     );
   };
 
-  const renderMotivation = () => (
+  const getPositiveMetricColor = (value?: number) => {
+    if (!value || value <= 0) return theme.color.line;
+    if (value >= 7) return theme.color.accent.green;
+    if (value >= 4) return theme.color.accent.yellow;
+    return '#EF4444';
+  };
+
+  const getStressMetricColor = (value?: number) => {
+    if (!value || value <= 0) return theme.color.line;
+    if (value <= 3) return theme.color.accent.green;
+    if (value <= 6) return theme.color.accent.yellow;
+    return '#EF4444';
+  };
+
+  const renderMotivation = () => {
+    const moodChar = todayCheckin?.moodCharacter ? MOOD_CHARACTERS.find(m => m.id === todayCheckin.moodCharacter) : null;
+    const motivationColor = getPositiveMetricColor(todayCheckin?.motivation);
+    const energyColor = getPositiveMetricColor(todayCheckin?.energy);
+    const stressColor = getStressMetricColor(todayCheckin?.stress);
+
+    return (
     <ScrollView 
       style={styles.tabContent}
       showsVerticalScrollIndicator={false}
@@ -650,11 +887,89 @@ export default function PlanScreen() {
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
     >
-      <Card gradient gradientColors={['#FF9A9E', '#FECFEF']} style={styles.motivationCard}>
+        <Card gradient gradientColors={['#EF4444', '#B91C1C']} style={styles.motivationCard}>
         <Sparkles size={40} color="#FFFFFF" style={styles.motivationIcon} />
         <Text style={styles.motivationTitle}>Your Daily Motivation</Text>
         <Text style={styles.motivationText}>{plan?.motivation || ''}</Text>
       </Card>
+
+        <FadeInView delay={100}>
+          <Card style={styles.snapshotCard}>
+            <Text style={styles.snapshotTitle}>Daily Snapshot</Text>
+
+            {/* Mood */}
+            {moodChar && (
+              <View style={styles.snapshotRow}>
+                <MoodCharacter mood={moodChar} selected={false} onPress={() => {}} size={60} />
+                <View style={{ marginLeft: 16, flex: 1 }}>
+                  <Text style={styles.snapshotLabel}>Mood</Text>
+                  <Text style={styles.snapshotValue}>{moodChar.label}</Text>
+                </View>
+              </View>
+            )}
+
+            {/* Mental State Grid */}
+            <View style={styles.mentalGrid}>
+               {/* Motivation */}
+               <View style={styles.mentalItem}>
+                 <Text style={styles.mentalLabel}>Motivation</Text>
+                 <View style={styles.progressBarBg}>
+                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.motivation || 0) * 10}%`, backgroundColor: motivationColor }]} />
+                 </View>
+                 <Text style={styles.mentalValue}>{todayCheckin?.motivation || '-'}/10</Text>
+               </View>
+               {/* Energy */}
+               <View style={styles.mentalItem}>
+                 <Text style={styles.mentalLabel}>Energy</Text>
+                 <View style={styles.progressBarBg}>
+                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.energy || 0) * 10}%`, backgroundColor: energyColor }]} />
+                 </View>
+                 <Text style={styles.mentalValue}>{todayCheckin?.energy || '-'}/10</Text>
+               </View>
+               {/* Stress */}
+               <View style={styles.mentalItem}>
+                 <Text style={styles.mentalLabel}>Stress</Text>
+                 <View style={styles.progressBarBg}>
+                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.stress || 0) * 10}%`, backgroundColor: stressColor }]} />
+                 </View>
+                 <Text style={styles.mentalValue}>{todayCheckin?.stress || '-'}/10</Text>
+               </View>
+            </View>
+
+            {/* Special Request */}
+            {todayCheckin?.specialRequest ? (
+              <View style={styles.requestContainer}>
+                <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 4}}>
+                   <AlertCircle size={16} color={theme.color.accent.blue} />
+                   <Text style={[styles.snapshotLabel, {marginLeft: 6, color: theme.color.accent.blue}]}>Special Request</Text>
+                </View>
+                <Text style={styles.requestText}>{todayCheckin.specialRequest}</Text>
+              </View>
+            ) : null}
+
+            {/* Bottom Row: Supplements & Intensity */}
+            <View style={styles.bottomRow}>
+               <View style={styles.bottomItem}>
+                 <Pill size={20} color={todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted} />
+                 <View style={{marginLeft: 8}}>
+                   <Text style={styles.snapshotLabel}>Supplements</Text>
+                   <Text style={[styles.snapshotValue, { color: todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted }]}>
+                     {todayCheckin?.suppsYN ? 'Taken' : 'Not Taken'}
+                   </Text>
+                 </View>
+               </View>
+
+               <View style={styles.bottomItem}>
+                 <Gauge size={20} color={theme.color.accent.primary} />
+                 <View style={{marginLeft: 8}}>
+                   <Text style={styles.snapshotLabel}>Intensity</Text>
+                   <Text style={styles.snapshotValue}>{todayCheckin?.workoutIntensity || '-'}/10</Text>
+                 </View>
+               </View>
+            </View>
+
+          </Card>
+        </FadeInView>
 
       <Card style={styles.actionCard}>
         <Text style={styles.actionTitle}>Reset & Breathe</Text>
@@ -668,6 +983,7 @@ export default function PlanScreen() {
       </Card>
     </ScrollView>
   );
+  };
 
   const renderContent = () => {
     switch (activeTab) {
@@ -699,6 +1015,17 @@ export default function PlanScreen() {
           headerLeft: () => (
             <TouchableOpacity onPress={() => router.replace('/(tabs)/home')} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Go to Home">
               <ChevronLeft color={theme.color.ink} size={20} />
+            </TouchableOpacity>
+          ),
+          headerRight: () => isToday && plan && (
+            <TouchableOpacity 
+              onPress={handleRetryPlan} 
+              style={{ paddingHorizontal: 8 }} 
+              accessibilityRole="button" 
+              accessibilityLabel="Regenerate plan"
+              disabled={isRetrying}
+            >
+              <RefreshCw color={theme.color.accent.primary} size={20} opacity={isRetrying ? 0.5 : 1} />
             </TouchableOpacity>
           ),
           headerStyle: { backgroundColor: theme.color.bg },
@@ -884,31 +1211,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: theme.color.card,
     marginHorizontal: theme.space.lg,
-    borderRadius: theme.radius.lg,
-    padding: 4,
+    marginVertical: theme.space.sm,
+    borderRadius: 100,
+    padding: 6,
     borderWidth: 1,
     borderColor: theme.color.line,
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   tabButton: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    gap: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 100,
+    gap: 6,
   },
   activeTab: {
     backgroundColor: theme.color.accent.primary,
   },
   tabText: {
-    fontSize: 12,
-    fontWeight: '500',
+    fontSize: 13,
+    fontWeight: '600',
     color: theme.color.muted,
   },
   activeTabText: {
-    color: theme.color.bg,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   tabContent: {
     flex: 1,
@@ -941,12 +1272,15 @@ const styles = StyleSheet.create({
   },
   macroRow: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    justifyContent: 'space-evenly',
     marginTop: 16,
     width: '100%',
+    paddingHorizontal: 16,
   },
   macroItem: {
     alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 80,
   },
   macroValue: {
     fontSize: 20,
@@ -1058,6 +1392,86 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     textAlign: 'center',
     lineHeight: 24,
+  },
+  snapshotCard: {
+    marginBottom: 20,
+    padding: 20,
+  },
+  snapshotTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.color.ink,
+    marginBottom: 16,
+  },
+  snapshotRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  snapshotLabel: {
+    fontSize: 12,
+    color: theme.color.muted,
+    marginBottom: 4,
+  },
+  snapshotValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: theme.color.ink,
+  },
+  mentalGrid: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+  },
+  mentalItem: {
+    flex: 1,
+  },
+  mentalLabel: {
+    fontSize: 11,
+    color: theme.color.muted,
+    marginBottom: 6,
+  },
+  mentalValue: {
+    fontSize: 12,
+    color: theme.color.ink,
+    fontWeight: '500',
+    textAlign: 'right',
+    marginTop: 4,
+  },
+  progressBarBg: {
+    height: 6,
+    backgroundColor: theme.color.line,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  requestContainer: {
+    backgroundColor: theme.color.accent.blue + '10',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: theme.color.accent.blue + '30',
+  },
+  requestText: {
+    fontSize: 14,
+    color: theme.color.ink,
+    lineHeight: 20,
+  },
+  bottomRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.line,
+  },
+  bottomItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
   },
   actionCard: {
     alignItems: 'center',
@@ -1216,20 +1630,136 @@ const styles = StyleSheet.create({
   },
   adjustmentCard: {
     marginBottom: 16,
-    backgroundColor: theme.color.accent.yellow + '20',
-    borderLeftWidth: 4,
-    borderLeftColor: theme.color.accent.yellow,
+    backgroundColor: theme.color.card,
+    borderColor: theme.color.line,
+    borderWidth: 1,
+    padding: 0, // Override padding to control it via children
+    overflow: 'hidden',
+  },
+  adjustmentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.color.line,
   },
   adjustmentTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
     color: theme.color.ink,
-    marginBottom: theme.space.sm,
+  },
+  adjustmentRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  bullet: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.color.accent.yellow,
+    marginTop: 6,
   },
   adjustmentItem: {
+    flex: 1,
     fontSize: 14,
+    color: theme.color.ink,
+    lineHeight: 20,
+  },
+  tagContainer: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  tagText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  exerciseMetaContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  metaTag: {
+    backgroundColor: theme.color.line,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  metaText: {
+    fontSize: 12,
     color: theme.color.muted,
+    fontWeight: '500',
+  },
+  macroTarget: {
+    fontSize: 12,
+    color: '#FFFFFF',
+    opacity: 0.6,
+    marginTop: -2,
+  },
+  iconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickActionsContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+  },
+  quickActionCard: {
+    flex: 1,
+    padding: 16,
+    minHeight: 140,
+  },
+  quickActionContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+  },
+  quickHistoryButton: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    zIndex: 10,
+    padding: 4,
+  },
+  quickIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  quickActionTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.color.ink,
     marginBottom: 4,
-    lineHeight: 18,
+    textAlign: 'center',
+  },
+  quickActionSubtitle: {
+    fontSize: 12,
+    color: theme.color.muted,
+    textAlign: 'center',
+  },
+  supplementRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.color.line,
+    gap: 12,
   },
 });

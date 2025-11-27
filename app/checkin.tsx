@@ -17,11 +17,13 @@ import {
 import { MoodCharacter } from '@/components/ui/MoodCharacter';
 import type { CheckinMode, CheckinData } from '@/types/user';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
+import { theme } from '@/constants/colors';
 
 export default function CheckinScreen() {
-  const { addCheckin, getWeightData, basePlans } = useUserStore();
+  const { addCheckin, getWeightData } = useUserStore();
   const mode: CheckinMode = 'PRO';
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showAllMoods, setShowAllMoods] = useState(false);
   
   const [checkinData, setCheckinData] = useState<Partial<CheckinData>>({
     bodyWeight: undefined,
@@ -35,15 +37,14 @@ export default function CheckinScreen() {
     digestion: 'Normal',
     stress: 3,
     waterL: 2.5,
-    saltYN: false,
     suppsYN: false,
     steps: undefined,
     kcalEst: undefined,
-    caffeineYN: false,
     alcoholYN: false,
     motivation: 7,
     specialRequest: undefined,
     workoutIntensity: 5,
+    yesterdayWorkoutQuality: 7,
   });
 
   // Local string state to allow decimals while typing (up to 2 dp)
@@ -63,6 +64,10 @@ export default function CheckinScreen() {
   };
 
   const handleSubmit = async () => {
+    // Prevent double-clicks: immediately disable button
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    
     // Validate required fields
     const missing: string[] = [];
     if (!checkinData.moodCharacter) missing.push('Mood');
@@ -80,10 +85,9 @@ export default function CheckinScreen() {
         `Please fill: ${missing.join(', ')}`,
         [{ text: 'OK' }]
       );
+      setIsSubmitting(false); // Re-enable on validation failure
       return;
     }
-
-    setIsSubmitting(true);
     
     try {
       const checkin: CheckinData = {
@@ -95,12 +99,16 @@ export default function CheckinScreen() {
 
       await addCheckin(checkin);
       
-      router.push('/generating-plan');
+      // Always force regeneration when submitting a new check-in
+      // This ensures the plan is regenerated with the new check-in data
+      // NOTE: Don't reset isSubmitting here - let the navigation happen
+      // The button stays disabled until we leave the screen
+      router.push('/generating-plan?force=true');
     } catch (error) {
       console.error('Error submitting checkin:', error);
-    } finally {
-      setIsSubmitting(false);
+      setIsSubmitting(false); // Only re-enable on error
     }
+    // Removed finally block - don't re-enable button after successful navigation
   };
 
   // Estimate today's weight using the last 4 entries of weight data
@@ -129,67 +137,114 @@ export default function CheckinScreen() {
     setCurrentWeightInput(String(rounded));
   };
 
-  // Mode selector removed; defaulting to PRO mode
-
   const renderBasicMetrics = () => (
-    <Card style={styles.sectionCard}>
-      <Text style={styles.sectionTitle}>How are you feeling?</Text>
-      
-      <View style={styles.moodContainer}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-          <Text style={styles.fieldLabel}>How are you today? <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
-          <TouchableOpacity
-            onPress={() => Alert.alert('Why this?', 'Your mood helps us tailor motivation and recovery suggestions for today.', [{ text: 'OK' }])}
+    <View style={styles.sectionContainer}>
+      <Card style={[styles.sectionCard, styles.moodCard]} gradient gradientColors={['#1A1A20', '#0C0C0D']}>
+        <Text style={styles.sectionTitle}>How are you feeling?</Text>
+        
+        <View style={styles.moodContainer}>
+          <View style={styles.labelRow}>
+            <Text style={styles.fieldLabel}>Select your mood <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
+            <TouchableOpacity
+              onPress={() => Alert.alert('Why this?', 'Your mood helps us tailor motivation and recovery suggestions for today.', [{ text: 'OK' }])}
+              accessibilityRole="button"
+              accessibilityLabel="About mood"
+              style={styles.infoIcon}
+            >
+              <Info color={theme.color.muted} size={16} />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.moodCharactersGrid}>
+            {(showAllMoods ? MOOD_CHARACTERS : MOOD_CHARACTERS.slice(0, 6)).map((mood) => (
+              <MoodCharacter
+                key={mood.id}
+                mood={mood}
+                selected={checkinData.moodCharacter === mood.id}
+                onPress={() => setCheckinData(prev => ({ ...prev, moodCharacter: mood.id }))}
+                size={70}
+              />
+            ))}
+          </View>
+          
+          <TouchableOpacity 
+            onPress={() => setShowAllMoods(!showAllMoods)} 
+            style={styles.showMoreButton}
             accessibilityRole="button"
-            accessibilityLabel="About mood question"
-            style={styles.infoIcon}
+            accessibilityLabel={showAllMoods ? "Show less mood options" : "Show more mood options"}
           >
-            <Info color={'#A6A6AD'} size={16} />
+            <Text style={styles.showMoreText}>{showAllMoods ? "Show less" : "Show more"}</Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.moodCharactersGrid}>
-          {MOOD_CHARACTERS.map((mood) => (
-            <MoodCharacter
-              key={mood.id}
-              mood={mood}
-              selected={checkinData.moodCharacter === mood.id}
-              onPress={() => setCheckinData(prev => ({ ...prev, moodCharacter: mood.id }))}
-              size={70}
-            />
-          ))}
+      </Card>
+
+      <Card style={styles.sectionCard}>
+        <Text style={styles.sectionTitle}>Mental State</Text>
+        
+        <View style={styles.sliderGroup}>
+          <Slider
+            label="Motivation Level"
+            infoText="Motivation helps us tailor coaching tone and suggest supportive actions."
+            value={checkinData.motivation || 7}
+            onValueChange={(value) => setCheckinData(prev => ({ ...prev, motivation: value }))}
+            minimumValue={1}
+            maximumValue={10}
+            minLabel="1 (Low)"
+            maxLabel="10 (High)"
+            formatValue={(v) => `${v}/10`}
+          />
+
+          <View style={styles.divider} />
+
+          <Slider
+            label="Energy Level"
+            required
+            infoText="Energy helps us adjust your workout intensity and recovery. Rate 1-10 based on how energized you feel now."
+            value={checkinData.energy || 7}
+            onValueChange={(value) => setCheckinData(prev => ({ ...prev, energy: value }))}
+            minimumValue={1}
+            maximumValue={10}
+            minLabel="1 (Drained)"
+            maxLabel="10 (Charged)"
+            formatValue={(v) => `${v}/10`}
+          />
+
+          <View style={styles.divider} />
+
+          <Slider
+            label="Stress Level"
+            required
+            infoText="Stress impacts performance and recovery. Rate 1-10 based on your current stress."
+            value={checkinData.stress || 3}
+            onValueChange={(value) => setCheckinData(prev => ({ ...prev, stress: value }))}
+            minimumValue={1}
+            maximumValue={10}
+            minLabel="1 (Chill)"
+            maxLabel="10 (Panic)"
+            formatValue={(v) => `${v}/10`}
+          />
         </View>
-      </View>
+      </Card>
 
-      <Slider
-        label="Energy Level"
-        required
-        infoText="Energy helps us adjust your workout intensity and recovery. Rate 1-10 based on how energized you feel now."
-        value={checkinData.energy || 7}
-        onValueChange={(value) => setCheckinData(prev => ({ ...prev, energy: value }))}
-        minimumValue={1}
-        maximumValue={10}
-      />
-
-      <Slider
-        label="Stress Level"
-        required
-        infoText="Stress impacts performance and recovery. Rate 1-10 based on your current stress."
-        value={checkinData.stress || 3}
-        onValueChange={(value) => setCheckinData(prev => ({ ...prev, stress: value }))}
-        minimumValue={1}
-        maximumValue={10}
-      />
-
-      <Slider
-        label="Workout Intensity"
-        required
-        infoText="How intense do you want today's workout? 1 = Recovery focused, 5 = Optimal, 10 = Ego lifts"
-        value={checkinData.workoutIntensity || 5}
-        onValueChange={(value) => setCheckinData(prev => ({ ...prev, workoutIntensity: value }))}
-        minimumValue={1}
-        maximumValue={10}
-      />
-    </Card>
+      <Card style={styles.sectionCard}>
+        <Text style={styles.sectionTitle}>Workout Preference</Text>
+        <Slider
+          label="Intensity Target"
+          required
+          infoText="How intense do you want today's workout? 1 = Recovery focused, 5 = Optimal, 10 = Ego lifts"
+          value={checkinData.workoutIntensity || 5}
+          onValueChange={(value) => setCheckinData(prev => ({ ...prev, workoutIntensity: value }))}
+          minimumValue={1}
+          maximumValue={10}
+          minLabel="1 (Recovery)"
+          maxLabel="10 (Max)"
+          formatValue={(v) => {
+            if (v <= 3) return `${v} (Recovery)`;
+            if (v <= 7) return `${v} (Optimal)`;
+            return `${v} (Push)`;
+          }}
+        />
+      </Card>
+    </View>
   );
 
   const renderSleepMetrics = () => (
@@ -205,18 +260,23 @@ export default function CheckinScreen() {
         minimumValue={3}
         maximumValue={12}
         step={0.5}
+        minLabel="3h"
+        maxLabel="12h+"
+        formatValue={(v) => `${v} hrs`}
       />
 
+      <View style={styles.divider} />
+
       <View style={styles.fieldContainer}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-          <Text style={styles.fieldLabel}>Woke up feeling <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.fieldLabel}>Woke up feeling <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
           <TouchableOpacity
             onPress={() => Alert.alert('Why this?', 'Morning readiness helps adjust training load and recovery focus.', [{ text: 'OK' }])}
             accessibilityRole="button"
             accessibilityLabel="About woke up feeling"
             style={styles.infoIcon}
           >
-            <Info color={'#A6A6AD'} size={16} />
+            <Info color={theme.color.muted} size={16} />
           </TouchableOpacity>
         </View>
         <View style={styles.chipsContainer}>
@@ -226,7 +286,7 @@ export default function CheckinScreen() {
               label={feeling}
               selected={checkinData.wokeFeeling === feeling}
               onPress={() => setCheckinData(prev => ({ ...prev, wokeFeeling: feeling }))}
-              color="#4ECDC4"
+              color={theme.color.accent.green}
             />
           ))}
         </View>
@@ -239,7 +299,7 @@ export default function CheckinScreen() {
       <Text style={styles.sectionTitle}>Physical State</Text>
       
       <View style={styles.fieldContainer}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+        <View style={styles.labelRow}>
           <Text style={styles.fieldLabel}>Any soreness?</Text>
           <TouchableOpacity
             onPress={() => Alert.alert('Why this?', 'Soreness guides exercise selection and recovery emphasis.', [{ text: 'OK' }])}
@@ -247,7 +307,7 @@ export default function CheckinScreen() {
             accessibilityLabel="About soreness"
             style={styles.infoIcon}
           >
-            <Info color={'#A6A6AD'} size={16} />
+            <Info color={theme.color.muted} size={16} />
           </TouchableOpacity>
         </View>
         <View style={styles.chipsContainer}>
@@ -257,22 +317,24 @@ export default function CheckinScreen() {
               label={area}
               selected={checkinData.soreness?.includes(area) || false}
               onPress={() => handleSorenessToggle(area)}
-              color="#FF6B9D"
+              color={theme.color.accent.primary}
             />
           ))}
         </View>
       </View>
 
+      <View style={styles.divider} />
+
       <View style={styles.fieldContainer}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-          <Text style={styles.fieldLabel}>Digestion <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.fieldLabel}>Digestion <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
           <TouchableOpacity
             onPress={() => Alert.alert('Why this?', 'Digestion influences today’s nutrition suggestions and tolerance for intensity.', [{ text: 'OK' }])}
             accessibilityRole="button"
             accessibilityLabel="About digestion"
             style={styles.infoIcon}
           >
-            <Info color={'#A6A6AD'} size={16} />
+            <Info color={theme.color.muted} size={16} />
           </TouchableOpacity>
         </View>
         <View style={styles.chipsContainer}>
@@ -282,7 +344,7 @@ export default function CheckinScreen() {
               label={digestion}
               selected={checkinData.digestion === digestion}
               onPress={() => setCheckinData(prev => ({ ...prev, digestion }))}
-              color="#44A08D"
+              color={theme.color.accent.green}
             />
           ))}
         </View>
@@ -290,230 +352,130 @@ export default function CheckinScreen() {
     </Card>
   );
 
-  const renderHighModeExtras = () => {
-
-    return (
-      <Card style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Additional Metrics</Text>
-        
-        <Slider
-          label="Motivation Level"
-          infoText="Motivation helps us tailor coaching tone and suggest supportive actions."
-          value={checkinData.motivation || 7}
-          onValueChange={(value) => setCheckinData(prev => ({ ...prev, motivation: value }))}
-          minimumValue={1}
-          maximumValue={10}
-        />
-
-        {/* Water input */}
-        {(
-          <View style={styles.waterInputContainer}>
-            <View style={styles.labelRow}>
-              <Text style={styles.fieldLabel}>Water Yesterday (L) <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
-              <TouchableOpacity
-                onPress={() => Alert.alert('Why this?', 'Hydration affects performance and recovery. Enter approximate liters from yesterday.', [{ text: 'OK' }])}
-                accessibilityRole="button"
-                accessibilityLabel="About water intake"
-                style={styles.infoIcon}
-              >
-                <Info color={'#A6A6AD'} size={16} />
-              </TouchableOpacity>
-            </View>
-            <TextInput
-              style={styles.waterInput}
-              value={checkinData.waterL?.toString() || ''}
-              onChangeText={(text) => {
-                const water = parseFloat(text);
-                setCheckinData(prev => ({ 
-                  ...prev, 
-                  waterL: isNaN(water) ? undefined : water 
-                }));
-              }}
-              placeholder="Enter liters of water"
-              placeholderTextColor="#A6A6AD"
-              keyboardType="numeric"
-              onBlur={async () => {
-                if (checkinData.waterL === undefined || checkinData.waterL === null) return;
-                const v = await confirmNumericWithinRange(checkinData.waterL, NumberSpecs.waterL);
-                if (v === null) setCheckinData(prev => ({ ...prev, waterL: undefined }));
-                else setCheckinData(prev => ({ ...prev, waterL: v }));
-              }}
-            />
-          </View>
-        )}
-
-        {/* No separate weight input here */}
-
-        <View style={styles.toggleContainer}>
-          <TouchableOpacity
-            style={[
-              styles.toggleButton,
-              checkinData.caffeineYN && styles.toggleActive,
-            ]}
-            onPress={() => setCheckinData(prev => ({ ...prev, caffeineYN: !prev.caffeineYN }))}
-          >
-            <Text style={[
-              styles.toggleText,
-              checkinData.caffeineYN && styles.toggleActiveText,
-            ]}>
-              Had Caffeine ☕
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.toggleButton,
-              checkinData.alcoholYN && styles.toggleActive,
-            ]}
-            onPress={() => setCheckinData(prev => ({ ...prev, alcoholYN: !prev.alcoholYN }))}
-          >
-            <Text style={[
-              styles.toggleText,
-              checkinData.alcoholYN && styles.toggleActiveText,
-            ]}>
-              Had Alcohol 🍷
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </Card>
-    );
-  };
-
   const renderProModeExtras = () => {
-
     return (
       <>
         <Card style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Weight Tracking</Text>
           
-          <View style={styles.weightInputContainer}>
-            <Text style={styles.fieldLabel}>Today's Weight (kg) <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
-            <TextInput
-              style={[
-                styles.weightInput,
+          <View style={styles.inputWrapper}>
+            <View style={styles.labelRow}>
+              <Text style={styles.fieldLabel}>Today's Weight <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
+              <TouchableOpacity
+                onPress={() => Alert.alert('Why this?', 'Regular weight tracking helps adjust calorie targets and monitor progress.', [{ text: 'OK' }])}
+                accessibilityRole="button"
+                accessibilityLabel="About weight"
+                style={styles.infoIcon}
+              >
+                <Info color={theme.color.muted} size={16} />
+              </TouchableOpacity>
+            </View>
+            <View style={[
+                styles.weightInputContainer,
                 !checkinData.currentWeight && styles.requiredField
-              ]}
-              value={currentWeightInput}
-              onChangeText={(text) => {
-                // Allow only numbers with optional single dot and up to 2 decimals
-                const decimalPattern = /^\d*\.?\d{0,2}$/;
-                if (text === '' || decimalPattern.test(text)) {
-                  let nextText = text;
-                  let numeric = parseFloat(text);
-
-                  if (text) {
-                    // Enforce dynamic bounds based on last recorded weight and elapsed days
-                    const weights = getWeightData?.() || [];
-                    const last = weights.length > 0 ? weights[weights.length - 1] : undefined;
-                    const now = Date.now();
-                    // Only apply dynamic clamp if we have a prior weight; otherwise, allow free typing
-                    let minBound = -Infinity;
-                    let maxBound = Infinity;
-
-                    if (last && isFinite(last.weight) && last.date) {
-                      const lastTime = new Date(last.date).getTime();
-                      const rawDays = (now - lastTime) / (1000 * 60 * 60 * 24);
-                      const daysBetween = isFinite(rawDays) ? Math.max(1, Math.round(rawDays)) : 1;
-                      const allowedDelta = MAX_WEIGHT_CHANGE_PER_DAY_KG * daysBetween;
-                      minBound = last.weight - allowedDelta;
-                      maxBound = last.weight + allowedDelta;
-                    }
-
-                    if (!isNaN(numeric)) {
-                      if (numeric < minBound) {
-                        const clamped = Math.round(minBound * 100) / 100;
-                        numeric = clamped;
-                        nextText = String(clamped);
-                        if (!clampAlertShownRef.current && isFinite(minBound)) {
-                          Alert.alert(
-                            'Too big a change',
-                            `You can change at most ±${MAX_WEIGHT_CHANGE_PER_DAY_KG} kg per day from your last recorded weight.`,
-                            [{ text: 'OK' }]
-                          );
-                          clampAlertShownRef.current = true;
-                        }
-                      } else if (numeric > maxBound) {
-                        const clamped = Math.round(maxBound * 100) / 100;
-                        numeric = clamped;
-                        nextText = String(clamped);
-                        if (!clampAlertShownRef.current && isFinite(maxBound)) {
-                          Alert.alert(
-                            'Too big a change',
-                            `You can change at most ±${MAX_WEIGHT_CHANGE_PER_DAY_KG} kg per day from your last recorded weight.`,
-                            [{ text: 'OK' }]
-                          );
-                          clampAlertShownRef.current = true;
-                        }
-                      } else {
-                        // Back within bounds → allow alerts again
-                        clampAlertShownRef.current = false;
-                      }
-                    }
+              ]}>
+              <TextInput
+                style={styles.weightInput}
+                value={currentWeightInput}
+                onChangeText={(text) => {
+                  // Allow only numbers with optional single dot and up to 2 decimals
+                  const decimalPattern = /^\d*\.?\d{0,2}$/;
+                  if (text === '' || decimalPattern.test(text)) {
+                    const numeric = parseFloat(text);
+                    
+                    // Just accept the input while typing - no validation yet
+                    setCurrentWeightInput(text);
+                    setCheckinData(prev => ({
+                      ...prev,
+                      currentWeight: text && !isNaN(numeric) ? numeric : undefined,
+                    }));
                   }
-
-                  setCurrentWeightInput(nextText);
-                  setCheckinData(prev => ({
-                    ...prev,
-                    currentWeight: nextText && !isNaN(numeric) ? numeric : undefined,
-                  }));
-                }
-              }}
-              placeholder="Enter your current weight"
-              placeholderTextColor="#A6A6AD"
-              keyboardType="decimal-pad"
-              onBlur={async () => {
-                const input = currentWeightInput.trim();
-                if (!input) {
-                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
-                  return;
-                }
-                const numeric = parseFloat(input);
-                if (isNaN(numeric)) {
-                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
-                  setCurrentWeightInput('');
-                  return;
-                }
-                const v = await confirmNumericWithinRange(numeric, NumberSpecs.weightKg);
-                if (v === null) {
-                  setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
-                  setCurrentWeightInput('');
-                } else {
+                }}
+                placeholder="00.0"
+                placeholderTextColor={theme.color.muted}
+                keyboardType="decimal-pad"
+                onBlur={async () => {
+                  const input = currentWeightInput.trim();
+                  if (!input) {
+                    setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                    return;
+                  }
+                  const numeric = parseFloat(input);
+                  if (isNaN(numeric)) {
+                    setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                    setCurrentWeightInput('');
+                    return;
+                  }
+                  
+                  // Validate weight range on blur (after user finishes typing)
+                  const v = await confirmNumericWithinRange(numeric, NumberSpecs.weightKg);
+                  if (v === null) {
+                    setCheckinData(prev => ({ ...prev, currentWeight: undefined }));
+                    setCurrentWeightInput('');
+                    return;
+                  }
+                  
                   const rounded = Math.round(v * 100) / 100;
                   setCheckinData(prev => ({ ...prev, currentWeight: rounded }));
                   setCurrentWeightInput(String(rounded));
-                }
-              }}
-            />
-            <View style={styles.assumeRow}>
-              <TouchableOpacity
-                style={styles.assumeButton}
-                onPress={handleAssumeWeight}
-                accessibilityRole="button"
-                accessibilityLabel="Assume today's weight from recent trend"
-              >
-                <Text style={styles.assumeText}>Assume</Text>
-              </TouchableOpacity>
+                  
+                  // Check for large weight change warning (only on blur, after typing is complete)
+                  const weights = getWeightData?.() || [];
+                  const last = weights.length > 0 ? weights[weights.length - 1] : undefined;
+
+                  if (last && isFinite(last.weight) && last.date) {
+                    const now = Date.now();
+                    const lastTime = new Date(last.date).getTime();
+                    const rawDays = (now - lastTime) / (1000 * 60 * 60 * 24);
+                    const daysBetween = isFinite(rawDays) ? Math.max(1, Math.round(rawDays)) : 1;
+                    const allowedDelta = MAX_WEIGHT_CHANGE_PER_DAY_KG * daysBetween;
+                    const minBound = last.weight - allowedDelta;
+                    const maxBound = last.weight + allowedDelta;
+
+                    // Show warning if outside bounds, but DON'T change the value
+                    if ((rounded < minBound || rounded > maxBound) && !clampAlertShownRef.current) {
+                      const diff = Math.abs(rounded - last.weight).toFixed(1);
+                      Alert.alert(
+                        'Large weight change',
+                        `This is a ${diff} kg change from your last recorded weight (${last.weight} kg). If this is correct, you can continue.`,
+                        [{ text: 'OK' }]
+                      );
+                      clampAlertShownRef.current = true;
+                    } else if (rounded >= minBound && rounded <= maxBound) {
+                      // Back within bounds → allow warnings again
+                      clampAlertShownRef.current = false;
+                    }
+                  }
+                }}
+              />
+              <Text style={styles.unitText}>kg</Text>
             </View>
+            <TouchableOpacity
+              style={styles.assumeButton}
+              onPress={handleAssumeWeight}
+            >
+              <Text style={styles.assumeText}>Use estimate</Text>
+            </TouchableOpacity>
           </View>
         </Card>
 
         <Card style={styles.sectionCard}>
           <View style={styles.labelRow}>
-            <Text style={styles.sectionTitle}>Special Request</Text>
+            <Text style={[styles.sectionTitle, { marginBottom: 0 }]}>Special Request</Text>
             <TouchableOpacity
               onPress={() => Alert.alert('Optional', 'Add any special considerations for today (e.g., time limit, focus area, avoid joints).', [{ text: 'OK' }])}
               accessibilityRole="button"
               accessibilityLabel="About special request"
               style={styles.infoIcon}
             >
-              <Info color={'#A6A6AD'} size={18} />
+              <Info color={theme.color.muted} size={18} />
             </TouchableOpacity>
           </View>
           <TextInput
             style={styles.textArea}
             multiline
             placeholder="Any special requests for today’s plan? (e.g., focus on pull, short on time, avoid knees)"
-            placeholderTextColor="#A6A6AD"
+            placeholderTextColor={theme.color.muted}
             value={checkinData.specialRequest || ''}
             onChangeText={(text) => setCheckinData(prev => ({ ...prev, specialRequest: text }))}
           />
@@ -522,81 +484,80 @@ export default function CheckinScreen() {
         <Card style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Yesterday's Intake</Text>
           
-          <View style={styles.waterInputContainer}>
+          <View style={styles.inputWrapper}>
             <View style={styles.labelRow}>
-              <Text style={styles.fieldLabel}>Water Yesterday (L) <Text style={{ color: '#FF6FB2' }}>*</Text></Text>
-              <TouchableOpacity
-                onPress={() => Alert.alert('Why this?', 'Hydration affects performance and recovery. Enter approximate liters from yesterday.', [{ text: 'OK' }])}
-                accessibilityRole="button"
-                accessibilityLabel="About water intake"
-                style={styles.infoIcon}
-              >
-                <Info color={'#A6A6AD'} size={16} />
-              </TouchableOpacity>
+              <Text style={styles.fieldLabel}>Water Intake <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
             </View>
-            <TextInput
-              style={styles.waterInput}
-              value={checkinData.waterL?.toString() || ''}
-              onChangeText={(text) => {
-                const water = parseFloat(text);
-                setCheckinData(prev => ({ 
-                  ...prev, 
-                  waterL: isNaN(water) ? undefined : water 
-                }));
-              }}
-              placeholder="Enter liters of water"
-              placeholderTextColor="#A6A6AD"
-              keyboardType="numeric"
-              onBlur={async () => {
-                if (checkinData.waterL === undefined || checkinData.waterL === null) return;
-                const v = await confirmNumericWithinRange(checkinData.waterL, NumberSpecs.waterL);
-                if (v === null) setCheckinData(prev => ({ ...prev, waterL: undefined }));
-                else setCheckinData(prev => ({ ...prev, waterL: v }));
-              }}
-            />
+            <View style={styles.waterInputContainer}>
+              <TextInput
+                style={styles.waterInput}
+                value={checkinData.waterL?.toString() || ''}
+                onChangeText={(text) => {
+                  const water = parseFloat(text);
+                  setCheckinData(prev => ({ 
+                    ...prev, 
+                    waterL: isNaN(water) ? undefined : water 
+                  }));
+                }}
+                placeholder="0.0"
+                placeholderTextColor={theme.color.muted}
+                keyboardType="numeric"
+                onBlur={async () => {
+                  if (checkinData.waterL === undefined || checkinData.waterL === null) return;
+                  const v = await confirmNumericWithinRange(checkinData.waterL, NumberSpecs.waterL);
+                  if (v === null) setCheckinData(prev => ({ ...prev, waterL: undefined }));
+                  else setCheckinData(prev => ({ ...prev, waterL: v }));
+                }}
+              />
+              <Text style={styles.unitText}>L</Text>
+            </View>
           </View>
+
+          <View style={styles.divider} />
+
+          <Slider
+            label="Last Workout Quality"
+            infoText="Rate how your last workout felt overall. 1 = Very bad, 10 = Excellent."
+            value={checkinData.yesterdayWorkoutQuality || 7}
+            onValueChange={(value) => setCheckinData(prev => ({ ...prev, yesterdayWorkoutQuality: value }))}
+            minimumValue={1}
+            maximumValue={10}
+            minLabel="1 (Bad)"
+            maxLabel="10 (Great)"
+            formatValue={(v) => `${v}/10`}
+          />
+
+          <View style={styles.divider} />
 
           <View style={styles.toggleContainer}>
             <View style={styles.labelRow}>
-              <Text style={styles.fieldLabel}>Y/N Yesterday</Text>
+              <Text style={styles.fieldLabel}>Extras</Text>
               <TouchableOpacity
-                onPress={() => Alert.alert('Why this?', 'Salt and supplements affect hydration and recovery, informing plan adjustments.', [{ text: 'OK' }])}
+                onPress={() => Alert.alert('Why this?', 'Track additional factors that impact recovery and performance.', [{ text: 'OK' }])}
                 accessibilityRole="button"
-                accessibilityLabel="About Y/N yesterday"
+                accessibilityLabel="About extras"
                 style={styles.infoIcon}
               >
-                <Info color={'#A6A6AD'} size={16} />
+                <Info color={theme.color.muted} size={16} />
               </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={[
-                styles.toggleButton,
-                checkinData.saltYN && styles.toggleActive,
-              ]}
-              onPress={() => setCheckinData(prev => ({ ...prev, saltYN: !prev.saltYN }))}
-            >
-              <Text style={[
-                styles.toggleText,
-                checkinData.saltYN && styles.toggleActiveText,
-              ]}>
-                Salt Yesterday (Y/N) 🧂
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.toggleButton,
-                checkinData.suppsYN && styles.toggleActive,
-              ]}
-              onPress={() => setCheckinData(prev => ({ ...prev, suppsYN: !prev.suppsYN }))}
-            >
-              <Text style={[
-                styles.toggleText,
-                checkinData.suppsYN && styles.toggleActiveText,
-              ]}>
-                Supps Yesterday (Y/N) 💊
-              </Text>
-            </TouchableOpacity>
+            
+            <View style={styles.togglesRow}>
+              <TouchableOpacity
+                style={[
+                  styles.toggleButton,
+                  checkinData.alcoholYN && styles.toggleActive,
+                ]}
+                onPress={() => setCheckinData(prev => ({ ...prev, alcoholYN: !prev.alcoholYN }))}
+              >
+                <Text style={[
+                  styles.toggleText,
+                  checkinData.alcoholYN && styles.toggleActiveText,
+                ]}>
+                  Alcohol 🍷
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </Card>
       </>
@@ -608,15 +569,15 @@ export default function CheckinScreen() {
       <Stack.Screen 
         options={{ 
           title: 'Check-in time',
-          headerStyle: { backgroundColor: '#0C0C0D' },
-          headerTintColor: '#F7F7F8',
+          headerStyle: { backgroundColor: theme.color.bg },
+          headerTintColor: theme.color.ink,
           headerTitleStyle: {
             fontSize: 18,
             fontWeight: '600',
           },
           headerLeft: () => (
             <TouchableOpacity onPress={() => router.back()} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Go back">
-              <ChevronLeft color={'#F7F7F8'} size={22} />
+              <ChevronLeft color={theme.color.ink} size={22} />
             </TouchableOpacity>
           ),
         }} 
@@ -641,7 +602,6 @@ export default function CheckinScreen() {
           {renderBasicMetrics()}
           {renderSleepMetrics()}
           {renderPhysicalMetrics()}
-          {renderHighModeExtras()}
           {renderProModeExtras()}
 
           <Button
@@ -669,194 +629,205 @@ export default function CheckinScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0C0C0D',
+    backgroundColor: theme.color.bg,
   },
   safeArea: {
     flex: 1,
   },
   scrollContent: {
     flexGrow: 1,
-    padding: 20,
-    paddingTop: 100,
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 40,
   },
   header: {
     alignItems: 'center',
-    marginBottom: 30,
+    marginBottom: 32,
+    marginTop: 16,
   },
   title: {
-    fontSize: 44,
+    fontSize: 36,
     fontWeight: '700',
-    color: '#F7F7F8',
+    color: theme.color.ink,
     textAlign: 'center',
-    lineHeight: 44 * 0.9,
+    letterSpacing: -0.5,
+    marginBottom: 8,
+    fontFamily: theme.font.display,
   },
   subtitle: {
     fontSize: 16,
-    color: '#A6A6AD',
+    color: theme.color.muted,
     textAlign: 'center',
-    marginTop: 12,
+    fontFamily: theme.font.ui,
   },
-  modeCard: {
-    marginBottom: 24,
-    backgroundColor: '#131316',
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: '#26262B',
-    padding: 24,
-  },
-  modeTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: '#F7F7F8',
+  sectionContainer: {
+    gap: 16,
     marginBottom: 16,
-    textAlign: 'center',
-  },
-  modeButtons: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  modeButton: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#26262B',
-    backgroundColor: '#131316',
-    alignItems: 'center',
-  },
-  selectedMode: {
-    borderColor: '#FF6FB2',
-    backgroundColor: '#FF6FB2',
-  },
-  modeButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#F7F7F8',
-  },
-  modeDescription: {
-    fontSize: 12,
-    color: '#A6A6AD',
-    marginTop: 2,
-  },
-  selectedModeText: {
-    color: '#0C0C0D',
   },
   sectionCard: {
-    marginBottom: 24,
-    backgroundColor: '#131316',
+    backgroundColor: theme.color.card,
     borderRadius: 24,
-    borderWidth: 1,
-    borderColor: '#26262B',
     padding: 24,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
+  },
+  moodCard: {
+    paddingTop: 32,
+    paddingBottom: 24,
   },
   sectionTitle: {
-    fontSize: 30,
+    fontSize: 20,
     fontWeight: '700',
-    color: '#F7F7F8',
-    marginBottom: 24,
+    color: theme.color.ink,
+    marginBottom: 20,
     textAlign: 'center',
-    lineHeight: 30,
+    fontFamily: theme.font.display,
   },
   moodContainer: {
-    marginBottom: 20,
+    alignItems: 'center',
   },
   fieldLabel: {
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '600',
-    color: '#F7F7F8',
-    marginBottom: 16,
+    color: theme.color.muted,
     textAlign: 'center',
+    marginBottom: 12,
+    fontFamily: theme.font.ui,
   },
   moodCharactersGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 8,
+    gap: 16,
+    marginTop: 8,
   },
   fieldContainer: {
-    marginBottom: 20,
+    marginBottom: 0,
   },
   chipsContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 10,
   },
   toggleContainer: {
-    gap: 12,
-  },
-  toggleButton: {
-    padding: 16,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#26262B',
-    backgroundColor: '#131316',
+    marginTop: 8,
     alignItems: 'center',
   },
+  togglesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 12,
+    marginTop: 12,
+  },
+  toggleButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    alignItems: 'center',
+    minWidth: 140,
+  },
   toggleActive: {
-    borderColor: '#7EE08A',
-    backgroundColor: '#7EE08A',
+    borderColor: theme.color.accent.green,
+    backgroundColor: 'rgba(126, 224, 138, 0.15)',
   },
   toggleText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
-    color: '#F7F7F8',
+    color: theme.color.muted,
   },
   toggleActiveText: {
-    color: '#0C0C0D',
+    color: theme.color.accent.green,
+  },
+  inputWrapper: {
+    alignItems: 'center',
+    marginBottom: 16,
   },
   weightInputContainer: {
-    marginBottom: 20,
-  },
-  weightInput: {
-    backgroundColor: '#131316',
-    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    backgroundColor: '#000',
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#26262B',
-    padding: 16,
-    color: '#F7F7F8',
-    fontSize: 18,
-    fontWeight: '600',
-    textAlign: 'center',
+    borderColor: theme.color.line,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    minWidth: 180,
   },
   waterInputContainer: {
-    marginBottom: 20,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    backgroundColor: '#000',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    minWidth: 160,
+  },
+  weightInput: {
+    color: theme.color.ink,
+    fontSize: 32,
+    fontWeight: '700',
+    textAlign: 'center',
+    minWidth: 80,
+    fontFamily: theme.font.display,
   },
   waterInput: {
-    backgroundColor: '#131316',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#26262B',
-    padding: 16,
-    color: '#F7F7F8',
-    fontSize: 18,
-    fontWeight: '600',
+    color: theme.color.ink,
+    fontSize: 32,
+    fontWeight: '700',
     textAlign: 'center',
+    minWidth: 60,
+    fontFamily: theme.font.display,
+  },
+  unitText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: theme.color.muted,
+    marginLeft: 4,
   },
   submitButton: {
-    marginTop: 20,
-    marginBottom: 40,
+    marginTop: 24,
+    marginBottom: 16,
+    shadowColor: theme.color.accent.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 8,
+    marginHorizontal: 16,
   },
   disabledButton: {
     opacity: 0.6,
+    shadowOpacity: 0,
   },
   requiredField: {
-    borderColor: '#FF6B6B',
+    borderColor: theme.color.accent.primary,
     borderWidth: 2,
   },
   assumeRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 8,
+    justifyContent: 'center',
+    marginTop: 12,
   },
   assumeButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#26262B',
-    backgroundColor: '#131316',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
   },
   assumeText: {
-    color: '#A6A6AD',
+    color: theme.color.accent.blue,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -864,22 +835,44 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    marginBottom: 8,
+    gap: 8,
+    marginBottom: 10,
   },
   textArea: {
-    backgroundColor: '#131316',
-    borderRadius: 12,
+    backgroundColor: '#000',
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#26262B',
+    borderColor: theme.color.line,
     padding: 16,
-    color: '#F7F7F8',
+    color: theme.color.ink,
     fontSize: 16,
-    minHeight: 90,
+    minHeight: 100,
     textAlignVertical: 'top',
+    width: '100%',
   },
   infoIcon: {
-    padding: 4,
-    marginTop: -15,
+    padding: 2,
+    transform: [{ translateY: -5 }],
+  },
+  showMoreButton: {
+    alignSelf: 'center',
+    marginTop: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  showMoreText: {
+    color: theme.color.muted,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  sliderGroup: {
+    gap: 8,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: theme.color.line,
+    marginVertical: 24,
+    width: '100%',
+    opacity: 0.5,
   },
 });

@@ -9,7 +9,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { useUserStore } from '@/hooks/useUserStore';
-import { GOALS, TRAINING_LEVELS } from '@/constants/fitness';
+import { GOALS, TRAINING_LEVELS, TRAINING_STYLE_PREFERENCES } from '@/constants/fitness';
 import { router } from 'expo-router';
 import { theme } from '@/constants/colors';
 import type { User, Equipment, DietaryPref, WorkoutIntensity, TrainingLevel } from '@/types/user';
@@ -151,7 +151,7 @@ export default function ProgramSettingsScreen() {
           : [],
         dietaryNotes: user.dietaryNotes || '',
         goalWeight: user.goalWeight,
-        preferredExercises: user.preferredExercises || [],
+        trainingStylePreferences: user.trainingStylePreferences || [],
         avoidExercises: user.avoidExercises || [],
         preferredTrainingTime: user.preferredTrainingTime || '',
         sessionLength: user.sessionLength || 60,
@@ -183,7 +183,7 @@ export default function ProgramSettingsScreen() {
           : [],
         dietaryNotes: user.dietaryNotes || '',
         goalWeight: user.goalWeight,
-        preferredExercises: [...(user.preferredExercises || [])],
+        trainingStylePreferences: [...(user.trainingStylePreferences || [])],
         avoidExercises: [...(user.avoidExercises || [])],
         preferredTrainingTime: user.preferredTrainingTime || '',
         sessionLength: user.sessionLength || 60,
@@ -221,7 +221,7 @@ export default function ProgramSettingsScreen() {
     const sort = (arr?: string[]) => Array.isArray(arr) ? [...arr].sort() : [];
     clone.equipment = sort(clone.equipment);
     clone.dietaryPrefs = sort(clone.dietaryPrefs);
-    clone.preferredExercises = sort(clone.preferredExercises);
+    clone.trainingStylePreferences = sort(clone.trainingStylePreferences);
     clone.avoidExercises = sort(clone.avoidExercises);
     return clone;
   };
@@ -279,7 +279,20 @@ export default function ProgramSettingsScreen() {
               workout_intensity_level: formData.workoutIntensityLevel || null,
               training_level: formData.trainingLevel || null,
               // Store the chosen check-in reminder time (if column exists, otherwise ignored by PostgREST)
-              checkin_reminder_time: updatedUser.checkInReminderTime || null
+              checkin_reminder_time: updatedUser.checkInReminderTime || null,
+              // Map new fields to DB columns
+              preferred_exercises: formData.trainingStylePreferences || [], 
+              avoid_exercises: formData.avoidExercises || [],
+              preferred_training_time: formData.preferredTrainingTime || null,
+              session_length: formData.sessionLength || null,
+              fasting_window: formData.fastingWindow !== 'None' ? formData.fastingWindow : null,
+              meal_count: formData.mealCount || null,
+              special_requests: formData.specialRequests || null,
+              dietary_prefs: formData.dietaryPrefs || [],
+              equipment: formData.equipment || [],
+              goal: formData.goal || null,
+              training_days: formData.trainingDays || null,
+              injuries: formData.injuries || null
             })
             .eq('id', session.user.id);
         }
@@ -428,6 +441,26 @@ export default function ProgramSettingsScreen() {
           <Card style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Training Preferences</Text>
             
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Training Style / Vibe</Text>
+              <View style={styles.chipContainer}>
+                {TRAINING_STYLE_PREFERENCES.map((style) => (
+                  <Chip
+                    key={style.id}
+                    label={style.label}
+                    selected={formData.trainingStylePreferences?.includes(style.id)}
+                    onPress={() => {
+                      const current = formData.trainingStylePreferences || [];
+                      const updated = current.includes(style.id)
+                        ? current.filter(s => s !== style.id)
+                        : [...current, style.id];
+                      updateFormField('trainingStylePreferences', updated);
+                    }}
+                  />
+                ))}
+              </View>
+            </View>
+
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Preferred Training Time</Text>
               <View style={styles.chipContainer}>

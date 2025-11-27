@@ -1,7 +1,7 @@
 /**
  * Test the new chunked AI system
  */
-import { generateWeeklyBasePlan } from '@/services/chunked-ai-service';
+import { generateWeeklyBasePlan } from '@/services/plan-generation';
 import { validateWeeklyPlan } from '@/utils/plan-schemas';
 import type { User } from '@/types/user';
 
