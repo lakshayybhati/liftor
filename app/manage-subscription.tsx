@@ -32,7 +32,7 @@ export default function ManageSubscriptionScreen() {
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
-      
+
       {/* Gradient Header */}
       <LinearGradient
         colors={['#0c0c0e', '#CE0200', '#EF4444']}
@@ -43,47 +43,47 @@ export default function ManageSubscriptionScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <ChevronLeft color="#fff" size={28} />
         </TouchableOpacity>
-        
+
         <View style={styles.avatarContainer}>
           <View style={styles.avatarCircle}>
             <User color="#9CA3AF" size={40} />
           </View>
         </View>
-        
+
         <Text style={styles.hiText}>Hi, {userName}</Text>
         <Text style={styles.subLabel}>You're a {tierLabel} Member</Text>
       </LinearGradient>
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardDismissMode="on-drag">
         <Text style={styles.sectionTitle}>Included in your subscription</Text>
-        
+
         <View style={styles.benefits}>
-          <Benefit 
+          <Benefit
             icon={<TrendingUp color={theme.color.accent.blue} size={24} />}
-            title="Advanced Insights" 
-            desc="Understand your body and train smarter with data-driven guidance." 
+            title="Advanced Insights"
+            desc="Understand your body and train smarter with data-driven guidance."
           />
-          <Benefit 
+          <Benefit
             icon={<Clipboard color={theme.color.accent.green} size={24} />}
-            title="Proven Programs" 
-            desc="Follow expert-designed training plans tailored for real results." 
+            title="Proven Programs"
+            desc="Follow expert-designed training plans tailored for real results."
           />
-          <Benefit 
+          <Benefit
             icon={<Sparkles color={theme.color.accent.yellow} size={24} />}
-            title="Smart Tracking" 
-            desc="AI-powered suggestions, auto warm-ups, and precise weight calculations." 
+            title="Smart Tracking"
+            desc="Smart suggestions, auto warm-ups, and precise weight calculations."
           />
-          <Benefit 
+          <Benefit
             icon={<Trophy color={theme.color.accent.primary} size={24} />}
-            title="Personal Records" 
-            desc="Set goals, track progress, and view your top achievements." 
+            title="Personal Records"
+            desc="Set goals, track progress, and view your top achievements."
           />
         </View>
 
         <View style={{ marginTop: 24 }}>
-          <Button 
-            title="Manage Your Subscription" 
-            onPress={() => router.push('/cancel-retention')} 
+          <Button
+            title="Manage Your Subscription"
+            onPress={() => router.push('/cancel-retention')}
             variant="secondary"
           />
         </View>
@@ -113,9 +113,9 @@ function Benefit({ icon, title, desc }: { icon: React.ReactNode; title: string; 
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: theme.color.bg 
+  container: {
+    flex: 1,
+    backgroundColor: theme.color.bg
   },
   gradientHeader: {
     paddingHorizontal: 20,
@@ -134,43 +134,43 @@ const styles = StyleSheet.create({
   avatarContainer: {
     marginBottom: 16,
   },
-  avatarCircle: { 
-    width: 80, 
-    height: 80, 
-    borderRadius: 40, 
+  avatarCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 3,
     borderColor: 'rgba(255,255,255,0.3)',
   },
-  hiText: { 
-    fontSize: 28, 
-    fontWeight: '800', 
+  hiText: {
+    fontSize: 28,
+    fontWeight: '800',
     color: '#fff',
     marginTop: 4,
   },
-  subLabel: { 
-    color: 'rgba(255,255,255,0.9)', 
+  subLabel: {
+    color: 'rgba(255,255,255,0.9)',
     marginTop: 4,
     fontSize: 16,
   },
-  content: { 
+  content: {
     padding: 20,
     paddingTop: 24,
   },
-  sectionTitle: { 
-    fontSize: 20, 
-    fontWeight: '700', 
-    color: theme.color.ink, 
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: theme.color.ink,
     marginBottom: 20,
   },
-  benefits: { 
+  benefits: {
     gap: 20,
   },
-  benefitRow: { 
-    flexDirection: 'row', 
-    gap: 16, 
+  benefitRow: {
+    flexDirection: 'row',
+    gap: 16,
     alignItems: 'flex-start',
   },
   iconCircle: {
@@ -183,13 +183,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.color.line,
   },
-  benefitTitle: { 
-    color: theme.color.ink, 
-    fontWeight: '700', 
+  benefitTitle: {
+    color: theme.color.ink,
+    fontWeight: '700',
     fontSize: 17,
     marginBottom: 4,
   },
-  benefitDesc: { 
+  benefitDesc: {
     color: theme.color.muted,
     fontSize: 14,
     lineHeight: 20,

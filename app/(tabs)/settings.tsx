@@ -12,13 +12,8 @@ import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
 import { getSubscriptionTier } from '@/utils/subscription-helpers';
-import { 
-  scheduleWorkoutReminder,
-  scheduleDailyCheckInReminder,
-  scheduleDailyCheckInReminderFromString,
-  cancelNotificationsByType
-} from '@/utils/notifications';
-import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notification-storage';
+import { NotificationService } from '@/services/NotificationService';
+import { getBasePlanJobState } from '@/services/backgroundPlanGeneration';
 
 export default function SettingsScreen() {
   const { user, checkins, plans, clearAllData, getRecentCheckins, getWeightData, getWeightProgress, syncLocalToBackend } = useUserStore();
@@ -48,7 +43,7 @@ export default function SettingsScreen() {
   const faqData = [
     {
       question: "How do I generate a personalized workout plan?",
-      answer: "Complete your daily check-in on the Home screen to get an AI-generated workout plan tailored to your energy levels, stress, and goals. Your plan adapts based on your daily condition."
+      answer: "Complete your daily check-in on the Home screen to get a personalized workout plan tailored to your energy levels, stress, and goals. Your plan adapts based on your daily condition."
     },
     {
       question: "Can I change my fitness goals and preferences?",
@@ -56,7 +51,7 @@ export default function SettingsScreen() {
     },
     {
       question: "What does the check-in data track?",
-      answer: "Your daily check-ins capture your energy levels, stress, mood, sleep quality, and current weight. This data helps the AI create plans that match your daily condition."
+      answer: "Your daily check-ins capture your energy levels, stress, mood, sleep quality, and current weight. This data helps us create plans that match your daily condition."
     },
     {
       question: "How do I track my progress over time?",
@@ -64,7 +59,7 @@ export default function SettingsScreen() {
     },
     {
       question: "What if I miss a day of training?",
-      answer: "No worries! Your next check-in will help the AI adjust your plan accordingly. Consistency matters more than perfection, and the app adapts to your lifestyle."
+      answer: "No worries! Your next check-in will help us adjust your plan accordingly. Consistency matters more than perfection, and the app adapts to your lifestyle."
     },
     {
       question: "How do I export my fitness data?",
@@ -76,10 +71,11 @@ export default function SettingsScreen() {
     }
   ];
 
+  // Load notification preferences on mount
   useEffect(() => {
     (async () => {
       try {
-        const prefs = await getNotificationPreferences();
+        const prefs = await NotificationService.getPreferences();
         const allOn = !!(prefs.workoutRemindersEnabled && prefs.checkInRemindersEnabled && prefs.milestonesEnabled);
         setAllNotificationsEnabled(allOn);
       } catch {}
@@ -471,24 +467,33 @@ export default function SettingsScreen() {
                 value={allNotificationsEnabled}
                 onValueChange={async (value) => {
                   setAllNotificationsEnabled(value);
-                  const prefs = await getNotificationPreferences();
-                  await saveNotificationPreferences({ 
-                    ...prefs, 
-                    workoutRemindersEnabled: value, 
-                    checkInRemindersEnabled: value, 
-                    milestonesEnabled: value 
-                  });
-                  if (value) {
-                    if (user?.preferredTrainingTime) {
-                      await scheduleWorkoutReminder(user.preferredTrainingTime);
+                  
+                  // Use centralized NotificationService for all notification management
+                  // This ensures preferences are user-scoped and properly persisted
+                  await NotificationService.setAllNotificationsEnabled(value);
+                  
+                  if (value && user) {
+                    // Check if user has a verified base plan for workout reminders
+                    const jobState = await getBasePlanJobState(session?.user?.id ?? null);
+                    const hasVerifiedPlan = jobState.verified;
+                    
+                    // Schedule reminders using user's configured times
+                    // These are IDEMPOTENT - won't reschedule if already scheduled for same time
+                    if (user.preferredTrainingTime) {
+                      await NotificationService.scheduleWorkoutReminder(
+                        user.preferredTrainingTime,
+                        hasVerifiedPlan,
+                        true // Force reschedule since we just enabled
+                      );
                     }
-                    if (user?.checkInReminderTime) {
-                      await scheduleDailyCheckInReminderFromString(user.checkInReminderTime);
+                    if (user.checkInReminderTime) {
+                      await NotificationService.scheduleCheckInReminder(
+                        user.checkInReminderTime,
+                        true // Force reschedule since we just enabled
+                      );
                     }
-                  } else {
-                    await cancelNotificationsByType('workout_reminder');
-                    await cancelNotificationsByType('checkin_reminder');
                   }
+                  // If disabling, NotificationService.setAllNotificationsEnabled already cancels reminders
                 }}
                 trackColor={{ 
                   false: theme.color.line, 
@@ -613,7 +618,7 @@ export default function SettingsScreen() {
           <View style={styles.footer}>
             <Text style={styles.footerText}>Liftor v3.4</Text>
             <Text style={styles.footerSubtext}>
-              Your AI-powered fitness companion
+              Your fitness companion
             </Text>
           </View>
         </ScrollView>

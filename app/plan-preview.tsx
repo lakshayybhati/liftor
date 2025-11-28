@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert, Modal, BackHandler, Keyboard, TouchableWithoutFeedback } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert, BackHandler, Keyboard, TouchableWithoutFeedback, Dimensions } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
-import { router, Stack } from 'expo-router';
-import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send, ChevronLeft } from 'lucide-react-native';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
+import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send, ChevronLeft, Play } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { hasActiveSubscription } from '@/utils/subscription-helpers';
 import { useNavigation } from '@react-navigation/native';
+import * as Haptics from 'expo-haptics';
+import { useProfile } from '@/hooks/useProfile';
+import { useAuth } from '@/hooks/useAuth';
+import { verifyBasePlan, getBasePlanJobState } from '@/services/backgroundPlanGeneration';
 // 10s paywall logic removed per request
 
 const DAYS_OF_WEEK = [
@@ -22,7 +27,13 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function PlanPreviewScreen() {
-  const { user, basePlans, getCurrentBasePlan, updateBasePlanDay, addBasePlan, isLoading: storeLoading, loadUserData } = useUserStore();
+  const { user, basePlans, getCurrentBasePlan, updateBasePlanDay, updateWeeklyBasePlan, addBasePlan, activateBasePlan, isLoading: storeLoading, loadUserData } = useUserStore();
+  const auth = useAuth();
+  const { updateProfile, refetch: refetchProfile } = useProfile();
+  const params = useLocalSearchParams<{ planId?: string }>();
+  const viewingPlanId = params.planId;
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  
   const [selectedDay, setSelectedDay] = useState<string>('monday');
   const [isLocked, setIsLocked] = useState(false);
   const [confettiAnim] = useState(new Animated.Value(0));
@@ -33,12 +44,9 @@ export default function PlanPreviewScreen() {
   const [forceReloadAttempts, setForceReloadAttempts] = useState(0);
   const [expandedWorkout, setExpandedWorkout] = useState(false);
   const [expandedNutrition, setExpandedNutrition] = useState(false);
-  const [showPlanEditModal, setShowPlanEditModal] = useState(false);
-  const [planEditText, setPlanEditText] = useState('');
-  const [isSubmittingWholePlan, setIsSubmittingWholePlan] = useState(false);
-  const wholePlanProgressAnim = useRef(new Animated.Value(0)).current;
   const navigation = useNavigation();
-  
+  const [isActivatingPlan, setIsActivatingPlan] = useState(false);
+
   // Reset expansion when day changes
   useEffect(() => {
     setExpandedWorkout(false);
@@ -59,18 +67,18 @@ export default function PlanPreviewScreen() {
       return true;
     });
     return () => {
-      try { unsubBeforeRemove(); } catch {}
-      try { backSub.remove(); } catch {}
+      try { unsubBeforeRemove(); } catch { }
+      try { backSub.remove(); } catch { }
     };
   }, [navigation]);
-  
+
   // Removed paywall timer & navigation refs
 
   // Force reload from storage if store is empty
   useEffect(() => {
     console.log('[PlanPreview] Component mounted, storeLoading:', storeLoading);
     console.log('[PlanPreview] Initial basePlans length:', basePlans?.length ?? 0);
-    
+
     if (!storeLoading && (!basePlans || basePlans.length === 0) && forceReloadAttempts < 3) {
       console.log('[PlanPreview] Store empty, forcing reload from AsyncStorage...');
       setForceReloadAttempts(prev => prev + 1);
@@ -79,9 +87,20 @@ export default function PlanPreviewScreen() {
   }, [storeLoading, basePlans, forceReloadAttempts, loadUserData]);
 
   // Get basePlan reactively - this will cause re-render when basePlans array updates
+  // If planId is provided via params, find that specific plan (historical view)
   const basePlan = useMemo(() => {
     console.log('[PlanPreview] useMemo triggered, basePlans length:', basePlans?.length ?? 0);
-    console.log('[PlanPreview] basePlans array:', basePlans?.map(p => ({ id: p.id, locked: p.isLocked })));
+    console.log('[PlanPreview] viewingPlanId:', viewingPlanId || 'none (current plan)');
+    
+    // If viewing a specific plan by ID (historical view)
+    if (viewingPlanId && basePlans) {
+      const specificPlan = basePlans.find(p => p.id === viewingPlanId);
+      console.log('[PlanPreview] Found specific plan:', specificPlan ? `Plan ID: ${specificPlan.id}` : 'NOT FOUND');
+      return specificPlan;
+    }
+    
+    // Default: Get the current active plan
+    console.log('[PlanPreview] basePlans array:', basePlans?.map(p => ({ id: p.id, locked: p.isLocked, isActive: p.isActive })));
     const plan = getCurrentBasePlan();
     console.log('[PlanPreview] useMemo computed basePlan:', plan ? `Plan ID: ${plan.id}` : 'NULL');
 
@@ -94,8 +113,46 @@ export default function PlanPreviewScreen() {
     }
 
     return plan;
-  }, [basePlans, getCurrentBasePlan]);
-  
+  }, [basePlans, getCurrentBasePlan, viewingPlanId]);
+
+  // Determine if viewing a historical (non-active) plan
+  const isHistoricalView = useMemo(() => {
+    if (!viewingPlanId || !basePlan) return false;
+    return !basePlan.isActive;
+  }, [viewingPlanId, basePlan]);
+
+  // Handle activating this historical plan
+  const handleActivateThisPlan = async () => {
+    if (!basePlan?.id) return;
+    
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    
+    Alert.alert(
+      'Activate This Plan?',
+      'This will set this plan as your active base plan for daily workouts and nutrition.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Activate',
+          onPress: async () => {
+            setIsActivatingPlan(true);
+            const success = await activateBasePlan(basePlan.id);
+            setIsActivatingPlan(false);
+            
+            if (success) {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              Alert.alert('Plan Activated', 'This plan is now your active base plan.', [
+                { text: 'OK', onPress: () => router.back() }
+              ]);
+            } else {
+              Alert.alert('Error', 'Failed to activate the plan. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // Aggregate all supplements from the weekly plan
   const weeklySupplementsData = useMemo(() => {
     const currentPlan = getCurrentBasePlan();
@@ -114,7 +171,7 @@ export default function PlanPreviewScreen() {
     const recommendedSuppsSet = new Set<string>();
 
     const dayKeys = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-    
+
     dayKeys.forEach((day) => {
       const dayData = currentPlan.days[day];
       if (!dayData?.recovery) return;
@@ -124,7 +181,7 @@ export default function PlanPreviewScreen() {
       if (daySupplements.length > 0) {
         dailySupps[day] = daySupplements;
       }
-      
+
       // Add to overall set
       daySupplements.forEach((supp: string) => allSuppsSet.add(supp));
 
@@ -150,7 +207,7 @@ export default function PlanPreviewScreen() {
       recommendedSupplements: Array.from(recommendedSuppsSet)
     };
   }, [getCurrentBasePlan]);
-  
+
   const [isCheckingPlan, setIsCheckingPlan] = useState(true);
   const [hasShownConfetti, setHasShownConfetti] = useState(false);
 
@@ -183,7 +240,7 @@ export default function PlanPreviewScreen() {
         if (attempts >= maxAttempts) {
           console.error('[PlanPreview] ❌ No plan after multiple checks');
           clearInterval(checkInterval);
-          
+
           // Try to go to home instead of onboarding, since plan may be there
           console.log('[PlanPreview] Redirecting to home to check if plan is available there');
           router.replace('/(tabs)/home');
@@ -257,38 +314,102 @@ export default function PlanPreviewScreen() {
   const handleStartJourney = async () => {
     try {
       console.log('[PlanPreview] Starting journey...');
-      
+      setIsSavingProfile(true);
+
+      // Mark the plan as verified (user committed to starting)
+      const userId = auth?.session?.user?.id ?? null;
+      await verifyBasePlan(userId);
+      console.log('[PlanPreview] ✅ Plan marked as verified');
+
+      // First, save the user profile to the backend (Supabase)
+      // This ensures user data is persisted only after they commit to starting
+      if (user && auth?.session?.user?.email) {
+        console.log('[PlanPreview] Saving user profile to backend...');
+        
+        const userEmail = auth.session.user.email;
+        const sessionUserName = auth.session.user.user_metadata?.name as string | undefined;
+        const emailLocalPart = userEmail.split('@')[0] || '';
+        const resolvedName = (user.name?.trim() || sessionUserName?.trim() || emailLocalPart || 'User');
+
+        const profileData = {
+          email: userEmail,
+          name: resolvedName,
+          goal: user.goal as any,
+          equipment: user.equipment,
+          dietary_prefs: user.dietaryPrefs as any,
+          dietary_notes: user.dietaryNotes || null,
+          training_days: user.trainingDays,
+          timezone: user.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+          onboarding_complete: true,
+          age: user.age ?? null,
+          sex: user.sex || null,
+          height: user.height ?? null,
+          weight: user.weight ?? null,
+          activity_level: user.activityLevel as any,
+          daily_calorie_target: user.dailyCalorieTarget ?? null,
+          supplements: user.supplements || [],
+          supplement_notes: user.supplementNotes || null,
+          personal_goals: user.personalGoals || [],
+          perceived_lacks: user.perceivedLacks || [],
+          training_style_preferences: user.trainingStylePreferences || [],
+          avoid_exercises: user.avoidExercises || [],
+          preferred_training_time: user.preferredTrainingTime || null,
+          session_length: user.sessionLength ?? null,
+          travel_days: user.travelDays ?? null,
+          fasting_window: user.fastingWindow || null,
+          meal_count: user.mealCount ?? null,
+          injuries: user.injuries || null,
+          step_target: user.stepTarget ?? null,
+          special_requests: user.specialRequests || null,
+          goal_weight: user.goalWeight ?? null,
+          workout_intensity: user.workoutIntensity || null,
+        };
+
+        try {
+          await updateProfile(profileData);
+          console.log('[PlanPreview] ✅ Profile saved to Supabase successfully');
+          await refetchProfile();
+          console.log('[PlanPreview] ✅ Profile cache refreshed');
+        } catch (profileError) {
+          console.error('[PlanPreview] ⚠️ Error saving profile to backend:', profileError);
+          // Continue anyway - local data is already saved, backend sync can retry later
+        }
+      }
+
+      setIsSavingProfile(false);
+
       // Check subscription status
       const entitled = await hasActiveSubscription();
       console.log('[PlanPreview] Subscription check result:', entitled);
-      
+
       if (entitled) {
         console.log('[PlanPreview] ✅ User has active subscription, navigating to home');
         router.replace('/(tabs)/home');
         return;
       }
-      
+
       console.log('[PlanPreview] ❌ No active subscription, showing paywall');
       // Not entitled → show paywall in blocking mode
       // After subscription, user will be navigated to home
-      router.push({ 
-        pathname: '/paywall', 
-        params: { 
-          next: '/(tabs)/home', 
-          blocking: 'true' 
-        } as any 
+      router.push({
+        pathname: '/paywall',
+        params: {
+          next: '/(tabs)/home',
+          blocking: 'true'
+        } as any
       });
     } catch (err) {
-      console.error('[PlanPreview] Error checking subscription:', err);
-      
+      console.error('[PlanPreview] Error in start journey:', err);
+      setIsSavingProfile(false);
+
       // On error, show paywall to be safe (premium features should be gated)
       console.log('[PlanPreview] Error occurred, showing paywall as fallback');
-      router.push({ 
-        pathname: '/paywall', 
-        params: { 
-          next: '/(tabs)/home', 
-          blocking: 'true' 
-        } as any 
+      router.push({
+        pathname: '/paywall',
+        params: {
+          next: '/(tabs)/home',
+          blocking: 'true'
+        } as any
       });
     }
   };
@@ -305,18 +426,18 @@ export default function PlanPreviewScreen() {
     }
 
     setIsSubmittingEdit(true);
-    
+
     // Start progress animation
     progressAnim.setValue(0);
-      Animated.timing(progressAnim, {
+    Animated.timing(progressAnim, {
       toValue: 1,
-        duration: 12000, // Slow down more per request
+      duration: 12000, // Slow down more per request
       useNativeDriver: false,
     }).start();
-    
+
     try {
       const selectedDayName = DAYS_OF_WEEK.find(d => d.key === selectedDay)?.fullLabel || selectedDay;
-      
+
       const response = await fetch('https://toolkit.rork.com/text/llm/', {
         method: 'POST',
         headers: {
@@ -327,7 +448,7 @@ export default function PlanPreviewScreen() {
             {
               role: 'system',
               content: `You are a world-class Personal Trainer & Nutrition Specialist. The user wants to modify their ${selectedDayName} plan. Current plan data: ${JSON.stringify(selectedDayData)}. 
-
+              
 Please modify the plan based on their request and return ONLY the updated day data in the exact same JSON format with workout, nutrition, and recovery objects. Do not include any explanatory text, just the JSON object. Only change what they specifically request. Keep all other aspects of the plan intact.`
             },
             {
@@ -339,38 +460,40 @@ Please modify the plan based on their request and return ONLY the updated day da
       });
 
       const result = await response.json();
-      
+
       if (result.completion) {
         try {
           // Clean the response to extract JSON
           let jsonString = result.completion.trim();
-          
+
           // Remove markdown code blocks if present
           if (jsonString.startsWith('```json')) {
             jsonString = jsonString.replace(/```json\s*/, '').replace(/\s*```$/, '');
           } else if (jsonString.startsWith('```')) {
             jsonString = jsonString.replace(/```\s*/, '').replace(/\s*```$/, '');
           }
-          
+
           // Try to parse the AI response as JSON to update the plan
           const updatedDayData = JSON.parse(jsonString);
-          
+
           // Validate the structure
           if (!updatedDayData.workout || !updatedDayData.nutrition || !updatedDayData.recovery) {
             throw new Error('Invalid day data structure');
           }
-          
+
           // Update the base plan with the modified day data
           const success = await updateBasePlanDay(selectedDay, updatedDayData);
-          
+
           if (success) {
             Alert.alert(
               'Changes Applied',
               `Your ${selectedDayName} plan has been updated successfully!`,
-              [{ text: 'OK', onPress: () => {
-                setShowEditInput(false);
-                setEditText('');
-              }}]
+              [{
+                text: 'OK', onPress: () => {
+                  setShowEditInput(false);
+                  setEditText('');
+                }
+              }]
             );
           } else {
             throw new Error('Failed to save changes');
@@ -380,15 +503,17 @@ Please modify the plan based on their request and return ONLY the updated day da
           // If parsing fails, show the AI response as text
           Alert.alert(
             'Changes Processed',
-            `The AI has processed your request:\n\n${result.completion}\n\nNote: The changes may not have been saved to your plan due to formatting issues.`,
-            [{ text: 'OK', onPress: () => {
-              setShowEditInput(false);
-              setEditText('');
-            }}]
+            `We have processed your request:\n\n${result.completion}\n\nNote: The changes may not have been saved to your plan due to formatting issues.`,
+            [{
+              text: 'OK', onPress: () => {
+                setShowEditInput(false);
+                setEditText('');
+              }
+            }]
           );
         }
       } else {
-        throw new Error('No response from AI');
+        throw new Error('No response received');
       }
     } catch (error) {
       console.error('Error submitting edit:', error);
@@ -404,85 +529,71 @@ Please modify the plan based on their request and return ONLY the updated day da
     }
   };
 
-  const handleSubmitWholePlan = async () => {
-    try {
-      setIsSubmittingWholePlan(true);
-      wholePlanProgressAnim.setValue(0);
-      Animated.timing(wholePlanProgressAnim, {
-        toValue: 1,
-        duration: 8000, // Slow the whole-plan progress bar
-        useNativeDriver: false,
-      }).start();
-
-      // Lazy-load the AI generator to keep bundle light
-      const { generateWeeklyBasePlan } = await import('@/services/plan-generation');
-
-      // Compose special requests with user input (without mutating profile)
-      const combinedRequest = `${user?.specialRequests ? user.specialRequests + ' | ' : ''}User requested changes: ${planEditText || 'Rebuild my weekly base plan'}`;
-      const modifiedUser = { ...(user as any), specialRequests: combinedRequest } as any;
-
-      const newPlan = await generateWeeklyBasePlan(modifiedUser);
-      await addBasePlan(newPlan);
-
-      Alert.alert('Base Plan Updated', 'Your weekly base plan was regenerated successfully.', [
-        { text: 'OK', onPress: () => setShowPlanEditModal(false) }
-      ]);
-      setPlanEditText('');
-      // Reset selection to monday for clarity
-      setSelectedDay('monday');
-    } catch (e) {
-      console.error('[PlanPreview] Whole-plan edit failed:', e);
-      Alert.alert('Error', 'We could not update your base plan. Please try again.');
-    } finally {
-      setIsSubmittingWholePlan(false);
-      wholePlanProgressAnim.setValue(0);
-    }
-  };
-
   const renderDayCard = (day: typeof DAYS_OF_WEEK[0]) => {
     if (!basePlan) return null;
-    
+
     const dayData = basePlan.days?.[day.key];
     if (!dayData) return null;
-    
+
     const isSelected = selectedDay === day.key;
-    
+
     return (
       <TouchableOpacity
         key={day.key}
-        style={[
+        onPress={() => setSelectedDay(day.key)}
+        activeOpacity={0.7}
+      >
+        <Animated.View style={[
           styles.dayCard,
           isSelected && styles.selectedDayCard,
-        ]}
-        onPress={() => setSelectedDay(day.key)}
-      >
-        <Text style={[
-          styles.dayLabel,
-          isSelected && styles.selectedDayLabel,
         ]}>
-          {day.label}
-        </Text>
-        <View style={styles.dayPreview}>
+          {isSelected && (
+            <LinearGradient
+              colors={[theme.color.accent.primary, '#FF6B6B']} // Example gradient
+              style={StyleSheet.absoluteFill}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+            />
+          )}
+
           <Text style={[
-            styles.dayFocus,
-            isSelected && styles.selectedDayText,
+            styles.dayLabel,
+            isSelected && styles.selectedDayLabel,
           ]}>
-            {dayData.workout?.focus?.[0] || 'Rest'}
+            {day.label}
           </Text>
-          <Text style={[
-            styles.dayCalories,
-            isSelected && styles.selectedDayText,
-          ]}>
-            {dayData.nutrition?.total_kcal || 0}kcal
-          </Text>
-        </View>
+
+          <View style={styles.dayPreview}>
+            <Text
+              style={[
+                styles.dayFocus,
+                isSelected && styles.selectedDayText,
+              ]}
+              numberOfLines={2}
+            >
+              {dayData.workout?.focus?.[0] || 'Rest'}
+            </Text>
+
+            <View style={[
+              styles.calorieBadge,
+              isSelected ? { backgroundColor: 'rgba(255,255,255,0.2)' } : { backgroundColor: theme.color.bg }
+            ]}>
+              <Text style={[
+                styles.dayCalories,
+                isSelected && styles.selectedDayText,
+              ]}>
+                {dayData.nutrition?.total_kcal || 0}
+              </Text>
+            </View>
+          </View>
+        </Animated.View>
       </TouchableOpacity>
     );
   };
 
   const renderWorkoutPreview = () => {
     if (!selectedDayData?.workout) return null;
-    
+
     return (
       <Card style={styles.previewCard}>
         <View style={styles.previewHeader}>
@@ -524,11 +635,11 @@ Please modify the plan based on their request and return ONLY the updated day da
 
   const renderNutritionPreview = () => {
     if (!selectedDayData?.nutrition) return null;
-    
-    const mealsToShow = expandedNutrition 
-      ? selectedDayData.nutrition.meals 
+
+    const mealsToShow = expandedNutrition
+      ? selectedDayData.nutrition.meals
       : (selectedDayData.nutrition.meals || []).slice(0, 3);
-    
+
     return (
       <Card style={styles.previewCard}>
         <View style={styles.previewHeader}>
@@ -574,32 +685,32 @@ Please modify the plan based on their request and return ONLY the updated day da
   // Calculate expected timeline to reach goal (Optimistic/Unrealistic per request)
   const calculateExpectedTimeline = () => {
     if (!user) return null;
-    
+
     // Weight-based goals
     if (user.goal === 'WEIGHT_LOSS' || user.goal === 'MUSCLE_GAIN') {
       const currentWeight = user.weight;
       const goalWeight = user.goalWeight;
-      
+
       if (!currentWeight || !goalWeight) return null;
-      
+
       const weightDiff = Math.abs(currentWeight - goalWeight);
-      
+
       // Unrealistically good rates:
       // Weight loss: ~1.5kg/week (Normal ~0.5-0.75)
       // Muscle gain: ~0.8kg/week (Normal ~0.25-0.35)
       const weeklyRate = user.goal === 'WEIGHT_LOSS' ? 1.5 : 0.8;
       const weeks = Math.ceil(weightDiff / weeklyRate);
       const months = Math.max(1, Math.ceil(weeks / 4));
-      
+
       return {
         value: months,
         unit: months === 1 ? 'Month' : 'Months',
-        text: user.goal === 'WEIGHT_LOSS' 
+        text: user.goal === 'WEIGHT_LOSS'
           ? `reach your target weight of ${goalWeight}kg`
           : `build ${weightDiff.toFixed(1)}kg of muscle`
       };
     }
-    
+
     // Fitness goals (fixed unrealistic timeline)
     // Normally 8-12 weeks -> Now 1-2 months
     const trainingDays = user.trainingDays || 3;
@@ -607,12 +718,12 @@ Please modify the plan based on their request and return ONLY the updated day da
       const months = trainingDays >= 5 ? 1 : 2;
       return { value: months, unit: months === 1 ? 'Month' : 'Months', text: 'significantly boost your endurance' };
     }
-    
+
     if (user.goal === 'FLEXIBILITY_MOBILITY') {
       const months = 1;
       return { value: months, unit: 'Month', text: 'see major improvements in mobility' };
     }
-    
+
     // General fitness
     const months = trainingDays >= 5 ? 1 : 2;
     return { value: months, unit: months === 1 ? 'Month' : 'Months', text: 'feel noticeably fitter and stronger' };
@@ -621,24 +732,32 @@ Please modify the plan based on their request and return ONLY the updated day da
   const renderTimelineBadge = () => {
     const timeline = calculateExpectedTimeline();
     if (!timeline) return null;
-    
+
     return (
       <View style={styles.timelineContainer}>
-        <View style={styles.timelinePill}>
-          <Text style={styles.timelinePillText}>EXPECTED TIMELINE</Text>
-        </View>
-        <View style={styles.timelineBubble}>
+        <LinearGradient
+          colors={['#1a2a3a', '#0F3D2E']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.timelineBubble}
+        >
+          <View style={styles.timelineHeaderRow}>
+            <View style={styles.timelinePill}>
+              <Text style={styles.timelinePillText}>TIMELINE</Text>
+            </View>
+            <Text style={styles.timelineValueHighlight}>{timeline.value} {timeline.unit}</Text>
+          </View>
           <Text style={styles.timelineText}>
-            {timeline.value} {timeline.unit} to {timeline.text}
+            to {timeline.text}
           </Text>
-        </View>
+        </LinearGradient>
       </View>
     );
   };
 
   const renderRecoveryPreview = () => {
     if (!selectedDayData?.recovery) return null;
-    
+
     return (
       <Card style={styles.previewCard}>
         <View style={styles.previewHeader}>
@@ -680,7 +799,7 @@ Please modify the plan based on their request and return ONLY the updated day da
   // New comprehensive supplement card showing ALL supplements from the weekly plan
   const renderSupplementsCard = () => {
     const { allSupplements, dailySupplements, userSupplements, recommendedSupplements } = weeklySupplementsData;
-    
+
     if (allSupplements.length === 0 && userSupplements.length === 0 && recommendedSupplements.length === 0) {
       return null;
     }
@@ -700,7 +819,7 @@ Please modify the plan based on their request and return ONLY the updated day da
         <View style={styles.previewHeader}>
           <Text style={styles.supplementCardTitle}>💊 Complete Supplement Guide</Text>
         </View>
-        
+
         {/* Overview Stats */}
         <View style={styles.supplementStatsRow}>
           <View style={styles.supplementStat}>
@@ -744,7 +863,7 @@ Please modify the plan based on their request and return ONLY the updated day da
             {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day) => {
               const supps = dailySupplements[day];
               if (!supps || supps.length === 0) return null;
-              
+
               return (
                 <View key={day} style={styles.dailySupplementRow}>
                   <View style={styles.dayLabelBadge}>
@@ -773,36 +892,26 @@ Please modify the plan based on their request and return ONLY the updated day da
 
   return (
     <KeyboardDismissView style={styles.container}>
-      <Stack.Screen 
-        options={{ 
-          title: 'Your Base Plan',
+      <Stack.Screen
+        options={{
+          title: isHistoricalView ? (basePlan?.name || 'Historical Plan') : 'Your Base Plan',
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
           headerLeft: () => (
             <TouchableOpacity
-              onPress={() => router.replace('/(tabs)/home')}
+              onPress={() => isHistoricalView ? router.back() : router.replace('/(tabs)/home')}
               accessibilityRole="button"
-              accessibilityLabel="Go to Home"
+              accessibilityLabel={isHistoricalView ? "Go back" : "Go to Home"}
               style={{ paddingHorizontal: 8 }}
             >
               <ChevronLeft size={20} color={theme.color.accent.primary} />
             </TouchableOpacity>
           ),
-          headerRight: () => (
-            <TouchableOpacity
-              onPress={() => setShowPlanEditModal(true)}
-              accessibilityRole="button"
-              accessibilityLabel="Edit base plan"
-              style={{ paddingHorizontal: 8 }}
-            >
-              <Edit3 size={20} color={theme.color.accent.primary} />
-            </TouchableOpacity>
-          ),
-        }} 
+        }}
       />
-      
+
       {/* Confetti Animation */}
-      <Animated.View 
+      <Animated.View
         style={[
           styles.confetti,
           {
@@ -819,10 +928,10 @@ Please modify the plan based on their request and return ONLY the updated day da
       >
         <Text style={styles.confettiText}>🎉 Your Plan is Ready! 🎉</Text>
       </Animated.View>
-      
+
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView 
-          style={styles.scrollView} 
+        <ScrollView
+          style={styles.scrollView}
           showsVerticalScrollIndicator={false}
           bounces={true}
           scrollEventThrottle={16}
@@ -831,19 +940,27 @@ Please modify the plan based on their request and return ONLY the updated day da
         >
           {/* Header */}
           <View style={styles.header}>
-            <Calendar size={32} color={theme.color.accent.primary} />
-            <Text style={styles.headerTitle}>Your Base Plan</Text>
+            <View style={styles.headerTopRow}>
+              <View>
+                <Text style={styles.headerWelcome}>Welcome back,</Text>
+                <Text style={styles.headerTitle}>Your Weekly Plan</Text>
+              </View>
+              <View style={styles.headerIconContainer}>
+                <Calendar size={24} color={theme.color.accent.primary} />
+              </View>
+            </View>
+
             <Text style={styles.headerSubtitle}>
-              This is your foundation plan that will be adjusted daily based on your check-ins
+              Your personalized roadmap. Adjusted daily based on your progress.
             </Text>
-            
+
             {/* Expected Timeline - Moved inside header */}
             {renderTimelineBadge()}
           </View>
 
           {/* Day Selector */}
-          <ScrollView 
-            horizontal 
+          <ScrollView
+            horizontal
             showsHorizontalScrollIndicator={false}
             style={styles.daySelector}
             contentContainerStyle={styles.daySelectorContent}
@@ -858,7 +975,7 @@ Please modify the plan based on their request and return ONLY the updated day da
             <Text style={styles.dayDetailsTitle}>
               {DAYS_OF_WEEK.find(d => d.key === selectedDay)?.fullLabel}
             </Text>
-            
+
             {renderWorkoutPreview()}
             {renderNutritionPreview()}
             {renderRecoveryPreview()}
@@ -866,203 +983,179 @@ Please modify the plan based on their request and return ONLY the updated day da
             {renderReasonCard()}
           </View>
 
-          {/* Edit Day Section */}
-          <Card style={styles.editCard}>
-            <View style={styles.editHeader}>
-              <Edit3 size={24} color={theme.color.accent.primary} />
-              <Text style={styles.editTitle}>
-                Edit {DAYS_OF_WEEK.find(d => d.key === selectedDay)?.fullLabel}
+          {/* Edit Day Section - Hidden for historical views */}
+          {!isHistoricalView && (
+            <Card style={styles.editCard}>
+              <View style={styles.editHeader}>
+                <Edit3 size={24} color={theme.color.accent.primary} />
+                <Text style={styles.editTitle}>
+                  Edit {DAYS_OF_WEEK.find(d => d.key === selectedDay)?.fullLabel}
+                </Text>
+              </View>
+              <Text style={styles.editDescription}>
+                Want to make changes to this day? Describe what you&apos;d like to modify.
               </Text>
-            </View>
-            <Text style={styles.editDescription}>
-              Want to make changes to this day? Describe what you&apos;d like to modify.
-            </Text>
-            
-            {showEditInput && (
-              <View style={styles.editInputContainer}>
-                <TextInput
-                  style={styles.editInput}
-                  placeholder="e.g., Replace squats with lunges, add more protein to breakfast, reduce workout time to 30 minutes..."
-                  placeholderTextColor={theme.color.muted}
-                  value={editText}
-                  onChangeText={setEditText}
-                  multiline
-                  numberOfLines={4}
-                  textAlignVertical="top"
-                  editable={!isSubmittingEdit}
-                  returnKeyType="send"
-                  blurOnSubmit
-                  onSubmitEditing={() => {
-                    if (!isSubmittingEdit && editText.trim()) {
-                      Keyboard.dismiss();
-                      handleSubmitEdit();
-                    }
-                  }}
-                />
-                
-                {/* Loading Progress Bar */}
-                {isSubmittingEdit && (
-                  <View style={styles.progressContainer}>
-                    <Text style={styles.progressText}>Applying your changes...</Text>
-                    <View style={styles.progressBarBackground}>
-                      <Animated.View 
-                        style={[
-                          styles.progressBarFill,
-                          {
-                            width: progressAnim.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: ['0%', '100%'],
-                            }),
-                          },
-                        ]}
+
+              {showEditInput && (
+                <View style={styles.editInputContainer}>
+                  <TextInput
+                    style={styles.editInput}
+                    placeholder="e.g., Replace squats with lunges, add more protein to breakfast, reduce workout time to 30 minutes..."
+                    placeholderTextColor={theme.color.muted}
+                    value={editText}
+                    onChangeText={setEditText}
+                    multiline
+                    numberOfLines={4}
+                    textAlignVertical="top"
+                    editable={!isSubmittingEdit}
+                    returnKeyType="send"
+                    blurOnSubmit
+                    onSubmitEditing={() => {
+                      if (!isSubmittingEdit && editText.trim()) {
+                        Keyboard.dismiss();
+                        handleSubmitEdit();
+                      }
+                    }}
+                  />
+
+                  {/* Loading Progress Bar */}
+                  {isSubmittingEdit && (
+                    <View style={styles.progressContainer}>
+                      <Text style={styles.progressText}>Applying your changes...</Text>
+                      <View style={styles.progressBarBackground}>
+                        <Animated.View
+                          style={[
+                            styles.progressBarFill,
+                            {
+                              width: progressAnim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: ['0%', '100%'],
+                              }),
+                            },
+                          ]}
+                        />
+                      </View>
+                      <Text style={styles.progressSubtext}>This may take a few seconds...</Text>
+                    </View>
+                  )}
+
+                  {!isSubmittingEdit && (
+                    <View style={styles.editActions}>
+                      <Button
+                        title="Cancel"
+                        onPress={() => {
+                          setShowEditInput(false);
+                          setEditText('');
+                        }}
+                        variant="outline"
+                        size="small"
+                        style={styles.cancelButton}
+                      />
+                      <Button
+                        title="Apply Changes"
+                        onPress={handleSubmitEdit}
+                        disabled={!editText.trim()}
+                        size="small"
+                        style={styles.applyButton}
+                        icon={<Send size={16} color="#FFFFFF" />}
                       />
                     </View>
-                    <Text style={styles.progressSubtext}>This may take a few seconds...</Text>
-                  </View>
-                )}
-                
-                {!isSubmittingEdit && (
-                  <View style={styles.editActions}>
-                    <Button
-                      title="Cancel"
-                      onPress={() => {
-                        setShowEditInput(false);
-                        setEditText('');
-                      }}
-                      variant="outline"
-                      size="small"
-                      style={styles.cancelButton}
-                    />
-                    <Button
-                      title="Apply Changes"
-                      onPress={handleSubmitEdit}
-                      disabled={!editText.trim()}
-                      size="small"
-                      style={styles.applyButton}
-                      icon={<Send size={16} color="#FFFFFF" />}
-                    />
-                  </View>
-                )}
-              </View>
-            )}
-            
-            {!showEditInput && (
-              <Button
-                title="Edit This Day"
-                onPress={handleEditDay}
-                variant="outline"
-                size="small"
-                style={styles.editButton}
-                icon={<Edit3 size={16} color={theme.color.accent.primary} />}
-              />
-            )}
-          </Card>
-
-          {/* Lock Toggle */}
-          <Card style={styles.lockCard}>
-            <View style={styles.lockHeader}>
-              {isLocked ? (
-                <Lock size={24} color={theme.color.accent.primary} />
-              ) : (
-                <Unlock size={24} color={theme.color.muted} />
+                  )}
+                </View>
               )}
-              <Text style={styles.lockTitle}>
-                {isLocked ? 'Plan Locked' : 'Lock This Plan'}
+
+              {!showEditInput && (
+                <Button
+                  title="Edit This Day"
+                  onPress={handleEditDay}
+                  variant="outline"
+                  size="small"
+                  style={styles.editButton}
+                  icon={<Edit3 size={16} color={theme.color.accent.primary} />}
+                />
+              )}
+            </Card>
+          )}
+
+          {/* Lock Toggle - Hidden for historical views */}
+          {!isHistoricalView && (
+            <Card style={styles.lockCard}>
+              <View style={styles.lockHeader}>
+                {isLocked ? (
+                  <Lock size={24} color={theme.color.accent.primary} />
+                ) : (
+                  <Unlock size={24} color={theme.color.muted} />
+                )}
+                <Text style={styles.lockTitle}>
+                  {isLocked ? 'Plan Locked' : 'Lock This Plan'}
+                </Text>
+              </View>
+              <Text style={styles.lockDescription}>
+                {isLocked
+                  ? 'Your plan is locked and ready to use. You can unlock it anytime in Settings.'
+                  : 'Lock this plan to prevent accidental changes. You can always unlock it later.'
+                }
               </Text>
-            </View>
-            <Text style={styles.lockDescription}>
-              {isLocked 
-                ? 'Your plan is locked and ready to use. You can unlock it anytime in Settings.'
-                : 'Lock this plan to prevent accidental changes. You can always unlock it later.'
-              }
-            </Text>
-            <Button
-              title={isLocked ? 'Unlock Plan' : 'Lock Plan'}
-              onPress={handleLockPlan}
-              variant={isLocked ? 'outline' : 'primary'}
-              size="small"
-              style={styles.lockButton}
-            />
-          </Card>
-        </ScrollView>
-
-        {/* Whole-Plan Edit Modal */}
-        <Modal visible={showPlanEditModal} transparent animationType="fade" onRequestClose={() => setShowPlanEditModal(false)}>
-          <View style={styles.editModalOverlay}>
-            <View style={styles.editModalCard}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: theme.space.sm }}>
-                <Edit3 size={20} color={theme.color.accent.primary} />
-                <Text style={[styles.editTitle, { marginLeft: theme.space.xs }]}>Edit Your Base Plan</Text>
-              </View>
-              <Text style={styles.editDescription}>Describe how you want your entire 7-day plan to change. We’ll regenerate a new weekly plan that matches your request.</Text>
-
-              <TextInput
-                style={styles.planEditInput}
-                placeholder="e.g., Make workouts 30 minutes, focus on legs and core, 4 meals/day, vegetarian meals only, higher protein."
-                placeholderTextColor={theme.color.muted}
-                value={planEditText}
-                onChangeText={setPlanEditText}
-                multiline
-                numberOfLines={5}
-                textAlignVertical="top"
-                editable={!isSubmittingWholePlan}
-                returnKeyType="send"
-                blurOnSubmit
-                onSubmitEditing={() => {
-                  if (!isSubmittingWholePlan && (planEditText || '').trim()) {
-                    Keyboard.dismiss();
-                    handleSubmitWholePlan();
-                  }
-                }}
+              <Button
+                title={isLocked ? 'Unlock Plan' : 'Lock Plan'}
+                onPress={handleLockPlan}
+                variant={isLocked ? 'outline' : 'primary'}
+                size="small"
+                style={styles.lockButton}
               />
+            </Card>
+          )}
 
-              {isSubmittingWholePlan && (
-                <View style={styles.progressContainer}>
-                  <Text style={styles.progressText}>Updating your base plan…</Text>
-                  <View style={styles.progressBarBackground}>
-                    <Animated.View 
-                      style={[
-                        styles.progressBarFill,
-                        {
-                          width: wholePlanProgressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
-                        },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.progressSubtext}>This usually takes a few seconds</Text>
+          {/* Historical Plan Info Banner */}
+          {isHistoricalView && (
+            <Card style={styles.historicalBanner}>
+              <Text style={styles.historicalBannerTitle}>📋 Historical Plan</Text>
+              <Text style={styles.historicalBannerText}>
+                This is a previous plan. You can view its details or activate it to use it again.
+              </Text>
+              {basePlan?.stats && (
+                <View style={styles.historicalStats}>
+                  {basePlan.stats.daysActive !== undefined && (
+                    <Text style={styles.historicalStatItem}>
+                      • Was active for {basePlan.stats.daysActive} day{basePlan.stats.daysActive !== 1 ? 's' : ''}
+                    </Text>
+                  )}
+                  {basePlan.stats.consistencyPercent !== undefined && (
+                    <Text style={styles.historicalStatItem}>
+                      • {basePlan.stats.consistencyPercent}% consistency during active period
+                    </Text>
+                  )}
+                  {basePlan.stats.weightChangeKg !== undefined && (
+                    <Text style={styles.historicalStatItem}>
+                      • Weight change: {basePlan.stats.weightChangeKg >= 0 ? '+' : ''}{basePlan.stats.weightChangeKg.toFixed(1)} kg
+                    </Text>
+                  )}
                 </View>
               )}
-
-              {!isSubmittingWholePlan && (
-                <View style={styles.editActions}>
-                  <Button
-                    title="Cancel"
-                    onPress={() => setShowPlanEditModal(false)}
-                    variant="outline"
-                    size="small"
-                    style={styles.cancelButton}
-                  />
-                  <Button
-                    title="Apply Changes"
-                    onPress={handleSubmitWholePlan}
-                    size="small"
-                    style={styles.applyButton}
-                    icon={<Send size={16} color="#FFFFFF" />}
-                  />
-                </View>
-              )}
-            </View>
-          </View>
-        </Modal>
+            </Card>
+          )}
+        </ScrollView>
 
         {/* Bottom Action */}
         <View style={styles.bottomAction}>
-          <Button
-            title="Start My Journey"
-            onPress={handleStartJourney}
-            size="medium"
-            style={styles.startButton}
-          />
+          {isHistoricalView ? (
+            <Button
+              title={isActivatingPlan ? 'Activating...' : 'Activate This Plan'}
+              onPress={handleActivateThisPlan}
+              disabled={isActivatingPlan}
+              size="medium"
+              style={styles.activateThisPlanButton}
+              icon={<Play size={18} color={theme.color.ink} />}
+            />
+          ) : (
+            <Button
+              title={isSavingProfile ? 'Saving...' : 'Start My Journey'}
+              onPress={handleStartJourney}
+              disabled={isSavingProfile}
+              size="medium"
+              style={styles.startButton}
+            />
+          )}
         </View>
       </SafeAreaView>
     </KeyboardDismissView>
@@ -1095,69 +1188,104 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   header: {
-    alignItems: 'center',
-    padding: theme.space.xl,
-    paddingTop: theme.space.lg,
+    padding: theme.space.lg,
+    paddingTop: theme.space.xl,
+    paddingBottom: theme.space.md,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: theme.space.sm,
+  },
+  headerWelcome: {
+    fontSize: 14,
+    color: theme.color.accent.primary,
+    fontWeight: '600',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 32,
+    fontWeight: '800',
     color: theme.color.ink,
-    textAlign: 'center',
-    marginTop: theme.space.sm,
-    marginBottom: theme.space.xs,
+    letterSpacing: -0.5,
+  },
+  headerIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: theme.color.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: theme.color.line,
   },
   headerSubtitle: {
-    fontSize: 14,
+    fontSize: 15,
     color: theme.color.muted,
-    textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 22,
+    marginBottom: theme.space.md,
+    maxWidth: '90%',
   },
   daySelector: {
     marginBottom: theme.space.lg,
   },
   daySelectorContent: {
     paddingHorizontal: theme.space.lg,
-    gap: theme.space.sm,
+    gap: 12, // Increased gap
+    paddingBottom: 4, // Space for shadow
   },
   dayCard: {
-    width: 80,
-    padding: theme.space.md,
-    borderRadius: theme.radius.lg,
+    width: 105, // Increased width from 80
+    height: 130, // Fixed height for uniformity
+    padding: 12,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: theme.color.line,
     backgroundColor: theme.color.card,
-    alignItems: 'center',
+    justifyContent: 'space-between',
+    overflow: 'hidden', // For gradient
   },
   selectedDayCard: {
-    borderColor: theme.color.accent.primary,
-    backgroundColor: theme.color.accent.primary,
+    borderColor: 'transparent',
+    // Background handled by LinearGradient
   },
   dayLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: theme.color.ink,
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.color.muted,
     marginBottom: theme.space.xs,
   },
   selectedDayLabel: {
-    color: theme.color.bg,
+    color: 'rgba(255,255,255,0.9)',
   },
   dayPreview: {
-    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'space-between',
   },
   dayFocus: {
-    fontSize: 10,
-    color: theme.color.muted,
-    textAlign: 'center',
-    marginBottom: 2,
+    fontSize: 13,
+    color: theme.color.ink,
+    fontWeight: '600',
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  calorieBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: theme.color.bg,
   },
   dayCalories: {
-    fontSize: 10,
+    fontSize: 11,
     color: theme.color.muted,
-    fontWeight: '500',
+    fontWeight: '700',
   },
   selectedDayText: {
-    color: theme.color.bg,
+    color: '#FFFFFF',
   },
   dayDetails: {
     paddingHorizontal: theme.space.lg,
@@ -1468,17 +1596,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: theme.space.lg,
   },
-  planEditInput: {
-    borderWidth: 1,
-    borderColor: theme.color.line,
-    borderRadius: theme.radius.md,
-    padding: theme.space.md,
-    fontSize: 14,
-    color: theme.color.ink,
-    backgroundColor: theme.color.bg,
-    minHeight: 120,
-    marginBottom: theme.space.md,
-  },
   editInputContainer: {
     width: '100%',
     marginBottom: theme.space.md,
@@ -1540,49 +1657,75 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   timelineContainer: {
-    marginTop: theme.space.lg,
+    marginTop: theme.space.sm,
     alignSelf: 'stretch',
   },
+  timelineBubble: {
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  timelineHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
   timelinePill: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#2F80ED',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 12,
+    borderRadius: 8,
   },
   timelinePillText: {
-    color: '#FFFFFF',
-    fontSize: 11,
+    color: '#81C784', // Light green
+    fontSize: 10,
     fontWeight: '800',
-    letterSpacing: 0.3,
+    letterSpacing: 0.5,
   },
-  timelineBubble: {
-    marginTop: 6,
-    backgroundColor: '#0F3D2E',
-    borderRadius: 14,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  timelineValueHighlight: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
   },
   timelineText: {
-    color: '#E9F6EC',
+    color: 'rgba(255,255,255,0.8)',
     fontSize: 14,
     lineHeight: 20,
-    fontWeight: '600',
+    fontWeight: '500',
   },
-  editModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: theme.space.lg,
-  },
-  editModalCard: {
-    width: '100%',
-    maxWidth: 520,
-    backgroundColor: theme.color.bg,
-    borderRadius: theme.radius.lg,
+  // Historical Plan Styles
+  historicalBanner: {
+    margin: theme.space.lg,
+    backgroundColor: theme.color.accent.blue + '15',
+    borderColor: theme.color.accent.blue + '40',
     borderWidth: 1,
-    borderColor: theme.color.line,
-    padding: theme.space.lg,
+  },
+  historicalBannerTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.color.ink,
+    marginBottom: theme.space.xs,
+  },
+  historicalBannerText: {
+    fontSize: 14,
+    color: theme.color.muted,
+    lineHeight: 20,
+    marginBottom: theme.space.sm,
+  },
+  historicalStats: {
+    paddingTop: theme.space.sm,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.line,
+  },
+  historicalStatItem: {
+    fontSize: 13,
+    color: theme.color.muted,
+    marginBottom: 4,
+  },
+  activateThisPlanButton: {
+    width: '100%',
+    backgroundColor: theme.color.accent.green,
   },
 });

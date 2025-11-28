@@ -16,6 +16,8 @@ interface SliderProps {
   minLabel?: string;
   maxLabel?: string;
   formatValue?: (value: number) => string;
+  disabled?: boolean;
+  helperText?: string;
 }
 
 export function Slider({
@@ -30,6 +32,8 @@ export function Slider({
   minLabel,
   maxLabel,
   formatValue,
+  disabled = false,
+  helperText,
 }: SliderProps) {
   return (
     <View style={styles.container}>
@@ -52,8 +56,8 @@ export function Slider({
         </View>
       )}
       
-      <View style={styles.sliderContainer}>
-        <Text style={styles.sliderValue}>
+      <View style={[styles.sliderContainer, disabled && styles.sliderDisabled]}>
+        <Text style={[styles.sliderValue, disabled && styles.sliderValueDisabled]}>
           {formatValue ? formatValue(value) : value}
         </Text>
         
@@ -67,12 +71,19 @@ export function Slider({
           minimumTrackTintColor={theme.color.accent.primary}
           maximumTrackTintColor={theme.color.line}
           thumbTintColor={theme.color.accent.primary}
+          disabled={disabled}
         />
         
         <View style={styles.sliderLabels}>
           <Text style={styles.sliderLabelText}>{minLabel || minimumValue}</Text>
           <Text style={styles.sliderLabelText}>{maxLabel || maximumValue}</Text>
         </View>
+
+        {helperText ? (
+          <Text style={[styles.helperText, disabled && styles.helperTextDisabled]}>
+            {helperText}
+          </Text>
+        ) : null}
       </View>
     </View>
   );
@@ -99,6 +110,9 @@ const styles = StyleSheet.create({
   sliderContainer: {
     paddingHorizontal: 8,
   },
+  sliderDisabled: {
+    opacity: 0.5,
+  },
   slider: {
     width: '100%',
     height: 40,
@@ -119,5 +133,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: theme.color.muted,
     fontWeight: '500',
+  },
+  sliderValueDisabled: {
+    color: theme.color.muted,
+  },
+  helperText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: theme.color.muted,
+    textAlign: 'center',
+  },
+  helperTextDisabled: {
+    color: theme.color.muted,
   },
 });

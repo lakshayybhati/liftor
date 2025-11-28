@@ -44,10 +44,11 @@ import {
 } from '@/constants/fitness';
 import type { Goal, Equipment, DietaryPref, Sex, ActivityLevel, WorkoutIntensity, TrainingLevel } from '@/types/user';
 import { theme } from '@/constants/colors';
-import { useProfile } from '@/hooks/useProfile';
+// useProfile is used by plan-preview for backend save after "Start My Journey"
 import { useAuth } from '@/hooks/useAuth';
 import { Power, Info } from 'lucide-react-native';
 import { confirmNumericWithinRange, NumberSpecs, confirmCaloriesWithBaseline } from '@/utils/number-guards';
+import { startBasePlanGeneration } from '@/services/backgroundPlanGeneration';
 
 
 
@@ -76,15 +77,17 @@ const LabelWithInfo = ({
   infoTitle = 'Why this?',
   infoText,
   labelStyle,
+  containerStyle,
 }: {
   label: string;
   required?: boolean;
   infoTitle?: string;
   infoText: string;
   labelStyle?: any;
+  containerStyle?: any;
 }) => (
-  <View style={styles.labelRow}>
-    <Text style={labelStyle || styles.inputLabel}>
+  <View style={[styles.labelRow, containerStyle]}>
+    <Text style={[labelStyle || styles.inputLabel, { flexShrink: 1, marginBottom: 0 }]}>
       {label}
       {required ? <Text style={{ color: theme.color.accent.primary }}> *</Text> : null}
     </Text>
@@ -101,13 +104,13 @@ const LabelWithInfo = ({
 
 
 export default function OnboardingScreen() {
-  const { updateUser } = useUserStore();
+  const { updateUser, user, addBasePlan } = useUserStore();
   const auth = useAuth();
   const { width: screenWidth } = useWindowDimensions();
   const isSmallScreen = screenWidth < 380;
   const [step, setStep] = useState(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const { updateProfile, refetch: refetchProfile } = useProfile();
+  // Profile saving is now done in plan-preview after "Start My Journey"
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -165,6 +168,49 @@ export default function OnboardingScreen() {
   const [workoutIntensity, setWorkoutIntensity] = useState<WorkoutIntensity>('Optimal');
   const [trainingLevel, setTrainingLevel] = useState<TrainingLevel>('Beginner');
   const [includeReasoning, setIncludeReasoning] = useState(true);
+
+  // Restore state from user store if available (e.g. when retrying)
+  useEffect(() => {
+    if (user) {
+      if (user.goal) setGoal(user.goal);
+      if (user.equipment) setEquipment(user.equipment);
+      if (user.dietaryPrefs) setDietaryPrefs(user.dietaryPrefs);
+      if (user.dietaryNotes) setDietaryNotes(user.dietaryNotes);
+      if (user.trainingDays) setTrainingDays(user.trainingDays);
+      if (user.age) setAge(String(user.age));
+      if (user.sex) setSex(user.sex);
+      if (user.height) setHeight(String(user.height));
+      if (user.weight) setWeight(String(user.weight));
+      if (user.activityLevel) setActivityLevel(user.activityLevel);
+      if (user.dailyCalorieTarget) setDailyCalorieTarget(String(user.dailyCalorieTarget));
+      if (user.supplements) setSupplements(user.supplements);
+      if (user.supplementNotes) setSupplementNotes(user.supplementNotes);
+      if (user.personalGoals) setPersonalGoals(user.personalGoals);
+      if (user.perceivedLacks) setPerceivedLacks(user.perceivedLacks);
+      if (user.trainingStylePreferences) setTrainingStylePreferences(user.trainingStylePreferences);
+      if (user.avoidExercises) setAvoidExercises(user.avoidExercises);
+      if (user.preferredTrainingTime) setPreferredTrainingTime(user.preferredTrainingTime);
+      if (user.sessionLength) setSessionLength(user.sessionLength);
+      if (user.travelDays !== undefined) setTravelDays(user.travelDays);
+      if (user.fastingWindow) setFastingWindow(user.fastingWindow);
+      if (user.mealCount) setMealCount(user.mealCount);
+      if (user.workoutIntensityLevel) setIntensityLevel(user.workoutIntensityLevel);
+      if (user.injuries) setInjuries(user.injuries);
+      if (user.stepTarget) {
+          setStepTarget(user.stepTarget);
+          setStepTargetInput(String(user.stepTarget));
+      }
+      if (user.specialRequests) setSpecialRequests(user.specialRequests);
+      if (user.goalWeight) setGoalWeight(String(user.goalWeight));
+      if (user.workoutIntensity) setWorkoutIntensity(user.workoutIntensity);
+      if (user.trainingLevel) setTrainingLevel(user.trainingLevel);
+      
+      // If we have data, jump to the last step (Review/Specifics)
+      if (user.onboardingComplete) {
+        setStep(6); // Specifics step
+      }
+    }
+  }, [user]);
 
   // Removed VMN transcription per requirements
 
@@ -291,7 +337,6 @@ export default function OnboardingScreen() {
 
       case 6: // Specifics
         if (trainingStylePreferences.length === 0) missingFields.push('Training Style Preferences');
-        if (avoidExercises.length === 0) missingFields.push('Exercises to Avoid');
         if (!preferredTrainingTime) missingFields.push('Preferred Training Time');
         if (!sessionLength || sessionLength <= 0) missingFields.push('Session Length');
         if (!Number.isFinite(travelDays)) missingFields.push('Travel Days');
@@ -392,98 +437,29 @@ export default function OnboardingScreen() {
       return;
     }
 
-    // Prepare profile data
-    const profileData = {
-      email: userEmail,
-      name: resolvedName,
-      goal: goal as any,
-      equipment: equipment,
-      dietary_prefs: mappedDietaryPrefs as any,
-      dietary_notes: dietaryNotes || null,
-      training_days: trainingDays,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      onboarding_complete: true,
-      age: age ? parseInt(age) : null,
-      sex: sex || null,
-      height: height ? parseFloat(height) : null,
-      weight: weight ? parseFloat(weight) : null,
-      activity_level: activityLevel as any,
-      daily_calorie_target: dailyCalorieTarget ? parseInt(dailyCalorieTarget) : null,
-      supplements: supplements,
-      supplement_notes: supplementNotes || null,
-      personal_goals: personalGoals,
-      perceived_lacks: perceivedLacks,
-      training_style_preferences: trainingStylePreferences,
-      avoid_exercises: avoidExercises,
-      preferred_training_time: preferredTrainingTime || null,
-      session_length: sessionLength,
-      travel_days: travelDays,
-      fasting_window: fastingWindow !== 'No Fasting' ? fastingWindow : null,
-      meal_count: mealCount,
-      injuries: injuries || null,
-      step_target: stepTarget,
-      special_requests: specialRequests || null,
-      goal_weight: goalWeight ? parseFloat(goalWeight) : null,
-      workout_intensity: workoutIntensity || null,
-    };
-
-    // Helper function to save with retry logic
-    const saveWithRetry = async (maxRetries = 3): Promise<boolean> => {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          console.log(`[Onboarding] Save attempt ${attempt}/${maxRetries}`);
-
-          // Save to database first (most critical)
-          await updateProfile(profileData);
-          console.log('[Onboarding] ✅ Profile synced to Supabase');
-
-          // Force refetch to ensure cache is up to date
-          await refetchProfile();
-          console.log('[Onboarding] ✅ Profile cache refreshed');
-
-          // Update local store (this is less critical, can fail without blocking)
-          try {
-            await updateUser(userData);
-            console.log('[Onboarding] ✅ Local store updated');
-          } catch (localError) {
-            console.warn('[Onboarding] Local store update failed (non-critical):', localError);
-          }
-
-          return true; // Success!
-
-        } catch (error: any) {
-          console.error(`[Onboarding] Save attempt ${attempt} failed:`, error);
-
-          // If this isn't the last attempt, wait before retrying
-          if (attempt < maxRetries) {
-            const delay = attempt * 1000; // Progressive delay: 1s, 2s, 3s
-            console.log(`[Onboarding] Retrying in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-          } else {
-            // Last attempt failed
-            const errorMessage = error?.message || 'Unknown error';
-            console.error('[Onboarding] All save attempts failed:', errorMessage);
-            setSaveError(`Failed to save your profile: ${errorMessage}`);
-            return false;
-          }
-        }
-      }
-      return false;
-    };
-
-    // Attempt to save with retries
-    const success = await saveWithRetry(3);
-
-    if (success) {
-      // Only proceed if save was successful
-      console.log('[Onboarding] ✅ Onboarding complete, proceeding to plan generation');
-      router.replace('/generating-base-plan');
-    } else {
-      // Save failed - show error and stay on page
+    // Save only to local store for now
+    // Backend (Supabase) save will happen when user clicks "Start My Journey" in plan-preview
+    // This ensures the user commits to the plan before we persist their data
+    try {
+      console.log('[Onboarding] 📱 Saving user data locally...');
+      await updateUser(userData);
+      console.log('[Onboarding] ✅ Local store updated successfully');
+      
+      // Start background plan generation
+      console.log('[Onboarding] 🚀 Starting background plan generation...');
+      const jobId = await startBasePlanGeneration(userData, auth?.session?.user?.id ?? null, addBasePlan);
+      console.log('[Onboarding] ✅ Background generation started, job ID:', jobId);
+      
+      // Navigate to plan building screen (shows progress + mini-game option)
+      console.log('[Onboarding] ✅ Onboarding complete, navigating to plan building screen');
+      router.replace('/plan-building');
+    } catch (error: any) {
+      console.error('[Onboarding] ❌ Failed to save locally:', error);
       setIsSaving(false);
+      setSaveError(`Failed to save your data: ${error?.message || 'Unknown error'}`);
       Alert.alert(
         'Save Failed',
-        'We couldn\'t save your profile. Please check your internet connection and try again.',
+        'We couldn\'t save your data. Please try again.',
         [
           {
             text: 'Retry',
@@ -942,8 +918,7 @@ export default function OnboardingScreen() {
           </View>
 
           <LabelWithInfo
-            label="Exercises to avoid"
-            required
+            label="Exercises to avoid (optional)"
             infoText="We’ll avoid these to reduce injury risk and frustration."
             labelStyle={styles.sectionLabel}
           />
@@ -965,6 +940,7 @@ export default function OnboardingScreen() {
                 label="Preferred training time"
                 required
                 infoText="We’ll schedule workouts when you tend to have the most energy."
+                containerStyle={{ minHeight: 42 }}
               />
               <View style={styles.timeChips}>
                 {TRAINING_TIMES.map((time) => (
@@ -991,6 +967,7 @@ export default function OnboardingScreen() {
                 label="Session length"
                 required
                 infoText="Pick the typical time you can dedicate to a session."
+                containerStyle={{ minHeight: 42 }}
               />
               <View style={styles.sessionLengthContainer}>
                 {SESSION_LENGTHS.map((length) => (
@@ -1020,6 +997,7 @@ export default function OnboardingScreen() {
                 label="Travel days/month"
                 required
                 infoText="We’ll plan more flexible training for frequent travel."
+                containerStyle={{ minHeight: 42 }}
               />
               <TextInput
                 style={styles.numberInput}
@@ -1040,6 +1018,7 @@ export default function OnboardingScreen() {
                 label="Step target"
                 required
                 infoText="Daily steps support recovery and calorie balance."
+                containerStyle={{ minHeight: 42 }}
               />
               <TextInput
                 style={styles.numberInput}
@@ -1069,6 +1048,7 @@ export default function OnboardingScreen() {
                 label="Goal weight (kg)"
                 required
                 infoText="Your target helps us guide pace and plan adjustments."
+                containerStyle={{ minHeight: 42 }}
               />
               <TextInput
                 style={[styles.numberInput, !goalWeight.trim() && styles.requiredField]}
@@ -1094,6 +1074,7 @@ export default function OnboardingScreen() {
               <LabelWithInfo
                 label="Current weight"
                 infoText="Shown from earlier body stats to compare with your goal."
+                containerStyle={{ minHeight: 42 }}
               />
               <Text style={[styles.numberInput, { color: theme.color.muted, textAlignVertical: 'center' }]}>
                 {weight ? `${weight} kg` : 'Not set'}
@@ -1254,7 +1235,7 @@ export default function OnboardingScreen() {
           <View style={styles.header}>
             <Text style={styles.welcomeText}>Welcome to</Text>
             <Text style={styles.appName}>Liftor</Text>
-            <Text style={styles.subtitle}>Your AI-powered fitness companion</Text>
+            <Text style={styles.subtitle}>Your fitness companion</Text>
           </View>
 
           <Animated.View style={[styles.fadeWrapper, { opacity: fadeAnim }]}>

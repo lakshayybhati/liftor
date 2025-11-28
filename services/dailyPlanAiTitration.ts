@@ -414,9 +414,9 @@ ${formatSupplementGuideForTitration()}
    - Light: Can have denser meals, good absorption day
 
 4. Hydration (waterL):
-   - <2L: Emphasize water intake in plan
-   - 2-3L: Good, maintain
-   - >3L: Great hydration
+   - <2.5L: Emphasize water intake in plan
+   - 2.5-3.5L: Adequate, encourage pushing toward 3.5L baseline
+   - >3.5L: Great hydration
 
 5. Supplements:
    - If suppsYN=false: Remind to take supplements in recovery section

@@ -432,7 +432,7 @@ function repairDayPlan(dayPlan: any, targetCalories: number, targetProtein: numb
           ]
         }
       ],
-      hydration_l: 2.5
+      hydration_l: 3.5
     };
   } else {
     // Force correct calorie and protein values
@@ -444,7 +444,7 @@ function repairDayPlan(dayPlan: any, targetCalories: number, targetProtein: numb
     }
     
     if (typeof dayPlan.nutrition.hydration_l !== 'number') {
-      dayPlan.nutrition.hydration_l = 2.5;
+      dayPlan.nutrition.hydration_l = 3.5;
     }
   }
   
@@ -522,7 +522,7 @@ function createDefaultDayPlan(targetCalories: number, targetProtein: number, day
           ]
         }
       ],
-      hydration_l: 2.5
+      hydration_l: 3.5
     },
     recovery: {
       mobility: isRestDay ? 

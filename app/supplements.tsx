@@ -34,6 +34,52 @@ export default function SupplementsScreen() {
 
   const basePlan = getCurrentBasePlan();
 
+  // Helper to extract base supplement name for deduplication
+  // "Magnesium Glycinate (400mg) - Before bed" -> "magnesium glycinate"
+  const getSupplementBaseName = (supp: string): string => {
+    return supp
+      .toLowerCase()
+      .split('(')[0]      // Remove dosage like "(400mg)"
+      .split('-')[0]      // Remove timing like "- Before bed"  
+      .trim();
+  };
+
+  // Helper to check if two supplements are essentially the same
+  const isSameSupplement = (supp1: string, supp2: string): boolean => {
+    const base1 = getSupplementBaseName(supp1);
+    const base2 = getSupplementBaseName(supp2);
+    return base1 === base2 || base1.includes(base2) || base2.includes(base1);
+  };
+
+  // Helper to deduplicate supplements, keeping the most detailed version
+  const deduplicateSupplements = (supplements: string[]): string[] => {
+    const result: string[] = [];
+    const seenBaseNames = new Set<string>();
+    
+    // Sort by length descending to prefer more detailed versions
+    const sorted = [...supplements].sort((a, b) => b.length - a.length);
+    
+    for (const supp of sorted) {
+      const baseName = getSupplementBaseName(supp);
+      
+      // Check if we already have a supplement with this base name
+      let isDuplicate = false;
+      for (const seen of seenBaseNames) {
+        if (baseName === seen || baseName.includes(seen) || seen.includes(baseName)) {
+          isDuplicate = true;
+          break;
+        }
+      }
+      
+      if (!isDuplicate) {
+        result.push(supp);
+        seenBaseNames.add(baseName);
+      }
+    }
+    
+    return result;
+  };
+
   // Aggregate all supplements from the weekly plan
   const supplementsData = useMemo(() => {
     if (!basePlan?.days) {
@@ -45,62 +91,79 @@ export default function SupplementsScreen() {
       };
     }
 
-    const allSuppsSet = new Set<string>();
+    const allSuppsList: string[] = [];
     const dailySupps: Record<DayKey, string[]> = {} as Record<DayKey, string[]>;
-    const userSuppsSet = new Set<string>();
-    const recommendedSuppsSet = new Set<string>();
+    const userSuppsList: string[] = [];
+    const recommendedSuppsList: string[] = [];
 
-    // Process each day
+    // 1. First, get the user's current supplements from their profile (these are "Custom")
+    const userProfileSupplements = user?.supplements || [];
+    userProfileSupplements.forEach((supp: string) => {
+      userSuppsList.push(supp);
+      allSuppsList.push(supp);
+    });
+
+    // 2. Process each day to get AI-generated supplements from the base plan
     DAY_ORDER.forEach((day) => {
       const dayData = basePlan.days[day];
       if (!dayData?.recovery) return;
 
-      // Get daily supplements
+      // Get daily supplements from the base plan
       const daySupplements = dayData.recovery.supplements || [];
       dailySupps[day] = daySupplements;
 
-      // Add to overall set
-      daySupplements.forEach((supp: string) => allSuppsSet.add(supp));
+      // Add all daily supplements to the overall list
+      daySupplements.forEach((supp: string) => allSuppsList.push(supp));
 
-      // Get user's current supplements
-      if (dayData.recovery.supplementCard?.current) {
-        dayData.recovery.supplementCard.current.forEach((supp: string) => {
-          userSuppsSet.add(supp);
-          allSuppsSet.add(supp);
-        });
-      }
-
-      // Get recommended add-ons
+      // Get AI-recommended add-ons from supplementCard if available
       if (dayData.recovery.supplementCard?.addOns) {
         dayData.recovery.supplementCard.addOns.forEach((supp: string) => {
-          recommendedSuppsSet.add(supp);
-          allSuppsSet.add(supp);
+          // Only add to recommended if not similar to user's profile supplements
+          const isUserSupplement = userProfileSupplements.some((userSupp: string) => 
+            isSameSupplement(supp, userSupp)
+          );
+          if (!isUserSupplement) {
+            recommendedSuppsList.push(supp);
+          }
+          allSuppsList.push(supp);
         });
       }
     });
 
-    // Post-processing to ensure math adds up
-    // 1. Assign any uncategorized supplements to recommended
-    allSuppsSet.forEach(supp => {
-      if (!userSuppsSet.has(supp) && !recommendedSuppsSet.has(supp)) {
-        recommendedSuppsSet.add(supp);
+    // 3. Any supplements from the base plan that aren't in user's profile are AI recommendations
+    // This handles cases where AI puts recommendations in the supplements array directly
+    allSuppsList.forEach(supp => {
+      const isUserSupplement = userProfileSupplements.some((userSupp: string) => 
+        isSameSupplement(supp, userSupp)
+      );
+      
+      // Check if already in recommended list
+      const alreadyRecommended = recommendedSuppsList.some(rec => 
+        isSameSupplement(supp, rec)
+      );
+      
+      if (!isUserSupplement && !alreadyRecommended) {
+        recommendedSuppsList.push(supp);
       }
     });
 
-    // 2. Ensure no overlap (User takes priority)
-    userSuppsSet.forEach(supp => {
-      if (recommendedSuppsSet.has(supp)) {
-        recommendedSuppsSet.delete(supp);
-      }
-    });
+    // 4. Deduplicate all lists
+    const dedupedAll = deduplicateSupplements(allSuppsList);
+    const dedupedUser = deduplicateSupplements(userSuppsList);
+    const dedupedRecommended = deduplicateSupplements(recommendedSuppsList);
+
+    // 5. Final cleanup - remove from recommended if it matches any user supplement
+    const finalRecommended = dedupedRecommended.filter(rec => 
+      !dedupedUser.some(userSupp => isSameSupplement(rec, userSupp))
+    );
 
     return {
-      allSupplements: Array.from(allSuppsSet),
+      allSupplements: dedupedAll,
       dailySupplements: dailySupps,
-      userSupplements: Array.from(userSuppsSet),
-      recommendedSupplements: Array.from(recommendedSuppsSet)
+      userSupplements: dedupedUser,
+      recommendedSupplements: finalRecommended
     };
-  }, [basePlan]);
+  }, [basePlan, user?.supplements]);
 
   const handleAddSupplement = async () => {
     if (!newSupplement.trim()) return;
@@ -273,22 +336,22 @@ export default function SupplementsScreen() {
             </View>
             <View style={styles.statItem}>
               <Text style={styles.statValue}>{userSupplements.length}</Text>
-              <Text style={styles.statLabel}>Current</Text>
+              <Text style={styles.statLabel}>Yours</Text>
             </View>
             <View style={styles.statItem}>
               <Text style={styles.statValue}>{recommendedSupplements.length}</Text>
-              <Text style={styles.statLabel}>Recommended</Text>
+              <Text style={styles.statLabel}>Our Picks</Text>
             </View>
           </View>
         </Card>
 
-        {/* Custom Supplements (formerly User's Current Supplements) */}
+        {/* User's Current Supplements from their profile */}
         {userSupplements.length > 0 && (
           <Card style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>✨ Custom</Text>
+              <Text style={styles.sectionTitle}>💊 Your Current Stack</Text>
               <Text style={styles.sectionSubtitle}>
-                Your personal supplements
+                Supplements you're already taking
               </Text>
             </View>
             {userSupplements.map((supp, index) => (
@@ -309,13 +372,13 @@ export default function SupplementsScreen() {
           </Card>
         )}
 
-        {/* Recommended Add-ons */}
+        {/* AI-Recommended Add-ons from Base Plan */}
         {recommendedSupplements.length > 0 && (
           <Card style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>✨ Recommended Add-ons</Text>
+              <Text style={styles.sectionTitle}>✨ Recommended</Text>
               <Text style={styles.sectionSubtitle}>
-                Evidence-based supplements tailored to your goals
+                Smart suggestions from your personalized plan
               </Text>
             </View>
             {recommendedSupplements.map((supp, index) => (
@@ -414,7 +477,7 @@ export default function SupplementsScreen() {
   };
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <View style={styles.container}>
       <Stack.Screen
         options={{
           headerShown: true,

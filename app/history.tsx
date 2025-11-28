@@ -1,8 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity } from 'react-native';
 import { Stack } from 'expo-router';
 import { Calendar, TrendingUp, Activity, Target, Scale } from 'lucide-react-native';
 import Svg, { Line, Circle, Polyline } from 'react-native-svg';
+import { useFocusEffect } from '@react-navigation/native';
 import { Card } from '@/components/ui/Card';
 import { useUserStore } from '@/hooks/useUserStore';
 import { MOOD_OPTIONS } from '@/constants/fitness';
@@ -85,8 +86,22 @@ export default function HistoryScreen() {
     );
   }
   
-  const { getRecentCheckins, plans, getWeightData, getWeightProgress, user } = userStore;
+  const { getRecentCheckins, plans, getWeightData, getWeightProgress, user, recalculateAdherence } = userStore;
   const [timeRange, setTimeRange] = useState<TimeRange>('7d');
+  
+  // Use ref to store the latest recalculateAdherence function
+  const recalculateRef = useRef(recalculateAdherence);
+  recalculateRef.current = recalculateAdherence;
+
+  // Recalculate today's adherence ONCE when the screen is focused
+  // This fixes any stale adherence data from race conditions
+  useFocusEffect(
+    useCallback(() => {
+      // Call via ref to avoid dependency array issues
+      recalculateRef.current?.();
+      // Return nothing - we don't need cleanup
+    }, []) // Empty deps - only run once on focus
+  );
 
   const days = timeRange === '7d' ? 7 : timeRange === '14d' ? 14 : 30;
   
@@ -141,17 +156,34 @@ export default function HistoryScreen() {
       return Math.round((stressLevels.reduce((a, b) => a + b, 0) / stressLevels.length) * 10) / 10;
     };
 
+    // Get the number of days with actual adherence data
+    const getAdherenceDaysCount = () => {
+      const plansWithAdherence = recentPlans.filter(p => typeof p.adherence === 'number');
+      return plansWithAdherence.length;
+    };
+
     const getCompletionRate = () => {
-      // Prefer adherence when available: weighted average giving more importance to recent days
+      // Prefer adherence when available: calculate based ONLY on days with actual data
+      // This ensures new users see accurate stats based on their activity, not empty days
       const plansWithAdherence = recentPlans.filter(p => typeof p.adherence === 'number');
       
       if (plansWithAdherence.length > 0) {
         // Sort chronologically to ensure we weight the correct days
         plansWithAdherence.sort((a, b) => a.date.localeCompare(b.date));
         
+        // For new users (3 or fewer days of data), use simple average - no weighting
+        // This prevents confusing percentages when the user is just starting out
+        const n = plansWithAdherence.length;
+        
+        if (n <= 3) {
+          // Simple average for new users - just average the days they've actually used
+          const sum = plansWithAdherence.reduce((acc, p) => acc + (p.adherence || 0), 0);
+          return Math.round((sum / n) * 100);
+        }
+        
+        // For users with more data, use weighted average (recent days matter more)
         let weightedSum = 0;
         let totalWeight = 0;
-        const n = plansWithAdherence.length;
         
         plansWithAdherence.forEach((p, index) => {
           // Calculate weight: more recent (higher index) = higher weight
@@ -193,7 +225,8 @@ export default function HistoryScreen() {
     return {
       averageEnergy: getAverageEnergy(),
       averageStress: getAverageStress(),
-      completionRate: getCompletionRate()
+      completionRate: getCompletionRate(),
+      adherenceDaysCount: getAdherenceDaysCount()
     };
   }, [recentCheckins, recentPlans, hasCheckins, hasPlans, days]);
 
@@ -242,43 +275,70 @@ export default function HistoryScreen() {
       <Card style={styles.statCard}>
         <View style={styles.statContent}>
           <Calendar color={theme.color.accent.blue} size={24} />
-          <Text style={styles.statValue}>
+          <Text style={styles.statValue} numberOfLines={1} adjustsFontSizeToFit>
             {(hasPlans || hasCheckins) ? `${statistics.completionRate}%` : '--'}
           </Text>
-          <View style={styles.statLabelWrap}>
-            <Text style={styles.statLabel}>Avg</Text>
-            <Text style={styles.statSubLabel}>complition</Text>
-          </View>
+          <Text style={styles.statLabel} numberOfLines={1}>
+            {statistics.adherenceDaysCount > 0 
+              ? `${statistics.adherenceDaysCount}d Avg`
+              : 'Avg'}
+          </Text>
         </View>
       </Card>
     </View>
   );
 
   const renderCompletionSlider = () => {
-    const rate = statistics.completionRate || 0;
-    // Determine motivational text based on 5% increments
+    // Overall completion is based on weight progress toward goal
+    const rate = weightProgress?.progress !== undefined ? Math.round(weightProgress.progress) : 0;
+    const hasWeightGoal = weightProgress !== null;
+    const isNegative = rate < 0;
+    const displayRate = Math.abs(rate);
+    
+    // Determine motivational text based on weight progress
     const getMotivationText = (r: number) => {
-      if (r === 0) return "Let's get started!";
-      if (r >= 100) return "Perfect score! Keep it up! 🔥";
-      if (r >= 95) return "Almost perfect! You're crushing it! 💪";
-      if (r >= 90) return "Outstanding consistency! 🌟";
-      if (r >= 85) return "Great work! Keep pushing! 🚀";
-      if (r >= 80) return "Solid progress! Stay focused! 🎯";
+      if (!hasWeightGoal) return "Set a weight goal to track progress!";
+      
+      // Negative progress - moving in wrong direction
+      if (r < 0) {
+        const absR = Math.abs(r);
+        if (absR >= 50) return "Time to refocus! You can turn this around 💪";
+        if (absR >= 25) return "Let's get back on track! 🔄";
+        if (absR >= 10) return "Small setback - you've got this! 🎯";
+        return "Stay focused on your goal! ✨";
+      }
+      
+      // Positive progress
+      if (r === 0) return "Your journey begins now! 💪";
+      if (r >= 100) return "Goal reached! You did it! 🎉🔥";
+      if (r >= 95) return "Almost there! Final push! 💪";
+      if (r >= 90) return "So close to your goal! 🌟";
+      if (r >= 75) return "Amazing progress! Keep going! 🚀";
+      if (r >= 50) return "Halfway there! Stay strong! 🎯";
+      if (r >= 25) return "Great start! Keep it up! ✨";
       
       // For lower percentages, give specific next-step encouragement
-      const nextMilestone = Math.ceil((r + 1) / 5) * 5;
+      const nextMilestone = Math.ceil((r + 1) / 10) * 10;
       return `Push to ${nextMilestone}%! You got this!`;
     };
 
     return (
       <Card style={styles.sliderCard}>
         <View style={styles.sliderHeader}>
-          <Text style={styles.sliderTitle}>Overall Completion</Text>
-          <Text style={styles.sliderValue}>{rate}%</Text>
+          <Text style={styles.sliderTitle}>Weight Goal Progress</Text>
+          <Text style={[
+            styles.sliderValue,
+            isNegative && styles.sliderValueNegative
+          ]}>
+            {hasWeightGoal ? `${isNegative ? '-' : ''}${displayRate}%` : '--'}
+          </Text>
         </View>
         
         <View style={styles.sliderTrack}>
-          <View style={[styles.sliderFill, { width: `${Math.min(100, Math.max(0, rate))}%` }]} />
+          <View style={[
+            styles.sliderFill,
+            { width: `${isNegative ? 0 : Math.min(100, displayRate)}%` }
+          ]} />
         </View>
         
         <Text style={styles.motivationText}>
@@ -636,13 +696,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   statValue: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
     color: theme.color.ink,
     marginTop: 8,
+    flexShrink: 0,
   },
   statLabel: {
-    fontSize: 12,
+    fontSize: 11,
     color: theme.color.muted,
     marginTop: 4,
     textAlign: 'center',
@@ -786,6 +847,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: theme.color.accent.primary,
   },
+  sliderValueNegative: {
+    color: '#FF6B6B',
+  },
   sliderTrack: {
     height: 12,
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -797,6 +861,9 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: theme.color.accent.primary,
     borderRadius: 6,
+  },
+  sliderFillNegative: {
+    backgroundColor: '#FF6B6B',
   },
   motivationText: {
     fontSize: 14,

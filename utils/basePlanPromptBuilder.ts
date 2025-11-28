@@ -52,7 +52,7 @@ function calculateBMR(user: User): number {
   if (!user.weight || !user.height || !user.age || !user.sex) {
     return 2000; // Default
   }
-  
+
   if (user.sex === 'Male') {
     return Math.round(10 * user.weight + 6.25 * user.height - 5 * user.age + 5);
   } else {
@@ -83,9 +83,9 @@ function getCalorieTarget(user: User): number {
   if (user.dailyCalorieTarget) {
     return user.dailyCalorieTarget;
   }
-  
+
   const tdee = calculateTDEE(user);
-  
+
   switch (user.goal) {
     case 'WEIGHT_LOSS':
       return Math.round(tdee * 0.85); // 15% deficit
@@ -103,7 +103,7 @@ function getProteinTarget(user: User): number {
   if (!user.weight) {
     return Math.round(getCalorieTarget(user) * 0.3 / 4); // 30% of calories from protein
   }
-  
+
   // Protein in grams per kg of body weight
   const multiplier = user.goal === 'MUSCLE_GAIN' ? 2.2 : 1.8;
   return Math.round(user.weight * multiplier);
@@ -122,12 +122,12 @@ function getWorkoutSplit(trainingDays: number, preferredSplit?: string): string[
       'Full Body': ['Full Body', 'Rest', 'Full Body', 'Rest', 'Full Body', 'Rest', 'Rest'],
       'Bro Split': ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Rest', 'Rest'],
     };
-    
+
     if (splitMaps[preferredSplit]) {
       return splitMaps[preferredSplit];
     }
   }
-  
+
   // Default splits based on training days
   const defaultSplits: Record<number, string[]> = {
     1: ['Full Body', 'Rest', 'Rest', 'Rest', 'Rest', 'Rest', 'Rest'],
@@ -138,7 +138,7 @@ function getWorkoutSplit(trainingDays: number, preferredSplit?: string): string[
     6: ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs', 'Rest'],
     7: ['Push', 'Pull', 'Legs', 'Upper Body', 'Lower Body', 'Full Body', 'Active Recovery'],
   };
-  
+
   return defaultSplits[Math.min(Math.max(trainingDays, 1), 7)] || defaultSplits[3];
 }
 
@@ -178,7 +178,7 @@ function getGoalWorkoutInstructions(goal: Goal): string {
 - Active recovery emphasis
 - Mind-body connection exercises`,
   };
-  
+
   return instructions[goal] || instructions['GENERAL_FITNESS'];
 }
 
@@ -213,9 +213,9 @@ function generateMealExamples(mealCount: number): string {
     7: ['Breakfast', 'Mid-Morning', 'Lunch', 'Afternoon Snack', 'Post-Workout', 'Dinner', 'Before Bed'],
     8: ['Breakfast', 'Snack 1', 'Lunch', 'Snack 2', 'Pre-Workout', 'Post-Workout', 'Dinner', 'Before Bed'],
   };
-  
+
   const names = mealNames[mealCount] || mealNames[3];
-  return names.map((name, i) => 
+  return names.map((name, i) =>
     `          {"name": "${name}", "items": [{"food": "Food item", "qty": "amount with unit"}]}${i < names.length - 1 ? ',' : ''}`
   ).join('\n');
 }
@@ -246,7 +246,7 @@ function getLevelInstructions(level: TrainingLevel | undefined): string {
 - Specialized exercise selection
 - Include intensity techniques`,
   };
-  
+
   return instructions[level || 'Intermediate'] || instructions['Intermediate'];
 }
 
@@ -257,9 +257,9 @@ function buildUserProfile(user: User): string {
   const calorieTarget = getCalorieTarget(user);
   const proteinTarget = getProteinTarget(user);
   const workoutSplit = getWorkoutSplit(user.trainingDays, user.preferredWorkoutSplit);
-  
+
   const sections: string[] = [];
-  
+
   // Core info
   sections.push(`## USER PROFILE
 
@@ -270,7 +270,7 @@ function buildUserProfile(user: User): string {
 - Equipment: ${user.equipment.join(', ') || 'Bodyweight only'}
 - Dietary Preference: ${user.dietaryPrefs.join(', ') || 'No restrictions'}
 ${user.dietaryNotes ? `- Dietary Notes: ${user.dietaryNotes}` : ''}`);
-  
+
   // Body stats
   if (user.age || user.weight || user.height) {
     sections.push(`
@@ -282,7 +282,7 @@ ${user.weight ? `- Weight: ${user.weight} kg` : ''}
 ${user.goalWeight ? `- Goal Weight: ${user.goalWeight} kg` : ''}
 ${user.activityLevel ? `- Activity Level: ${user.activityLevel}` : ''}`);
   }
-  
+
   // Nutrition targets
   sections.push(`
 ### Nutrition Targets
@@ -290,7 +290,7 @@ ${user.activityLevel ? `- Activity Level: ${user.activityLevel}` : ''}`);
 - Daily Protein: ${proteinTarget}g
 - Meals per Day: ${user.mealCount || 3}
 ${user.fastingWindow && user.fastingWindow !== 'No Fasting' ? `- Fasting Window: ${user.fastingWindow}` : ''}`);
-  
+
   // Training preferences
   sections.push(`
 ### Training Preferences
@@ -301,21 +301,21 @@ ${user.sessionLength ? `- Session Length: ${user.sessionLength} minutes` : ''}
 ${user.workoutIntensity ? `- Intensity Preference: ${user.workoutIntensity}` : ''}
 ${user.workoutIntensityLevel ? `- Intensity Level: ${user.workoutIntensityLevel}/10` : ''}
 ${user.preferredTrainingTime ? `- Preferred Time: ${user.preferredTrainingTime}` : ''}`);
-  
+
   // Avoid exercises
   if (user.avoidExercises?.length) {
     sections.push(`
 ### Exercises to AVOID (CRITICAL)
 ${user.avoidExercises.map(e => `- ${e}`).join('\n')}`);
   }
-  
+
   // Injuries
   if (user.injuries) {
     sections.push(`
 ### Injuries/Limitations (CRITICAL)
 ${user.injuries}`);
   }
-  
+
   // Supplements
   if (user.supplements?.length) {
     sections.push(`
@@ -323,7 +323,7 @@ ${user.injuries}`);
 ${user.supplements.map(s => `- ${s}`).join('\n')}
 ${user.supplementNotes ? `Notes: ${user.supplementNotes}` : ''}`);
   }
-  
+
   // Personal goals
   if (user.personalGoals?.length || user.perceivedLacks?.length) {
     sections.push(`
@@ -331,7 +331,7 @@ ${user.supplementNotes ? `Notes: ${user.supplementNotes}` : ''}`);
 ${user.personalGoals?.length ? `Goals: ${user.personalGoals.join(', ')}` : ''}
 ${user.perceivedLacks?.length ? `Areas to Improve: ${user.perceivedLacks.join(', ')}` : ''}`);
   }
-  
+
   // Lifestyle
   if (user.stepTarget || user.travelDays || user.specialRequests) {
     sections.push(`
@@ -340,7 +340,13 @@ ${user.stepTarget ? `- Daily Step Target: ${user.stepTarget} steps` : ''}
 ${user.travelDays ? `- Travel Days/Month: ${user.travelDays}` : ''}
 ${user.specialRequests ? `- Special Requests: ${user.specialRequests}` : ''}`);
   }
-  
+
+  if (user.planRegenerationRequest) {
+    sections.push(`
+### Requested Weekly Plan Changes (CRITICAL)
+${user.planRegenerationRequest}`);
+  }
+
   return sections.join('\n');
 }
 
@@ -364,10 +370,10 @@ export function buildGenerationPrompt(user: User): GenerationPrompt {
   const goalInstructions = getGoalWorkoutInstructions(user.goal);
   const levelInstructions = getLevelInstructions(user.trainingLevel);
   const userProfile = buildUserProfile(user);
-  
+
   const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   const dayAssignments = dayNames.map((day, i) => `- ${day}: ${workoutSplit[i]}`).join('\n');
-  
+
   // Build dietary rules
   let dietaryRules = '';
   if (user.dietaryPrefs.includes('Vegetarian')) {
@@ -390,10 +396,23 @@ DIETARY RULES (NON-VEG):
 - Prioritize lean proteins: chicken breast, fish, lean beef, eggs
 - Include variety across the week`;
   }
-  
+
   const system = `You are an elite fitness coach AI creating a personalized 7-day workout and nutrition plan.
 
 ${userProfile}
+
+${user.planRegenerationRequest ? `## CURRENT USER REQUEST (CRITICAL)
+- ${user.planRegenerationRequest}
+- These changes override previous weekly preferences where applicable.
+` : ''}
+
+## ⚠️ NUTRITION TARGETS (CRITICAL - MUST MATCH EXACTLY)
+**These values are NON-NEGOTIABLE and must appear in EVERY day's nutrition section:**
+- Daily Calories: **EXACTLY ${calorieTarget} kcal** (total_kcal field)
+- Daily Protein: **EXACTLY ${proteinTarget}g** (protein_g field)
+- Meals per day: **EXACTLY ${user.mealCount || 3} meals**
+
+The AI verification step will REJECT any plan where these values don't match exactly.
 
 ## WORKOUT STRUCTURE REQUIREMENTS
 
@@ -420,14 +439,15 @@ ${user.injuries}` : ''}
 
 ${dietaryRules}
 
-## NUTRITION REQUIREMENTS
-- Daily Calories: EXACTLY ${calorieTarget} kcal
-- Daily Protein: EXACTLY ${proteinTarget}g
+## NUTRITION STRUCTURE REQUIREMENTS
 - Meals per day: EXACTLY ${user.mealCount || 3} meals (user preference - MUST generate this many)
-- Include realistic portion sizes with quantities
-- Meals must add up to the calorie target
+- Include realistic portion sizes with quantities (e.g., "150g chicken breast", "1 cup rice")
 - Meal naming guide for ${user.mealCount || 3} meals:
 ${getMealNamingGuide(user.mealCount || 3)}
+
+**REMINDER: Every day's nutrition section MUST have:**
+- "total_kcal": ${calorieTarget}
+- "protein_g": ${proteinTarget}
 
 ## RECOVERY & SUPPLEMENT REQUIREMENTS
 
@@ -435,38 +455,38 @@ ${getMealNamingGuide(user.mealCount || 3)}
 - Include mobility work relevant to the day's workout
 - Include sleep recommendations based on training intensity
 
-### SUPPLEMENT RECOMMENDATIONS (AI-DRIVEN)
-You must analyze ALL user data to recommend personalized supplements from the reference guide below.
+### SUPPLEMENT RECOMMENDATIONS (AI-DRIVEN & AGE-OPTIMIZED)
+You must analyze ALL user data to create a "Smart Supplement Stack" that combines their current supplements with high-impact add-ons.
 
 **User's Current Supplement Stack:** ${user.supplements?.length ? user.supplements.join(', ') : 'None currently taking'}
 ${user.supplementNotes ? `**Supplement Notes:** ${user.supplementNotes}` : ''}
 
-**Factors to Consider for Supplement Recommendations:**
-- Goal: ${user.goal.replace('_', ' ')} → recommend supplements that support this goal
-- Age: ${user.age || 'Not specified'} → consider age-appropriate supplements
-- Sex: ${user.sex || 'Not specified'} → consider sex-specific needs (e.g., iron for females)
-- Training Level: ${user.trainingLevel || 'Intermediate'} → advanced may benefit from more performance supplements
-- Training Days: ${user.trainingDays}/week → higher frequency may need more recovery support
-- Activity Level: ${user.activityLevel || 'Moderately Active'} → affects electrolyte/hydration needs
-- Dietary Preferences: ${user.dietaryPrefs.join(', ') || 'None'} → vegetarians may need B12, vegans need D3/B12/Omega-3 from algae
-- Injuries: ${user.injuries || 'None'} → joint issues may benefit from glucosamine/collagen
-- Personal Goals: ${user.personalGoals?.join(', ') || 'None specified'}
-- Perceived Lacks: ${user.perceivedLacks?.join(', ') || 'None specified'} → address specific deficiencies
+**CRITICAL: AGE & GOAL OPTIMIZATION LOGIC**
+- **Under 30:** Focus on performance, recovery, and foundational health (Multivitamin, Vitamin D, Protein, Creatine).
+- **30-45:** Add focus on stress management, energy, and early longevity (Magnesium, Omega-3s, CoQ10 if active).
+- **45+:** PRIORITIZE joint health, hormonal support, and longevity (Collagen, Glucosamine, higher dose Vitamin D3+K2, Omega-3s).
+- **Goal Synergy:**
+  - Muscle Gain: Creatine + Protein is essential.
+  - Weight Loss: Fiber (Psyllium) + Protein for satiety.
+  - Sleep/Stress: Magnesium Glycinate + Ashwagandha.
+
+**INSTRUCTIONS FOR "Smart Stack":**
+1. **Analyze** the user's age (${user.age || 'Not specified'}) and goal (${user.goal.replace('_', ' ')}).
+2. **Respect** their current supplements (don't duplicate, but optimize timing).
+3. **Recommend** 2-4 high-impact "Add-ons" that fill gaps in their current stack.
+4. **Create** a cohesive daily schedule that mixes BOTH current supplements and Add-ons.
 
 **SUPPLEMENT REFERENCE GUIDE (use this for dosages and timing):**
 ${formatSupplementGuide()}
 
 **Supplement Card Structure:**
-- "current": Supplements user is already taking (from their onboarding data above)
-- "addOns": YOUR personalized recommendations based on their profile. Use the reference guide above for proper dosages and timing.
+- "current": List user's existing supplements exactly as they entered them.
+- "addOns": List YOUR recommended new supplements with dosage.
 
-**Guidelines:**
-- SELECT supplements from the reference guide above based on the user's specific profile
-- Use the exact dosages and timing from the guide
-- Recommend 2-5 add-ons maximum, prioritized by importance for this user
-- Consider interactions (e.g., don't recommend iron with calcium at same time)
-- Never recommend anything illegal, prescription-only, or potentially harmful
-- Tailor recommendations to their specific situation, not generic advice
+**Daily Supplements List (The "supplements" array):**
+- MUST contain a mix of BOTH "current" and "addOns".
+- Format: "Name (Dosage) - Timing" (e.g., "Creatine Monohydrate (5g) - Post-workout", "Multivitamin - With breakfast").
+- Ensure the timing makes sense (e.g., caffeine in AM, magnesium at night).
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON with this exact structure:
@@ -506,10 +526,10 @@ ${generateMealExamples(user.mealCount || 3)}
       "recovery": {
         "mobility": ["Specific mobility exercise 1", "Specific mobility exercise 2"],
         "sleep": ["Sleep recommendation 1", "Sleep recommendation 2"],
-        "supplements": ["Supplement 1 with timing"],
+        "supplements": ["Multivitamin - With breakfast", "Creatine (5g) - Post-workout"],
         "supplementCard": {
-          "current": ["User's existing supplements from onboarding - copy exactly what they listed"],
-          "addOns": ["Your personalized recommendations with dosage and timing based on their full profile"]
+          "current": ["Multivitamin"],
+          "addOns": ["Creatine (5g)"]
         }
       },
       "reason": "2-3 sentences explaining why this day's plan fits the user's goals and preferences."
@@ -555,14 +575,14 @@ export interface VerificationPrompt {
 export function buildVerificationPrompt(plan: any, user: User): VerificationPrompt {
   const calorieTarget = getCalorieTarget(user);
   const proteinTarget = getProteinTarget(user);
-  
+
   // Build the checklist of requirements
   const dietaryCheck = user.dietaryPrefs.includes('Vegetarian')
     ? 'VEGETARIAN: No meat, chicken, fish, seafood, or eggs in any meal'
     : user.dietaryPrefs.includes('Eggitarian')
-    ? 'EGGITARIAN: No meat, chicken, fish, or seafood (eggs are OK)'
-    : 'NON-VEG: Any protein sources allowed';
-  
+      ? 'EGGITARIAN: No meat, chicken, fish, or seafood (eggs are OK)'
+      : 'NON-VEG: Any protein sources allowed';
+
   const system = `You are a fitness plan quality assurance AI. Your job is to verify a generated fitness plan and FIX any issues found.
 
 ## USER REQUIREMENTS TO VERIFY
@@ -598,6 +618,9 @@ ${user.supplements?.join(', ') || 'None specified'}
 
 ### Session Length
 ${user.sessionLength ? `Target: ${user.sessionLength} minutes per workout` : 'No specific limit'}
+
+${user.planRegenerationRequest ? `### Requested Weekly Plan Changes (CRITICAL)
+- ${user.planRegenerationRequest}` : ''}
 
 ## VERIFICATION CHECKLIST
 

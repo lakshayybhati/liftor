@@ -11,11 +11,19 @@ import type { User, WeeklyBasePlan, CheckinData, DailyPlan } from '@/types/user'
 import { 
   generateBasePlan, 
   generateDailyPlan as generateDaily,
-  BasePlanGenerationError 
+  BasePlanGenerationError,
+  isGenerationInProgress,
+  getCurrentGenerationId,
+  resetGenerationState
 } from '@/services/basePlanEngine';
 
-// Re-export the error class for consumers
-export { BasePlanGenerationError };
+// Re-export the error class and utility functions for consumers
+export { 
+  BasePlanGenerationError,
+  isGenerationInProgress,
+  getCurrentGenerationId,
+  resetGenerationState
+};
 
 /**
  * Generate a weekly base plan for a user

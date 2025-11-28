@@ -110,7 +110,7 @@ export function testPlanValidation() {
           meals: [
             { name: 'Breakfast', items: [{ food: 'Eggs', qty: '3' }] }
           ],
-          hydration_l: 2.5
+          hydration_l: 3.5
         },
         recovery: {
           mobility: ['Stretching'],
@@ -149,7 +149,7 @@ export function testPlanValidation() {
       meals: [
         { name: 'Breakfast', items: [{ food: 'Eggs', qty: '3' }] }
       ],
-      hydration_l: 2.5
+      hydration_l: 3.5
     },
     recovery: {
       mobility: ['Stretching'],

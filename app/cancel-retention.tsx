@@ -8,24 +8,21 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 export default function CancelRetentionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  
+
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
-      
-      {/* Logo at top */}
-      <View style={[styles.logoContainer, { paddingTop: insets.top + 20 }]}>
-        <Image 
-          source={require('@/assets/images/liftorlogo.png')} 
+
+
+      <View style={styles.center}>
+        <Image
+          source={require('../assets/images/liftorlogo.png')}
           style={styles.logo}
           resizeMode="contain"
         />
-      </View>
-      
-      <View style={styles.center}>
         <Text style={styles.headline}>You're Closer Than You Think.</Text>
         <Text style={styles.body}>
-          Your next transformation isn't luck—it's consistency. Liftor keeps your plan evolving, your nutrition precise, and your results visible.
+          Your transformation isn't about luck it's about showing up. We're ready to change and adapt for you, evolving your plan as you grow. Take this step towards a beautiful future. Your best self is waiting.
         </Text>
         <View style={{ gap: 12, width: '100%' }}>
           <Button title="Keep Going" onPress={() => router.back()} />
@@ -37,18 +34,9 @@ export default function CancelRetentionScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  logoContainer: {
-    alignItems: 'center',
-    paddingHorizontal: 24,
-  },
-  logo: {
-    width: 120,
-    height: 40,
-    tintColor: '#fff',
-  },
-  center: { flex: 1, justifyContent: 'center', padding: 24, gap: 16 },
+  container: { flex: 1, backgroundColor: '#0c0c0e' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, gap: 16 },
+  logo: { width: 300, height: 100, marginBottom: 16 },
   headline: { color: '#fff', fontSize: 28, fontWeight: '800', textAlign: 'center' },
-  body: { color: '#9CA3AF', fontSize: 16, lineHeight: 22, textAlign: 'center' },
+  body: { color: '#fff', fontSize: 16, lineHeight: 22, textAlign: 'center' },
 });
-

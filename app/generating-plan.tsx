@@ -8,6 +8,8 @@ import type { DailyPlan } from '@/types/user';
 import { generateDailyPlan } from '@/services/plan-generation';
 import { logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
+import PlanLoadingMiniGameOverlay from '@/components/PlanLoadingMiniGameOverlay';
+import { canPlayGame, markGamePlayedToday, saveGameScore } from '@/utils/game-storage';
 
 const LOADING_MESSAGES = [
   "📚 Gathering research specific to your goals and preferences…",
@@ -17,16 +19,18 @@ const LOADING_MESSAGES = [
   "✅ Finalizing today’s plan with precise adjustments…",
 ];
 
-const SLOW_PROMPTS = [
-  'Your data’s one of a kind we’re tailoring this plan just right',
-  'This one’s special. Give us a moment to fine-tune everything',
-  'Your plan’s being crafted with extra care. give us a moment',
-  'this isn’t just any plan… it’s yours. Hold tight',
-  'We’re refining every detail to make this match you perfectly',
-  'Unique input calls for a custom touch just a few seconds more',
-];
+// const SLOW_PROMPTS = [
+//   'Your data’s one of a kind we’re tailoring this plan just right',
+//   'This one’s special. Give us a moment to fine-tune everything',
+//   'Your plan’s being crafted with extra care. give us a moment',
+//   'this isn’t just any plan… it’s yours. Hold tight',
+//   'We’re refining every detail to make this match you perfectly',
+//   'Unique input calls for a custom touch just a few seconds more',
+// ];
 
 export default function GeneratingPlanScreen() {
+  // Support forced regeneration via params
+  const params = useLocalSearchParams<{ force?: string; isRedo?: string }>();
   const { user, getRecentCheckins, getTodayCheckin, getTodayPlan, addPlan, getCurrentBasePlan, getCompletedSupplementsForDate } = useUserStore();
   const [messageIndex, setMessageIndex] = useState(0);
   const [, setIsGenerating] = useState(true);
@@ -37,16 +41,42 @@ export default function GeneratingPlanScreen() {
   const navLockedRef = useRef(true);
   const unlockNavigation = () => { navLockedRef.current = false; };
   
-  // Support forced regeneration via params
-  const params = useLocalSearchParams<{ force?: string }>();
+  // Game State
+  const [showMiniGame, setShowMiniGame] = useState(false);
+  const [planStatus, setPlanStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('loading');
+  
   const forceRegen = params.force === 'true';
+
+  // Check for mini-game eligibility
+  useEffect(() => {
+    const checkGameEligibility = async () => {
+      const isRedo = params.isRedo === 'true';
+      const allowed = await canPlayGame(isRedo, user?.id);
+      
+      if (allowed) {
+        // Lock it immediately so they can't play again today if they crash/restart
+        await markGamePlayedToday(user?.id);
+        setShowMiniGame(true);
+      }
+    };
+    
+    checkGameEligibility();
+  }, [user?.id, params.isRedo]);
+
+  const handleGameEnd = useCallback((score: number) => {
+    saveGameScore(score, user?.id);
+    setShowMiniGame(false);
+  }, [user?.id]);
 
   const generatePlan = useCallback(async () => {
     try {
+      setPlanStatus('loading');
+      
       // If a plan for today already exists and NOT forced, skip regeneration
       const existing = getTodayPlan();
       if (existing && !forceRegen) {
         console.log('[GenerateDailyPlan] Plan already exists for today (and not forced), navigating...');
+        setPlanStatus('success');
         router.replace('/plan');
         return;
       }
@@ -72,6 +102,7 @@ export default function GeneratingPlanScreen() {
 
       if (!todayCheckin || !user) {
         console.error('[GenerateDailyPlan] Missing checkin or user data');
+        setPlanStatus('error');
         Alert.alert(
           'Data Missing',
           'Please complete your daily check-in first.',
@@ -85,6 +116,7 @@ export default function GeneratingPlanScreen() {
       
       if (!basePlan) {
         console.error('[GenerateDailyPlan] No base plan available');
+        setPlanStatus('error');
         Alert.alert(
           'Base Plan Missing',
           'Please complete onboarding to generate your base plan first.',
@@ -96,10 +128,10 @@ export default function GeneratingPlanScreen() {
       // Use the new AI service for daily plan generation
       const startTime = Date.now();
       // Show a friendly message if generation exceeds 45 seconds
-      const slowTimer = setTimeout(() => {
-        const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
-        Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
-      }, 45000);
+      // const slowTimer = setTimeout(() => {
+      //   const msg = SLOW_PROMPTS[Math.floor(Math.random() * SLOW_PROMPTS.length)];
+      //   Alert.alert('Crafting Your Plan', msg, [{ text: 'OK' }], { cancelable: true });
+      // }, 45000);
 
       // Get yesterday's supplement data
       const yesterday = new Date();
@@ -109,7 +141,7 @@ export default function GeneratingPlanScreen() {
 
       const planData = await generateDailyPlan(user, todayCheckin, recentCheckins, basePlan, yesterdaySupplements);
       const generationTime = Date.now() - startTime;
-      clearTimeout(slowTimer);
+      // clearTimeout(slowTimer);
       
       // Log successful generation
       await logPlanGenerationAttempt('daily', true, null, {
@@ -125,47 +157,52 @@ export default function GeneratingPlanScreen() {
       
       // Set generating to false first
       setIsGenerating(false);
+      // setPlanStatus('success');
       
       // Wait for state to propagate before navigating
       // This prevents race condition where plan screen renders before state updates
       console.log('[GenerateDailyPlan] ⏳ Waiting for state propagation...');
       
       setTimeout(() => {
-        try {
-          unlockNavigation();
-          // Use push + replace combo for all environments (dev and production)
-          // This is more reliable than replace alone
-          console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation');
-          router.push('/plan?celebrate=1');
-          
-          // Ensure navigation with replace after a delay
-          setTimeout(() => {
-            console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace');
-            router.replace('/plan?celebrate=1');
-          }, 500);
-        } catch (navError) {
-          console.error('[GenerateDailyPlan] ❌ Navigation error:', navError);
-          // Fallback 1: Try without celebrate parameter
-          setTimeout(() => {
-            console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
-            try {
-              unlockNavigation();
-              router.push('/plan');
-              setTimeout(() => router.replace('/plan'), 300);
-            } catch (fallbackError) {
-              // Fallback 2: Navigate to home as last resort
-              console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
-              unlockNavigation();
-              router.replace('/(tabs)/home');
-            }
-          }, 100);
-        }
+        setPlanStatus('success');
+        setTimeout(() => {
+          try {
+            unlockNavigation();
+            // Use push + replace combo for all environments (dev and production)
+            // This is more reliable than replace alone
+            console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation');
+            router.push('/plan?celebrate=1');
+            
+            // Ensure navigation with replace after a delay (without celebrate param to avoid remount confetti)
+            setTimeout(() => {
+              console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace (no celebrate param)');
+              router.replace('/plan');
+            }, 500);
+          } catch (navError) {
+            console.error('[GenerateDailyPlan] ❌ Navigation error:', navError);
+            // Fallback 1: Try without celebrate parameter
+            setTimeout(() => {
+              console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
+              try {
+                unlockNavigation();
+                router.push('/plan');
+                setTimeout(() => router.replace('/plan'), 300);
+              } catch (fallbackError) {
+                // Fallback 2: Navigate to home as last resort
+                console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
+                unlockNavigation();
+                router.replace('/(tabs)/home');
+              }
+            }, 100);
+          }
+        }, 500);
       }, 2000); // Increased from 1500ms to 2000ms for better reliability in production
 
     } catch (error) {
       // Ensure slowTimer is cleared on error
       try { /* no-op if not set */ } catch {}
       console.error('Error generating daily plan:', error);
+      setPlanStatus('error');
       
       // Log the failure
       const todayCheckinData = getTodayCheckin();
@@ -195,6 +232,7 @@ export default function GeneratingPlanScreen() {
             text: 'Try Again', 
             onPress: () => {
               startedRef.current = false;
+              setPlanStatus('loading');
               generatePlan();
             }
           },
@@ -202,7 +240,7 @@ export default function GeneratingPlanScreen() {
         { cancelable: false }
       );
     }
-  }, [user, getTodayCheckin, getRecentCheckins, addPlan, getCurrentBasePlan, getTodayPlan]);
+  }, [user, getTodayCheckin, getRecentCheckins, addPlan, getCurrentBasePlan, getTodayPlan, forceRegen]);
 
   useEffect(() => {
     if (startedRef.current) return;
@@ -257,6 +295,14 @@ export default function GeneratingPlanScreen() {
           headerShown: false,
           gestureEnabled: false,
         }} 
+      />
+      
+      <PlanLoadingMiniGameOverlay 
+        visible={showMiniGame} 
+        planStatus={planStatus} 
+        onGameEnd={handleGameEnd}
+        loadingMessage={LOADING_MESSAGES[messageIndex]}
+        onExit={() => setShowMiniGame(false)}
       />
       
       <SafeAreaView style={styles.safeArea}>
@@ -354,6 +400,11 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: '#FFFFFF',
+    shadowColor: '#FFFFFF',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    elevation: 2,
   },
   dot1: {
     opacity: 0.4,

@@ -57,6 +57,8 @@ export interface User {
   sleepQualityBaseline?: number; // 1-10
   preferredWorkoutSplit?: string;
   specialRequests?: string;
+  // Temporary, request-specific instructions when regenerating the weekly base plan
+  planRegenerationRequest?: string;
   vmnTranscription?: string; // VMN Transcription value
   workoutIntensity?: WorkoutIntensity; // Workout intensity preference
   // Numeric slider-based intensity (1-10) used for plan fine-tuning
@@ -68,6 +70,8 @@ export interface User {
   goalWeight?: number; // in kg
   // Base plan storage
   basePlan?: WeeklyBasePlan;
+  // Base Plan Management - regeneration enforcement
+  lastBasePlanGeneratedAt?: string; // ISO timestamp for 2-week enforcement
 }
 
 export interface CheckinData {
@@ -98,7 +102,7 @@ export interface CheckinData {
   hr?: number;
   hrv?: number;
   injuries?: string;
-  busyBlocks?: {start: string; end: string; reason: string}[];
+  busyBlocks?: { start: string; end: string; reason: string }[];
   travelYN?: boolean;
   workoutIntensity?: number; // Workout intensity slider value (1-10)
   yesterdayWorkoutQuality?: number; // 1-10 rating of yesterday's workout
@@ -221,7 +225,7 @@ export interface LastDayContext {
 
   // Copy yesterday's specialRequest if it matters
   yesterdaySpecialRequest?: string | null;
-  
+
   // AI-generated summary of yesterday's session (from dailyHighlights)
   yesterdayHighlights?: string;        // Short paragraph summary of previous day
 }
@@ -241,4 +245,15 @@ export interface WeeklyBasePlan {
   expectedWeeksToGoal?: number;
   isGenerating?: boolean;
   generationProgress?: number; // 1-7
+  editCount?: number;
+  // Base Plan Management fields
+  name?: string;              // User-editable name, defaults to "Plan - {date}"
+  isActive?: boolean;         // Whether this plan is currently in use
+  activatedAt?: string;       // ISO timestamp when plan was activated
+  deactivatedAt?: string;     // ISO timestamp when plan was deactivated
+  stats?: {
+    weightChangeKg?: number;  // Weight change during active period
+    consistencyPercent?: number; // Avg adherence during active period
+    daysActive?: number;      // Total days this plan was active
+  };
 }

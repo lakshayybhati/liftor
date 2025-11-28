@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, TextInput, KeyboardAvoidingView, Platform, Image } from 'react-native';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { Stack, useRouter } from 'expo-router';
 import { Button } from '@/components/ui/Button';

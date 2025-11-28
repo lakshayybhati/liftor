@@ -18,8 +18,8 @@ const scoreEnergy = (val: number): number => {
 
 const scoreWater = (liters: number): number => {
   if (liters < 1) return 0;
-  if (liters < 2.5) return 0.5;
-  return 1.0; // 2.5 - 4 (and assuming >4 is also good/1.0)
+  if (liters < 3.5) return 0.5;
+  return 1.0; // 3.5 - 5 (and assuming >5 is also good/1.0)
 };
 
 const scoreStress = (val: number): number => {

@@ -14,14 +14,8 @@ import colors from "@/constants/colors";
 import { runEnvironmentDiagnostics } from "@/utils/environment-diagnostics";
 import { validateProductionConfig, getProductionConfig } from "@/utils/production-config";
 import * as Notifications from 'expo-notifications';
-import { 
-  registerForPushNotificationsAsync,
-  savePushTokenToBackend,
-  scheduleWorkoutReminder,
-  scheduleDailyCheckInReminder
-} from '@/utils/notifications';
-import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notification-storage';
-import { parseTimeString } from '@/utils/notifications';
+import { NotificationService } from '@/services/NotificationService';
+import { getBasePlanJobState } from '@/services/backgroundPlanGeneration';
 
 // Prevent splash screen from hiding automatically
 SplashScreen.preventAutoHideAsync().catch((err) => {
@@ -158,63 +152,111 @@ function RCPurchasesInit() {
   return null;
 }
 
+/**
+ * NotificationsInit - Global notification setup component
+ * 
+ * ARCHITECTURE:
+ * - Initializes the centralized NotificationService ONCE per user session
+ * - Sets up global notification listeners for navigation
+ * - Does NOT eagerly schedule notifications on every app open
+ * - Scheduling is IDEMPOTENT: only happens if times actually changed
+ * - Uses user's configured times, not arbitrary defaults
+ */
 function NotificationsInit() {
   const { session, supabase } = useAuth();
-  const { user } = useUserStore();
+  const { user, basePlans } = useUserStore();
   const notificationListener = useRef<any>(null);
   const responseListener = useRef<any>(null);
+  const initializedRef = useRef<string | null>(null);
 
+  // Initialize NotificationService when user logs in
+  useEffect(() => {
+    const userId = session?.user?.id ?? null;
+    
+    // Only initialize once per user
+    if (initializedRef.current === userId) return;
+    
+    if (userId) {
+      console.log('[NotificationsInit] Initializing for user:', userId.substring(0, 8));
+      initializedRef.current = userId;
+      
+      // Initialize the centralized notification service
+      NotificationService.initialize(userId, supabase);
+    } else if (initializedRef.current) {
+      // User logged out, cleanup
+      console.log('[NotificationsInit] Cleaning up notifications');
+      NotificationService.cleanup();
+      initializedRef.current = null;
+    }
+
+    return () => {
+      // Cleanup on unmount if we have an active session
+      if (initializedRef.current) {
+        NotificationService.cleanup();
+        initializedRef.current = null;
+      }
+    };
+  }, [session?.user?.id, supabase]);
+
+  // Set up notification response listener for navigation
   useEffect(() => {
     if (!session?.user?.id) return;
 
-    registerForPushNotificationsAsync().then(async (token) => {
-      if (token && session.user.id) {
-        await savePushTokenToBackend(supabase, session.user.id, token);
-      }
-    });
-
+    // Log received notifications (for debugging)
     notificationListener.current = Notifications.addNotificationReceivedListener((notification: any) => {
-      console.log('[Notifications] Received:', notification);
+      console.log('[NotificationsInit] Notification received:', notification?.request?.content?.title);
     });
 
+    // Handle notification taps - navigate to the appropriate screen
     responseListener.current = Notifications.addNotificationResponseReceivedListener((response: any) => {
       try {
-        const screen = (response as any)?.notification?.request?.content?.data?.screen;
-        if (screen) router.push(screen as any);
-      } catch {}
+        const screen = response?.notification?.request?.content?.data?.screen;
+        if (screen) {
+          console.log('[NotificationsInit] Navigating to:', screen);
+          router.push(screen as any);
+        }
+      } catch (e) {
+        console.warn('[NotificationsInit] Navigation error:', e);
+      }
     });
 
     return () => {
-      if (notificationListener.current) Notifications.removeNotificationSubscription(notificationListener.current);
-      if (responseListener.current) Notifications.removeNotificationSubscription(responseListener.current);
+      // Use the modern .remove() method instead of deprecated removeNotificationSubscription
+      if (notificationListener.current) {
+        notificationListener.current.remove();
+      }
+      if (responseListener.current) {
+        responseListener.current.remove();
+      }
     };
   }, [session?.user?.id]);
 
+  // Sync notification schedules with user preferences
+  // This is IDEMPOTENT - it only reschedules if times actually changed
   useEffect(() => {
-    if (!user) return;
-    getNotificationPreferences().then(async (prefs) => {
-      try {
-        // Idempotent scheduling: reschedule only when the time actually changes
-        if (prefs.workoutRemindersEnabled && user.preferredTrainingTime) {
-          if (prefs.lastScheduledWorkoutTime !== user.preferredTrainingTime) {
-            await scheduleWorkoutReminder(user.preferredTrainingTime);
-            await saveNotificationPreferences({ ...prefs, lastScheduledWorkoutTime: user.preferredTrainingTime });
-          }
-        }
+    if (!user || !session?.user?.id) return;
 
-        if (prefs.checkInRemindersEnabled && prefs.checkInReminderTime) {
-          const time = prefs.checkInReminderTime;
-          const { hour, minute } = parseTimeString(time);
-          if (prefs.lastScheduledCheckInTime !== time) {
-            await scheduleDailyCheckInReminder(hour, minute);
-            await saveNotificationPreferences({ ...prefs, lastScheduledCheckInTime: time });
-          }
-        }
+    const syncNotifications = async () => {
+      try {
+        // Check if user has a verified base plan
+        const jobState = await getBasePlanJobState(session.user.id);
+        const hasVerifiedPlan = jobState.verified || basePlans.some(p => p.isActive);
+
+        // Sync with user preferences (idempotent - won't reschedule if unchanged)
+        await NotificationService.syncWithUserPreferences(user, hasVerifiedPlan);
       } catch (e) {
-        console.warn('[Notifications] Scheduling error:', e);
+        console.warn('[NotificationsInit] Sync error:', e);
       }
-    });
-  }, [user?.preferredTrainingTime]);
+    };
+
+    syncNotifications();
+  }, [
+    // Only re-sync when these specific values change
+    user?.checkInReminderTime,
+    user?.preferredTrainingTime,
+    session?.user?.id,
+    basePlans.length,
+  ]);
 
   return null;
 }
@@ -230,6 +272,8 @@ function RootLayoutNav() {
       <Stack.Screen name="cancel-reasons" options={{ headerShown: false }} />
       <Stack.Screen name="checkin" options={{ headerShown: true }} />
       <Stack.Screen name="generating-plan" options={{ headerShown: false }} />
+      <Stack.Screen name="plan-building" options={{ headerShown: false }} />
+      <Stack.Screen name="generating-base-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan" options={{ headerShown: true }} />
       <Stack.Screen name="history" options={{ headerShown: false }} />
       <Stack.Screen name="auth/login" options={{ headerShown: false }} />

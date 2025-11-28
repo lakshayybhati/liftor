@@ -55,7 +55,7 @@ const CONFIG = {
 // ============================================================================
 
 /**
- * Extract JSON from AI response (handles markdown code blocks)
+ * Extract JSON from AI response (handles markdown code blocks and truncated responses)
  */
 function extractJSON(text: string): string {
   // Remove markdown code blocks
@@ -65,41 +65,163 @@ function extractJSON(text: string): string {
     .replace(/\n?```\s*$/gim, '')
     .trim();
   
-  // Try to find JSON object
+  // Try to find JSON object - use greedy match for nested objects
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     return jsonMatch[0];
+  }
+  
+  // If no complete JSON found, check if response was truncated
+  const partialMatch = cleaned.match(/\{[\s\S]*/);
+  if (partialMatch) {
+    console.warn('⚠️ [Engine] Detected possibly truncated JSON, attempting recovery...');
+    return partialMatch[0];
   }
   
   return cleaned;
 }
 
 /**
- * Parse JSON with error handling and common fixes
+ * Attempt to fix truncated JSON by closing open brackets
+ * Enhanced to handle deeply nested truncation
+ */
+function attemptJSONRecovery(jsonStr: string): string {
+  let fixed = jsonStr;
+  
+  // First, clean up any trailing incomplete values
+  // Remove incomplete strings at the end (e.g., "key": "incomplete value without closing quote)
+  fixed = fixed.replace(/:\s*"[^"]*$/g, ': null');
+  
+  // Remove incomplete numbers at the end
+  fixed = fixed.replace(/:\s*[\d.]+$/g, ': 0');
+  
+  // Remove trailing incomplete key-value pairs
+  fixed = fixed.replace(/,\s*"[^"]*"?\s*$/g, '');
+  fixed = fixed.replace(/,\s*[a-zA-Z_][a-zA-Z0-9_]*\s*$/g, '');
+  
+  // Count open/close brackets
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = 0; i < fixed.length; i++) {
+    const char = fixed[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"' && !escapeNext) {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === '{') openBraces++;
+      else if (char === '}') openBraces--;
+      else if (char === '[') openBrackets++;
+      else if (char === ']') openBrackets--;
+    }
+  }
+  
+  // Close unclosed strings if in string
+  if (inString) {
+    fixed += '"';
+    // Re-count after closing string
+    openBraces = 0;
+    openBrackets = 0;
+    inString = false;
+    escapeNext = false;
+    
+    for (let i = 0; i < fixed.length; i++) {
+      const char = fixed[i];
+      if (escapeNext) { escapeNext = false; continue; }
+      if (char === '\\') { escapeNext = true; continue; }
+      if (char === '"' && !escapeNext) { inString = !inString; continue; }
+      if (!inString) {
+        if (char === '{') openBraces++;
+        else if (char === '}') openBraces--;
+        else if (char === '[') openBrackets++;
+        else if (char === ']') openBrackets--;
+      }
+    }
+  }
+  
+  // Remove trailing commas before closing brackets
+  fixed = fixed.replace(/,(\s*)$/g, '$1');
+  
+  // Also remove trailing commas followed by whitespace only
+  fixed = fixed.trimEnd();
+  if (fixed.endsWith(',')) {
+    fixed = fixed.slice(0, -1);
+  }
+  
+  console.log(`⚠️ [Engine] JSON Recovery: need to close ${openBrackets} brackets and ${openBraces} braces`);
+  
+  // Close open brackets in the right order (arrays before objects typically)
+  while (openBrackets > 0) {
+    fixed += ']';
+    openBrackets--;
+  }
+  while (openBraces > 0) {
+    fixed += '}';
+    openBraces--;
+  }
+  
+  return fixed;
+}
+
+/**
+ * Parse JSON with error handling, common fixes, and recovery for truncated responses
  */
 function parseJSON(text: string): any {
   const jsonStr = extractJSON(text);
   
+  // First attempt: direct parse
   try {
     return JSON.parse(jsonStr);
   } catch (e) {
-    // Try to fix common JSON issues
-    let fixed = jsonStr
-      .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-      .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
-      .replace(/'/g, '"') // Single to double quotes
-      .replace(/[\x00-\x1F\x7F]/g, ''); // Remove control characters
-    
-    try {
-      return JSON.parse(fixed);
-    } catch (e2) {
-      console.error('❌ [Engine] JSON parse failed. First 500 chars:', jsonStr.substring(0, 500));
-      throw new BasePlanGenerationError(
-        'Failed to parse AI response as JSON',
-        'generation',
-        [(e as Error).message]
-      );
-    }
+    console.log('⚠️ [Engine] First parse attempt failed, trying fixes...');
+  }
+  
+  // Second attempt: fix common issues
+  let fixed = jsonStr
+    .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
+    .replace(/'/g, '"') // Single to double quotes
+    .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
+    .replace(/\.\.\./g, '') // Remove ellipsis that AI sometimes adds
+    .replace(/,\s*,/g, ',') // Remove double commas
+    .replace(/:\s*,/g, ': null,') // Fix empty values
+    .replace(/:\s*}/g, ': null}'); // Fix empty values at end
+  
+  try {
+    return JSON.parse(fixed);
+  } catch (e2) {
+    console.log('⚠️ [Engine] Second parse attempt failed, trying JSON recovery...');
+  }
+  
+  // Third attempt: try to recover truncated JSON
+  try {
+    const recovered = attemptJSONRecovery(fixed);
+    return JSON.parse(recovered);
+  } catch (e3) {
+    console.error('❌ [Engine] All parse attempts failed');
+    console.error('   Original length:', text.length);
+    console.error('   First 300 chars:', jsonStr.substring(0, 300));
+    console.error('   Last 300 chars:', jsonStr.substring(Math.max(0, jsonStr.length - 300)));
+    throw new BasePlanGenerationError(
+      'Failed to parse AI response as JSON',
+      'generation',
+      [(e3 as Error).message]
+    );
   }
 }
 
@@ -115,8 +237,8 @@ function delay(ms: number): Promise<void> {
 // ============================================================================
 
 /**
- * Stage 1: Generate the raw plan from AI
- * Optimized for speed with a focused prompt
+ * Stage 1: Generate the raw plan
+ * Fast, optimized AI call to create the complete plan
  */
 async function generateRawPlan(user: User): Promise<any> {
   console.log('🚀 [Engine] Stage 1: Generating raw plan...');
@@ -128,54 +250,36 @@ async function generateRawPlan(user: User): Promise<any> {
     { role: 'user', content: userPrompt }
   ];
   
-  console.log('📝 [Engine] Prompt built, system length:', system.length, 'user length:', userPrompt.length);
+  console.log('📝 [Engine] Prompt built:', system.length + userPrompt.length, 'chars');
   
+  const startTime = Date.now();
   const response = await generateAICompletion(messages);
+  const genTime = Date.now() - startTime;
+  
+  console.log(`⏱️ [Engine] AI response in ${genTime}ms`);
   
   if (!response.completion) {
     throw new BasePlanGenerationError(
-      'No completion received from AI',
+      'No completion in AI response',
       'generation'
     );
   }
   
   console.log('✅ [Engine] AI response received, length:', response.completion.length);
   
-  // Check for incomplete response
-  const trimmed = response.completion.trim();
-  if (trimmed === 'INCOMPLETE' || trimmed.length < 500) {
-    throw new BasePlanGenerationError(
-      'AI response was incomplete or too short',
-      'generation',
-      ['Response length: ' + trimmed.length]
-    );
-  }
-  
-  // Parse the JSON response
+  // Parse the response
   const parsed = parseJSON(response.completion);
   
-  // Extract days from the response
-  let days: any;
-  if (parsed.days) {
-    days = parsed.days;
-  } else if (parsed.monday && parsed.sunday) {
-    // Response is the days object directly
-    days = parsed;
-  } else {
-    throw new BasePlanGenerationError(
-      'Invalid plan structure: missing days',
-      'generation',
-      ['Expected "days" object with monday-sunday']
-    );
-  }
+  // Extract days from response
+  const days = parsed.days || parsed;
   
-  // Validate all 7 days are present
+  // Validate basic structure
   const requiredDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   const missingDays = requiredDays.filter(day => !days[day]);
   
   if (missingDays.length > 0) {
     throw new BasePlanGenerationError(
-      `Missing days in generated plan: ${missingDays.join(', ')}`,
+      `Generated plan is missing days: ${missingDays.join(', ')}`,
       'generation',
       missingDays.map(d => `Missing: ${d}`)
     );
@@ -213,6 +317,48 @@ async function verifyPlan(rawPlan: any, user: User): Promise<WeeklyBasePlan['day
 }
 
 // ============================================================================
+// GLOBAL GENERATION STATE
+// ============================================================================
+
+/**
+ * Global state to track ongoing generation and prevent duplicate API calls.
+ * This persists across component mounts/unmounts.
+ */
+let globalGenerationState = {
+  isGenerating: false,
+  generationId: null as string | null,
+  startTime: null as number | null,
+  promise: null as Promise<WeeklyBasePlan> | null,
+};
+
+/**
+ * Check if a generation is currently in progress
+ */
+export function isGenerationInProgress(): boolean {
+  return globalGenerationState.isGenerating;
+}
+
+/**
+ * Get the current generation ID (for tracking)
+ */
+export function getCurrentGenerationId(): string | null {
+  return globalGenerationState.generationId;
+}
+
+/**
+ * Reset the global generation state (for cleanup/testing)
+ */
+export function resetGenerationState(): void {
+  console.log('🔄 [Engine] Resetting global generation state');
+  globalGenerationState = {
+    isGenerating: false,
+    generationId: null,
+    startTime: null,
+    promise: null,
+  };
+}
+
+// ============================================================================
 // MAIN ENTRY POINT
 // ============================================================================
 
@@ -224,120 +370,167 @@ async function verifyPlan(rawPlan: any, user: User): Promise<WeeklyBasePlan['day
  * 2. Verify: Thorough review and fix any issues
  * 
  * NO FALLBACK - If both attempts fail, throws BasePlanGenerationError
+ * 
+ * IMPORTANT: This function uses a global lock to prevent duplicate API calls.
+ * If a generation is already in progress, it will return the existing promise.
  */
 export async function generateBasePlan(user: User): Promise<WeeklyBasePlan> {
-  console.log('═══════════════════════════════════════════════════════════');
-  console.log('🏗️ [Engine] Starting Base Plan Generation');
-  console.log('═══════════════════════════════════════════════════════════');
-  console.log('👤 User:', user.name || 'Unknown');
-  console.log('🎯 Goal:', user.goal);
-  console.log('🏋️ Equipment:', user.equipment.join(', ') || 'Bodyweight');
-  console.log('🥗 Diet:', user.dietaryPrefs.join(', ') || 'No restrictions');
-  console.log('📅 Training Days:', user.trainingDays);
-  console.log('📊 Level:', user.trainingLevel || 'Intermediate');
-  console.log('═══════════════════════════════════════════════════════════');
-  
-  // Validate user data
-  if (!user) {
-    throw new BasePlanGenerationError(
-      'Invalid user data: user is null or undefined',
-      'validation'
-    );
+  // Check if generation is already in progress
+  if (globalGenerationState.isGenerating && globalGenerationState.promise) {
+    const elapsedSeconds = globalGenerationState.startTime 
+      ? Math.floor((Date.now() - globalGenerationState.startTime) / 1000)
+      : 0;
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('⚠️ [Engine] Generation already in progress!');
+    console.log(`   Generation ID: ${globalGenerationState.generationId}`);
+    console.log(`   Elapsed time: ${elapsedSeconds}s`);
+    console.log('   Returning existing promise to avoid duplicate API calls');
+    console.log('═══════════════════════════════════════════════════════════');
+    return globalGenerationState.promise;
   }
   
-  if (!user.goal) {
-    throw new BasePlanGenerationError(
-      'Invalid user data: missing goal',
-      'validation'
-    );
-  }
+  // Set up the global lock
+  const generationId = `gen_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  globalGenerationState.isGenerating = true;
+  globalGenerationState.generationId = generationId;
+  globalGenerationState.startTime = Date.now();
   
-  const calorieTarget = getCalorieTarget(user);
-  const proteinTarget = getProteinTarget(user);
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log('🔒 [Engine] Global generation lock acquired');
+  console.log(`   Generation ID: ${generationId}`);
+  console.log('═══════════════════════════════════════════════════════════');
   
-  console.log('🍽️ Calorie Target:', calorieTarget, 'kcal');
-  console.log('🥩 Protein Target:', proteinTarget, 'g');
-  
-  let lastError: BasePlanGenerationError | null = null;
-  
-  for (let attempt = 1; attempt <= CONFIG.MAX_ATTEMPTS; attempt++) {
-    console.log(`\n🔄 [Engine] Attempt ${attempt}/${CONFIG.MAX_ATTEMPTS}`);
-    
+  // Create and store the generation promise
+  globalGenerationState.promise = (async (): Promise<WeeklyBasePlan> => {
     try {
-      // Stage 1: Generate
-      const rawPlan = await generateRawPlan(user);
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log('🏗️ [Engine] Starting Base Plan Generation');
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log('👤 User:', user.name || 'Unknown');
+      console.log('🎯 Goal:', user.goal);
+      console.log('🏋️ Equipment:', user.equipment.join(', ') || 'Bodyweight');
+      console.log('🥗 Diet:', user.dietaryPrefs.join(', ') || 'No restrictions');
+      console.log('📅 Training Days:', user.trainingDays);
+      console.log('📊 Level:', user.trainingLevel || 'Intermediate');
+      console.log('═══════════════════════════════════════════════════════════');
       
-      // Stage 2: Verify and Fix
-      const verifiedDays = await verifyPlan(rawPlan, user);
-      
-      // Ensure nutrition targets are correct (final enforcement)
-      for (const day of Object.keys(verifiedDays)) {
-        if (verifiedDays[day]?.nutrition) {
-          verifiedDays[day].nutrition.total_kcal = calorieTarget;
-          verifiedDays[day].nutrition.protein_g = proteinTarget;
-        }
-        
-        // Ensure supplementCard structure exists (AI decides contents)
-        if (verifiedDays[day]?.recovery && !verifiedDays[day].recovery.supplementCard) {
-          verifiedDays[day].recovery.supplementCard = {
-            current: [],
-            addOns: []
-          };
-        }
-      }
-      
-      // Build final plan object
-      const basePlan: WeeklyBasePlan = {
-        id: Date.now().toString(),
-        createdAt: new Date().toISOString(),
-        days: verifiedDays,
-        isLocked: false,
-        isGenerating: false,
-        generationProgress: 7,
-      };
-      
-      console.log('\n═══════════════════════════════════════════════════════════');
-      console.log('✅ [Engine] Base Plan Generation SUCCESSFUL');
-      console.log('📋 Plan ID:', basePlan.id);
-      console.log('📅 Days:', Object.keys(basePlan.days).length);
-      console.log('═══════════════════════════════════════════════════════════\n');
-      
-      return basePlan;
-      
-    } catch (error) {
-      console.error(`❌ [Engine] Attempt ${attempt} failed:`, error);
-      
-      if (error instanceof BasePlanGenerationError) {
-        lastError = error;
-        lastError.attempt = attempt;
-      } else {
-        lastError = new BasePlanGenerationError(
-          (error as Error).message || 'Unknown error during plan generation',
-          'generation',
-          [(error as Error).stack?.substring(0, 200) || 'No stack trace'],
-          attempt
+      // Validate user data
+      if (!user) {
+        throw new BasePlanGenerationError(
+          'Invalid user data: user is null or undefined',
+          'validation'
         );
       }
       
-      // Wait before retry (unless this is the last attempt)
-      if (attempt < CONFIG.MAX_ATTEMPTS) {
-        console.log(`⏳ [Engine] Waiting ${CONFIG.RETRY_DELAY_MS}ms before retry...`);
-        await delay(CONFIG.RETRY_DELAY_MS);
+      if (!user.goal) {
+        throw new BasePlanGenerationError(
+          'Invalid user data: missing goal',
+          'validation'
+        );
       }
+      
+      const calorieTarget = getCalorieTarget(user);
+      const proteinTarget = getProteinTarget(user);
+      
+      console.log('🍽️ Calorie Target:', calorieTarget, 'kcal');
+      console.log('🥩 Protein Target:', proteinTarget, 'g');
+      
+      let lastError: BasePlanGenerationError | null = null;
+      
+      for (let attempt = 1; attempt <= CONFIG.MAX_ATTEMPTS; attempt++) {
+        console.log(`\n🔄 [Engine] Attempt ${attempt}/${CONFIG.MAX_ATTEMPTS}`);
+        
+        try {
+          // Stage 1: Generate
+          const rawPlan = await generateRawPlan(user);
+          
+          // Stage 2: Verify and Fix
+          const verifiedDays = await verifyPlan(rawPlan, user);
+          
+          // Ensure nutrition targets are correct (final enforcement)
+          for (const day of Object.keys(verifiedDays)) {
+            if (verifiedDays[day]?.nutrition) {
+              verifiedDays[day].nutrition.total_kcal = calorieTarget;
+              verifiedDays[day].nutrition.protein_g = proteinTarget;
+            }
+            
+            // Ensure supplementCard structure exists (AI decides contents)
+            if (verifiedDays[day]?.recovery && !verifiedDays[day].recovery.supplementCard) {
+              verifiedDays[day].recovery.supplementCard = {
+                current: [],
+                addOns: []
+              };
+            }
+          }
+          
+          // Build final plan object
+          const basePlan: WeeklyBasePlan = {
+            id: Date.now().toString(),
+            createdAt: new Date().toISOString(),
+            days: verifiedDays,
+            isLocked: false,
+            isGenerating: false,
+            generationProgress: 7,
+          };
+          
+          console.log('\n═══════════════════════════════════════════════════════════');
+          console.log('✅ [Engine] Base Plan Generation SUCCESSFUL');
+          console.log('📋 Plan ID:', basePlan.id);
+          console.log('📅 Days:', Object.keys(basePlan.days).length);
+          console.log('═══════════════════════════════════════════════════════════\n');
+          
+          return basePlan;
+          
+        } catch (error) {
+          console.error(`❌ [Engine] Attempt ${attempt} failed:`, error);
+          
+          if (error instanceof BasePlanGenerationError) {
+            lastError = error;
+            lastError.attempt = attempt;
+          } else {
+            lastError = new BasePlanGenerationError(
+              (error as Error).message || 'Unknown error during plan generation',
+              'generation',
+              [(error as Error).stack?.substring(0, 200) || 'No stack trace'],
+              attempt
+            );
+          }
+          
+          // Wait before retry (unless this is the last attempt)
+          if (attempt < CONFIG.MAX_ATTEMPTS) {
+            console.log(`⏳ [Engine] Waiting ${CONFIG.RETRY_DELAY_MS}ms before retry...`);
+            await delay(CONFIG.RETRY_DELAY_MS);
+          }
+        }
+      }
+      
+      // All attempts failed - NO FALLBACK
+      console.error('\n═══════════════════════════════════════════════════════════');
+      console.error('❌ [Engine] Base Plan Generation FAILED after all attempts');
+      console.error('═══════════════════════════════════════════════════════════\n');
+      
+      throw lastError || new BasePlanGenerationError(
+        'Failed to generate plan after all attempts',
+        'generation',
+        ['All retry attempts exhausted'],
+        CONFIG.MAX_ATTEMPTS
+      );
+    } finally {
+      // Always release the lock when done (success or failure)
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log('🔓 [Engine] Global generation lock released');
+      console.log(`   Generation ID: ${generationId}`);
+      console.log(`   Duration: ${Math.floor((Date.now() - (globalGenerationState.startTime || Date.now())) / 1000)}s`);
+      console.log('═══════════════════════════════════════════════════════════');
+      
+      globalGenerationState.isGenerating = false;
+      globalGenerationState.generationId = null;
+      globalGenerationState.startTime = null;
+      globalGenerationState.promise = null;
     }
-  }
+  })();
   
-  // All attempts failed - NO FALLBACK
-  console.error('\n═══════════════════════════════════════════════════════════');
-  console.error('❌ [Engine] Base Plan Generation FAILED after all attempts');
-  console.error('═══════════════════════════════════════════════════════════\n');
-  
-  throw lastError || new BasePlanGenerationError(
-    'Failed to generate plan after all attempts',
-    'generation',
-    ['All retry attempts exhausted'],
-    CONFIG.MAX_ATTEMPTS
-  );
+  return globalGenerationState.promise;
 }
 
 // ============================================================================

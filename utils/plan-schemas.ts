@@ -156,7 +156,7 @@ export function repairPlanData(data: any, targetCalories: number, targetProtein:
     
     // Ensure hydration is valid
     if (typeof data.nutrition.hydration_l !== 'number' || data.nutrition.hydration_l < 1) {
-      data.nutrition.hydration_l = 2.5;
+      data.nutrition.hydration_l = 3.5;
     }
 
     // Ensure meals array exists

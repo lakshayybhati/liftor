@@ -63,7 +63,8 @@ export default function PaywallScreen() {
       if (typeof next === 'string' && next.length > 0) {
         router.replace({ pathname: next as any });
       } else {
-        router.replace('/generating-base-plan');
+        // Default to plan-building screen for background generation
+        router.replace('/plan-building');
       }
     }, 0);
   }, [next]);

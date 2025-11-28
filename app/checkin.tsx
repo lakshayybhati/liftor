@@ -1,13 +1,13 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, TextInput, Alert } from 'react-native';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
-import { router, Stack } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { ChevronLeft, Info } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Slider } from '@/components/ui/Slider';
 import { Chip } from '@/components/ui/Chip';
-import { useUserStore } from '@/hooks/useUserStore';
+import { useUserStore, DAILY_CHECKIN_LIMIT, CHECKIN_LIMIT_ERROR } from '@/hooks/useUserStore';
 import { 
   MOOD_CHARACTERS,
   SORENESS_AREAS, 
@@ -19,8 +19,12 @@ import type { CheckinMode, CheckinData } from '@/types/user';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
 import { theme } from '@/constants/colors';
 
+const DEFAULT_WORKOUT_QUALITY = 7;
+
 export default function CheckinScreen() {
-  const { addCheckin, getWeightData } = useUserStore();
+  const params = useLocalSearchParams<{ isRedo?: string }>();
+  const { addCheckin, getWeightData, checkins, getCheckinCountForDate } = useUserStore();
+  const isRedo = params.isRedo === 'true';
   const mode: CheckinMode = 'PRO';
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAllMoods, setShowAllMoods] = useState(false);
@@ -36,7 +40,7 @@ export default function CheckinScreen() {
     soreness: [],
     digestion: 'Normal',
     stress: 3,
-    waterL: 2.5,
+    waterL: 3.5,
     suppsYN: false,
     steps: undefined,
     kcalEst: undefined,
@@ -44,7 +48,7 @@ export default function CheckinScreen() {
     motivation: 7,
     specialRequest: undefined,
     workoutIntensity: 5,
-    yesterdayWorkoutQuality: 7,
+    yesterdayWorkoutQuality: DEFAULT_WORKOUT_QUALITY,
   });
 
   // Local string state to allow decimals while typing (up to 2 dp)
@@ -53,6 +57,31 @@ export default function CheckinScreen() {
 
   // Maximum allowed change per day; scales with days since last weight entry
   const MAX_WEIGHT_CHANGE_PER_DAY_KG = 5;
+
+  const yesterdayKey = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split('T')[0];
+  }, []);
+
+  const hadCheckinYesterday = useMemo(() => {
+    if (!checkins || checkins.length === 0) return false;
+    return checkins.some((checkin) => checkin.date === yesterdayKey);
+  }, [checkins, yesterdayKey]);
+
+  const lastWorkoutQualityDisabled = !hadCheckinYesterday;
+
+  useEffect(() => {
+    setCheckinData((prev) => {
+      const shouldClear = !hadCheckinYesterday && prev.yesterdayWorkoutQuality !== undefined;
+      const shouldRestore = hadCheckinYesterday && prev.yesterdayWorkoutQuality === undefined;
+      if (!shouldClear && !shouldRestore) return prev;
+      return {
+        ...prev,
+        yesterdayWorkoutQuality: shouldClear ? undefined : (prev.yesterdayWorkoutQuality ?? DEFAULT_WORKOUT_QUALITY),
+      };
+    });
+  }, [hadCheckinYesterday]);
 
   const handleSorenessToggle = (area: string) => {
     setCheckinData(prev => ({
@@ -63,9 +92,21 @@ export default function CheckinScreen() {
     }));
   };
 
+  const todayKey = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const checkinCountToday = getCheckinCountForDate(todayKey);
+  const checkinLimitReached = checkinCountToday >= DAILY_CHECKIN_LIMIT;
+
   const handleSubmit = async () => {
     // Prevent double-clicks: immediately disable button
     if (isSubmitting) return;
+    if (checkinLimitReached) {
+      Alert.alert(
+        'Daily limit reached',
+        `You can submit up to ${DAILY_CHECKIN_LIMIT} check-ins per day. Please come back tomorrow.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
     setIsSubmitting(true);
     
     // Validate required fields
@@ -93,7 +134,7 @@ export default function CheckinScreen() {
       const checkin: CheckinData = {
         id: Date.now().toString(),
         mode,
-        date: new Date().toISOString().split('T')[0],
+        date: todayKey,
         ...checkinData,
       };
 
@@ -103,9 +144,24 @@ export default function CheckinScreen() {
       // This ensures the plan is regenerated with the new check-in data
       // NOTE: Don't reset isSubmitting here - let the navigation happen
       // The button stays disabled until we leave the screen
-      router.push('/generating-plan?force=true');
+      router.push({
+        pathname: '/generating-plan',
+        params: { 
+          force: 'true',
+          isRedo: isRedo ? 'true' : 'false'
+        }
+      });
     } catch (error) {
       console.error('Error submitting checkin:', error);
+      if (error instanceof Error && error.message === CHECKIN_LIMIT_ERROR) {
+        Alert.alert(
+          'Daily limit reached',
+          `You can only submit ${DAILY_CHECKIN_LIMIT} check-ins per day.`,
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert('Unable to submit', 'Something went wrong while saving your check-in. Please try again.', [{ text: 'OK' }]);
+      }
       setIsSubmitting(false); // Only re-enable on error
     }
     // Removed finally block - don't re-enable button after successful navigation
@@ -518,13 +574,18 @@ export default function CheckinScreen() {
           <Slider
             label="Last Workout Quality"
             infoText="Rate how your last workout felt overall. 1 = Very bad, 10 = Excellent."
-            value={checkinData.yesterdayWorkoutQuality || 7}
-            onValueChange={(value) => setCheckinData(prev => ({ ...prev, yesterdayWorkoutQuality: value }))}
+            value={checkinData.yesterdayWorkoutQuality ?? DEFAULT_WORKOUT_QUALITY}
+            onValueChange={(value) => {
+              if (lastWorkoutQualityDisabled) return;
+              setCheckinData(prev => ({ ...prev, yesterdayWorkoutQuality: value }));
+            }}
             minimumValue={1}
             maximumValue={10}
             minLabel="1 (Bad)"
             maxLabel="10 (Great)"
-            formatValue={(v) => `${v}/10`}
+            formatValue={(v) => lastWorkoutQualityDisabled ? 'No data' : `${v}/10`}
+            disabled={lastWorkoutQualityDisabled}
+            helperText={lastWorkoutQualityDisabled ? "No check-in yesterday • We'll mark this as no data" : undefined}
           />
 
           <View style={styles.divider} />
@@ -599,6 +660,14 @@ export default function CheckinScreen() {
             </Text>
           </View>
 
+          {checkinLimitReached && (
+            <View style={styles.limitBanner}>
+              <Text style={styles.limitTitle}>Daily limit reached</Text>
+              <Text style={styles.limitSubtitle}>
+                You've already completed {DAILY_CHECKIN_LIMIT} check-ins today. Try again tomorrow for fresh adjustments.
+              </Text>
+            </View>
+          )}
           {renderBasicMetrics()}
           {renderSleepMetrics()}
           {renderPhysicalMetrics()}
@@ -606,18 +675,20 @@ export default function CheckinScreen() {
 
           <Button
             title={
-              isSubmitting 
-                ? "Generating Plan..." 
-                : (mode === 'PRO') && !checkinData.currentWeight
-                  ? "Enter Weight to Continue"
-                  : "Generate My Plan"
+              checkinLimitReached
+                ? "Daily Limit Reached"
+                : isSubmitting 
+                  ? "Generating Plan..." 
+                  : (mode === 'PRO') && !checkinData.currentWeight
+                    ? "Enter Weight to Continue"
+                    : "Generate My Plan"
             }
             onPress={handleSubmit}
-            disabled={isSubmitting || ((mode === 'PRO') && !checkinData.currentWeight)}
+            disabled={isSubmitting || ((mode === 'PRO') && !checkinData.currentWeight) || checkinLimitReached}
             size="large"
             style={[
               styles.submitButton,
-              ((mode === 'PRO') && !checkinData.currentWeight) && styles.disabledButton
+              (((mode === 'PRO') && !checkinData.currentWeight) || checkinLimitReached) && styles.disabledButton
             ]}
           />
         </ScrollView>
@@ -658,6 +729,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: theme.color.muted,
     textAlign: 'center',
+    fontFamily: theme.font.ui,
+  },
+  limitBanner: {
+    backgroundColor: 'rgba(255,99,132,0.12)',
+    borderColor: 'rgba(255,99,132,0.35)',
+    borderWidth: 1,
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 20,
+  },
+  limitTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.color.ink,
+    textAlign: 'center',
+    marginBottom: 6,
+    fontFamily: theme.font.display,
+  },
+  limitSubtitle: {
+    fontSize: 14,
+    color: theme.color.muted,
+    textAlign: 'center',
+    lineHeight: 20,
     fontFamily: theme.font.ui,
   },
   sectionContainer: {

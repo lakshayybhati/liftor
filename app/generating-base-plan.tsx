@@ -5,13 +5,43 @@ import { useNavigation } from '@react-navigation/native';
 import { useUserStore } from '@/hooks/useUserStore';
 import type { WeeklyBasePlan } from '@/types/user';
 import { theme } from '@/constants/colors';
-import { Dumbbell, Apple, Heart, Calendar, Check, Lightbulb, Brain, Sparkles, RefreshCw } from 'lucide-react-native';
-import { generateWeeklyBasePlan, BasePlanGenerationError } from '@/services/plan-generation';
+import { Dumbbell, Apple, Heart, Calendar, Check, Lightbulb, Brain, Sparkles, RefreshCw, Clock, X } from 'lucide-react-native';
+import { generateWeeklyBasePlan, BasePlanGenerationError, isGenerationInProgress, getCurrentGenerationId } from '@/services/plan-generation';
 import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/plan-generation-diagnostics';
 import { getProductionConfig } from '@/utils/production-config';
 import Purchases from 'react-native-purchases';
 import Constants from 'expo-constants';
 import { BasePlanSkeleton } from '@/components/BasePlanSkeleton';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+// Estimated time for plan generation (in seconds)
+// Based on typical AI response times: ~30-60s for generation + ~15-25s for verification
+const ESTIMATED_GENERATION_TIME_SECONDS = 60;
+
+// ============================================================================
+// FUTURE EXTENSION POINTS
+// ============================================================================
+// 
+// 1. NOTIFICATION CENTER INTEGRATION
+//    - When implemented, add a "notifyOnComplete" prop or state
+//    - Use expo-notifications to send local notification when plan is ready
+//    - Allow user to minimize app and receive push when complete
+//
+// 2. MINI-GAME OVERLAY OPTION
+//    - Import PlanLoadingMiniGameOverlay from '@/components/PlanLoadingMiniGameOverlay'
+//    - Add state: const [showMiniGame, setShowMiniGame] = useState(false)
+//    - Render: {showMiniGame && <PlanLoadingMiniGameOverlay visible={true} ... />}
+//    - Add button in UI to toggle mini-game
+//
+// 3. BACKGROUND GENERATION
+//    - Track generation in a global store or context
+//    - Allow navigation away while keeping generation alive
+//    - Show notification when complete
+//
+// ============================================================================
 
 const GENERATION_PHASES = [
   { id: 0, text: "Analyzing your profile & goals", icon: Brain },
@@ -39,6 +69,22 @@ const SLOW_PROMPTS = [
 ];
 
 export default function GeneratingBasePlanScreen() {
+  // Generate a unique ID for this component instance to track mount/unmount
+  const instanceIdRef = useRef(Math.random().toString(36).substring(7));
+  
+  // Track if component is mounted to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  
+  // Log mount and track mounted state
+  useEffect(() => {
+    isMountedRef.current = true;
+    console.log(`[GeneratePlan] 📦 Component MOUNTED (instance: ${instanceIdRef.current})`);
+    return () => {
+      isMountedRef.current = false;
+      console.log(`[GeneratePlan] 📦 Component UNMOUNTED (instance: ${instanceIdRef.current})`);
+    };
+  }, []);
+  
   const { user, addBasePlan } = useUserStore();
   const [currentPhase, setCurrentPhase] = useState(0);
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
@@ -46,17 +92,52 @@ export default function GeneratingBasePlanScreen() {
   const [hasError, setHasError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [lastRetryTime, setLastRetryTime] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const fadeAnim = useMemo(() => new Animated.Value(1), []);
   const tipFadeAnim = useMemo(() => new Animated.Value(1), []);
   const startedRef = useRef(false);
   const navigation = useNavigation();
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isGeneratingRef = useRef(false); // Guard against concurrent generation calls
   const [navLocked, setNavLocked] = useState(true);
   const navLockedRef = useRef(true);
   const unlockNavigation = () => { navLockedRef.current = false; setNavLocked(false); };
+  
+  // Exit button timer
+  const [canExit, setCanExit] = useState(true);
+  const [exitTimer, setExitTimer] = useState(10);
+  // Exit button fade animation
+  const exitButtonFade = useRef(new Animated.Value(1)).current;
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setExitTimer(prev => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          // Fade out before removing
+          Animated.timing(exitButtonFade, {
+            toValue: 0,
+            duration: 500,
+            useNativeDriver: true
+          }).start(() => setCanExit(false));
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, []);
 
-  // Minimum time between retries (3 minutes)
-  const MIN_RETRY_INTERVAL_MS = 3 * 60 * 1000;
+  const handleExit = () => {
+    unlockNavigation();
+    router.replace('/onboarding');
+  };
+
+  // Minimum wait time between retries (30 seconds)
+  // Prevents spamming the AI service
+  const MIN_RETRY_INTERVAL_MS = 30 * 1000;
 
   const canRetry = useCallback(() => {
     if (!lastRetryTime) return true;
@@ -90,13 +171,32 @@ export default function GeneratingBasePlanScreen() {
     setCurrentPhase(0);
     setRetryCount(prev => prev + 1);
     setLastRetryTime(Date.now());
+    setElapsedSeconds(0); // Reset timer for retry
     startedRef.current = false;
+    isGeneratingRef.current = false; // Reset generation guard for retry
     
     // Trigger generation again
     generatePlan();
   }, [canRetry, getRetryWaitTime]);
 
   const generatePlan = useCallback(async () => {
+    // Check if generation is already in progress (engine-level check)
+    if (isGenerationInProgress()) {
+      const genId = getCurrentGenerationId();
+      console.log('[GeneratePlan] ⚠️ Generation already in progress at engine level');
+      console.log(`[GeneratePlan] ⚠️ Current generation ID: ${genId}`);
+      console.log('[GeneratePlan] ⚠️ Will wait for existing generation to complete');
+      // Don't return - let the engine handle deduplication and return the existing promise
+    }
+    
+    // Component-level guard (backup)
+    if (isGeneratingRef.current) {
+      console.warn('[GeneratePlan] ⚠️ Component-level generation guard triggered');
+      return;
+    }
+    isGeneratingRef.current = true;
+    console.log('[GeneratePlan] 🔒 Component generation lock acquired');
+    
     try {
       // Validate configuration before starting
       const config = getProductionConfig();
@@ -115,7 +215,7 @@ export default function GeneratingBasePlanScreen() {
         if (config.errors.some(e => e.includes('AI'))) {
           Alert.alert(
             'Service Configuration',
-            'AI service is not fully configured. Please try again later.',
+            'Service is not fully configured. Please try again later.',
             [{ text: 'OK' }]
           );
         }
@@ -139,7 +239,7 @@ export default function GeneratingBasePlanScreen() {
           console.error('⚠️ WARNING: No API endpoints accessible!');
           Alert.alert(
             'Network Issue',
-            'Unable to reach AI services. Please check your internet connection.',
+            'Unable to reach our services. Please check your internet connection.',
             [{ text: 'OK' }]
           );
           setHasError(true);
@@ -165,6 +265,17 @@ export default function GeneratingBasePlanScreen() {
       }, 45000);
 
       const basePlan = await generateWeeklyBasePlan(user);
+      
+      // Check if component is still mounted before updating state
+      if (!isMountedRef.current) {
+        console.log('[GenerateBasePlan] ⚠️ Component unmounted during generation, but plan was created successfully');
+        console.log('[GenerateBasePlan] 💾 Saving plan to store anyway...');
+        // Still save the plan even if unmounted - the work was done
+        await addBasePlan(basePlan);
+        console.log('[GenerateBasePlan] ✅ Plan saved (component unmounted)');
+        isGeneratingRef.current = false;
+        return; // Don't update state or navigate - component is gone
+      }
       
       // When complete, ensure we show the final phase briefly
       setCurrentPhase(3);
@@ -194,8 +305,15 @@ export default function GeneratingBasePlanScreen() {
       await addBasePlan(basePlan);
       console.log('[GenerateBasePlan] ✅ Plan saved to store successfully');
       
-      // Update state
+      // Update state (only if still mounted)
+      if (!isMountedRef.current) {
+        console.log('[GenerateBasePlan] ⚠️ Component unmounted after save, skipping state updates');
+        isGeneratingRef.current = false;
+        return;
+      }
+      
       console.log('[GenerateBasePlan] 🔄 Updating state...');
+      isGeneratingRef.current = false; // Allow future generation attempts
       setIsGenerating(false);
       setHasError(false);
       
@@ -204,6 +322,12 @@ export default function GeneratingBasePlanScreen() {
       
       // Navigation approach - Always go to plan-preview
       setTimeout(async () => {
+        // Check mounted before navigation
+        if (!isMountedRef.current) {
+          console.log('[GenerateBasePlan] ⚠️ Component unmounted, skipping navigation');
+          return;
+        }
+        
         try {
           unlockNavigation();
           console.log('[GenerateBasePlan] 🚀 Attempting navigation to plan-preview');
@@ -228,6 +352,9 @@ export default function GeneratingBasePlanScreen() {
       }, 1500);
 
     } catch (error) {
+      // Reset generation guard
+      isGeneratingRef.current = false;
+      
       // Clear timers
       if (slowTimerRef.current) {
         clearTimeout(slowTimerRef.current);
@@ -250,6 +377,12 @@ export default function GeneratingBasePlanScreen() {
         retryCount
       });
 
+      // Check if component is still mounted before updating state
+      if (!isMountedRef.current) {
+        console.log('[GenerateBasePlan] ⚠️ Component unmounted during error handling, skipping state updates');
+        return;
+      }
+
       // Update state to show error UI
       setIsGenerating(false);
       setHasError(true);
@@ -261,10 +394,10 @@ export default function GeneratingBasePlanScreen() {
         "Due to high demand, we're having trouble generating your plan. Please try again shortly.",
         [
           { 
-            text: 'Go Home', 
+            text: 'Go Back', 
             onPress: () => { 
               unlockNavigation(); 
-              router.replace('/(tabs)/home'); 
+              router.replace('/onboarding'); 
             },
             style: 'cancel'
           },
@@ -278,9 +411,36 @@ export default function GeneratingBasePlanScreen() {
     }
   }, [user, addBasePlan, retryCount, handleRetry]);
 
+  // Timer effect - counts elapsed seconds during generation
+  useEffect(() => {
+    if (!isGenerating || hasError) {
+      // Stop timer when not generating or on error
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+      return;
+    }
+    
+    // Start the elapsed time counter
+    timerIntervalRef.current = setInterval(() => {
+      setElapsedSeconds(prev => prev + 1);
+    }, 1000);
+    
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, [isGenerating, hasError]);
+
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
+    
+    // Reset elapsed time on start
+    setElapsedSeconds(0);
 
     // Animate through phases to simulate progress
     // Updated timing for two-stage pipeline (Generation + Verification)
@@ -316,6 +476,10 @@ export default function GeneratingBasePlanScreen() {
       if (slowTimerRef.current) {
         clearTimeout(slowTimerRef.current);
         slowTimerRef.current = null;
+      }
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
     };
   }, []);
@@ -389,11 +553,42 @@ export default function GeneratingBasePlanScreen() {
       <BasePlanSkeleton />
 
       <SafeAreaView style={styles.overlayContainer} pointerEvents="box-none">
+        {/* Exit Button - Top Right */}
+        {canExit && (
+          <Animated.View 
+            style={[styles.exitButtonContainer, { opacity: exitButtonFade }]}
+            pointerEvents="box-none"
+          >
+            <TouchableOpacity 
+              style={styles.exitButton} 
+              onPress={handleExit}
+              activeOpacity={0.7}
+              hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+            >
+              <Text style={styles.exitButtonText}>Cancel ({exitTimer}s)</Text>
+              <X size={18} color={theme.color.ink} />
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+
         {/* Progress Card */}
         <View style={[styles.progressCard, hasError && styles.progressCardError]}>
           <Text style={styles.progressTitle}>
             {hasError ? 'Generation Paused' : 'Creating Your Plan'}
           </Text>
+          
+          {/* Estimated Time Display - only show when generating */}
+          {!hasError && isGenerating && (
+            <View style={styles.timerContainer}>
+              <Clock size={14} color={theme.color.muted} />
+              <Text style={styles.timerText}>
+                {elapsedSeconds < ESTIMATED_GENERATION_TIME_SECONDS
+                  ? `~${Math.max(0, ESTIMATED_GENERATION_TIME_SECONDS - elapsedSeconds)}s remaining`
+                  : 'Almost done...'}
+              </Text>
+            </View>
+          )}
+          
           <View style={styles.phasesContainer}>
             {GENERATION_PHASES.map((phase, index) => renderPhaseItem(phase, index))}
           </View>
@@ -416,11 +611,11 @@ export default function GeneratingBasePlanScreen() {
                 style={styles.homeButton} 
                 onPress={() => {
                   unlockNavigation();
-                  router.replace('/(tabs)/home');
+                  router.replace('/onboarding');
                 }}
                 activeOpacity={0.7}
               >
-                <Text style={styles.homeButtonText}>Go Home</Text>
+                <Text style={styles.homeButtonText}>Go Back</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -454,6 +649,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 60,
     zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)', // Semi-transparent backdrop to dim skeletons
+  },
+  exitButtonContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 40, // Moved down to avoid dynamic island/notch
+    right: 20,
+    zIndex: 100,
+  },
+  exitButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(30,30,30,0.9)', // Darker, more visible background
+    borderRadius: 100,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  exitButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.color.ink,
   },
   progressCard: {
     backgroundColor: theme.color.card,
@@ -475,8 +698,25 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     color: theme.color.ink,
-    marginBottom: 20,
+    marginBottom: 8,
     textAlign: 'center',
+  },
+  timerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: theme.color.bg,
+    borderRadius: 20,
+    alignSelf: 'center',
+  },
+  timerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: theme.color.muted,
   },
   phasesContainer: {
     gap: 16,

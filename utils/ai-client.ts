@@ -381,11 +381,20 @@ async function generateWithDeepSeek(messages: Message[]): Promise<AIResponse> {
   console.log('[DeepSeek] Messages count:', messages.length);
   console.log('[DeepSeek] API key prefix:', apiKey.substring(0, 10) + '...');
 
-  // Add timeout for production reliability; read from production config with 600s default (increased from 300s)
+  // Calculate total prompt size to determine appropriate timeout
+  const totalPromptSize = optimized.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+  const isLargePrompt = totalPromptSize > 20000; // Verification prompts can be 40k+
+  
+  // Add timeout for production reliability.
   const controller = new AbortController();
-  // Use 10 minutes as default to prevent premature timeouts during two-stage generation
-  const timeoutMs = Math.max(600000, config.aiTimeoutMs || 600000);
-  console.log(`⏱️ [DeepSeek] Timeout set to ${Math.round(timeoutMs/1000)}s`);
+  // Use longer timeout for large prompts (verification step), shorter for parallel streams
+  // Base timeout: 5 minutes default, 8 minutes for large prompts
+  const baseTimeout = isLargePrompt ? 480000 : 300000; // 8 min or 5 min
+  const requestedTimeout = config.aiTimeoutMs && config.aiTimeoutMs > 0
+    ? Math.max(config.aiTimeoutMs, baseTimeout) // Use at least the base timeout
+    : baseTimeout;
+  const timeoutMs = Math.min(requestedTimeout, 600000); // Max 10 minutes
+  console.log(`⏱️ [DeepSeek] Timeout set to ${Math.round(timeoutMs / 1000)}s (prompt size: ${totalPromptSize} chars${isLargePrompt ? ' - LARGE' : ''})`);
   const timeoutId = setTimeout(() => {
     console.warn(`⚠️ [DeepSeek] Request timeout after ${Math.round(timeoutMs/1000)}s - switching to fallback`);
     controller.abort();

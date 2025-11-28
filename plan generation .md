@@ -58,7 +58,7 @@ Return ONLY valid JSON with this exact structure:
           "items": \[{"food": "Specific food item", "qty": "Exact quantity"}\]  
         }  
       \],  
-      "hydration\_l": 2.5  
+      "hydration\_l": 3.5  
     },  
     "recovery": {  
       "mobility": \["Specific mobility work"\],  
@@ -382,7 +382,7 @@ Expected Output Format:
   "total\_kcal": 2000,  
   "protein\_g": 150,  
   "meals": \[{"name": "Breakfast", "items": \[{"food": "Item", "qty": "Amount"}\]}\],  
-  "hydration\_l": 2.5  
+  "hydration\_l": 3.5
 },  
 "recovery": {  
   "mobility": \["Specific tips"\],  

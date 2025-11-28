@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
-import { ArrowLeft, Settings, Save, Calendar } from 'lucide-react-native';
+import { ArrowLeft, Settings, Save, RefreshCw, List } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -16,6 +16,8 @@ import type { User, Equipment, DietaryPref, WorkoutIntensity, TrainingLevel } fr
 import Slider from '@react-native-community/slider';
 import { useAuth } from '@/hooks/useAuth';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
+import * as Haptics from 'expo-haptics';
+import { startBasePlanGeneration } from '@/services/backgroundPlanGeneration';
 
 // Simple vertical wheel component (alarm-like) with snap-to-item behavior
 function ScrollWheel({ data, index, onChange }: { data: string[]; index: number; onChange: (i: number) => void }) {
@@ -96,12 +98,13 @@ const WORKOUT_INTENSITY_OPTIONS: { id: WorkoutIntensity; label: WorkoutIntensity
 ];
 
 export default function ProgramSettingsScreen() {
-  const { user, updateUser, basePlans } = useUserStore();
+  const { user, updateUser, basePlans, canRegenerateBasePlan, getTimeUntilNextRegeneration, addBasePlan } = useUserStore();
   const auth = useAuth();
   const insets = useSafeAreaInsets();
   const [formData, setFormData] = useState<Partial<User>>({});
   const [initialSnapshot, setInitialSnapshot] = useState<Partial<User> | null>(null);
   const navigation = useNavigation();
+  const [showRegenerateModal, setShowRegenerateModal] = useState(false);
 
   // --- Alarm-style time picker state for Daily Check-in ---
   const HOURS = useMemo(() => Array.from({ length: 12 }, (_, i) => String(i + 1)), []);
@@ -262,11 +265,17 @@ export default function ProgramSettingsScreen() {
     try {
       const updatedUser = { ...user, ...formData };
       await updateUser(updatedUser);
+      
       // Reschedule daily check-in reminder if time changed
+      // This respects the global notification preferences - won't schedule if disabled
       try {
-        const { scheduleDailyCheckInReminderFromString } = await import('@/utils/notifications');
-        await scheduleDailyCheckInReminderFromString(updatedUser.checkInReminderTime || '9:00 AM');
-      } catch {}
+        const { NotificationService } = await import('@/services/NotificationService');
+        // Only schedule if the time actually changed (idempotent)
+        // The service will check if checkInRemindersEnabled is true
+        await NotificationService.scheduleCheckInReminder(updatedUser.checkInReminderTime);
+      } catch (e) {
+        console.warn('[ProgramSettings] Failed to schedule check-in reminder:', e);
+      }
       // Best-effort: persist preferences to Supabase profiles
       try {
         if (session?.user?.id) {
@@ -319,6 +328,57 @@ export default function ProgramSettingsScreen() {
         { text: 'Discard', style: 'destructive', onPress: () => router.back() },
       ]
     );
+  };
+
+  const handleRegeneratePress = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    
+    // Check with server time to prevent date manipulation
+    const canRegenerate = await canRegenerateBasePlan();
+    
+    if (!canRegenerate) {
+      const timeRemaining = await getTimeUntilNextRegeneration();
+      if (timeRemaining) {
+        const timeText = timeRemaining.days > 0 
+          ? `${timeRemaining.days} day${timeRemaining.days !== 1 ? 's' : ''} and ${timeRemaining.hours} hour${timeRemaining.hours !== 1 ? 's' : ''}`
+          : `${timeRemaining.hours} hour${timeRemaining.hours !== 1 ? 's' : ''}`;
+        Alert.alert(
+          'Too Soon to Regenerate',
+          `You can only regenerate your base plan once every 2 weeks. Please wait ${timeText} before generating a new plan.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
+    
+    setShowRegenerateModal(true);
+  };
+
+  const handleConfirmRegenerate = async () => {
+    setShowRegenerateModal(false);
+    
+    // Save any pending preferences first
+    let updatedUser = user;
+    if (user && isDirty) {
+      try {
+        updatedUser = { ...user, ...formData };
+        await updateUser(updatedUser);
+      } catch (error) {
+        console.error('Error saving preferences before regeneration:', error);
+      }
+    }
+    
+    // Start background generation and navigate to plan building screen
+    if (updatedUser) {
+      const userId = auth?.session?.user?.id ?? null;
+      await startBasePlanGeneration(updatedUser, userId, addBasePlan);
+    }
+    router.push('/plan-building');
+  };
+
+  const handleViewPlans = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    router.push('/manage-plans');
   };
 
   const updateFormField = (field: keyof User, value: any) => {
@@ -689,29 +749,91 @@ export default function ProgramSettingsScreen() {
             />
           </View>
 
-          {/* Current Plan Info */}
-          {basePlans.length > 0 && (
-            <Card style={styles.planInfoCard}>
-              <View style={styles.planInfoHeader}>
-                <Calendar color={theme.color.accent.blue} size={20} />
-                <Text style={styles.planInfoTitle}>Current Base Plan</Text>
-              </View>
-              <Text style={styles.planInfoText}>
-                Created: {new Date(basePlans[basePlans.length - 1].createdAt).toLocaleDateString()}
-              </Text>
-              <Text style={styles.planInfoText}>
-                Status: {basePlans[basePlans.length - 1].isLocked ? 'Locked' : 'Active'}
-              </Text>
-              <TouchableOpacity
-                style={styles.viewPlanButton}
-                onPress={() => router.push('/plan-preview')}
-              >
-                <Text style={styles.viewPlanButtonText}>View Plan</Text>
-              </TouchableOpacity>
-            </Card>
-          )}
+          {/* Plan Management Section */}
+          <Card style={styles.planManagementCard}>
+            <View style={styles.sectionHeader}>
+              <RefreshCw color={theme.color.accent.primary} size={20} />
+              <Text style={styles.sectionTitle}>Base Plan Management</Text>
+            </View>
+            
+            <Text style={styles.planManagementDescription}>
+              Your base plan is regenerated based on your preferences. You can regenerate it once every 2 weeks.
+            </Text>
+
+            <View style={styles.planManagementButtons}>
+              <Button
+                title="Regenerate Base Plan"
+                onPress={handleRegeneratePress}
+                style={styles.regenerateButton}
+                textStyle={styles.regenerateButtonText}
+                icon={<RefreshCw color={theme.color.ink} size={18} />}
+              />
+              
+              {basePlans.length > 0 && (
+                <TouchableOpacity
+                  style={styles.viewPlansButton}
+                  onPress={handleViewPlans}
+                  activeOpacity={0.7}
+                >
+                  <List color={theme.color.accent.primary} size={18} />
+                  <Text style={styles.viewPlansButtonText}>View All Plans ({basePlans.length})</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </Card>
         </ScrollView>
       </View>
+
+      {/* Regenerate Confirmation Modal */}
+      <Modal
+        visible={showRegenerateModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowRegenerateModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Regenerate Base Plan?</Text>
+            
+            <Text style={styles.modalWarning}>
+              ⚠️ New plans can only be generated once every 2 weeks.
+            </Text>
+            
+            <Text style={styles.modalDescription}>
+              Your current settings will be used to create a new personalized plan. This will replace your current active plan.
+            </Text>
+            
+            <View style={styles.modalSettingsSummary}>
+              <Text style={styles.modalSummaryTitle}>Current Settings:</Text>
+              <Text style={styles.modalSummaryItem}>
+                • Goal: {GOALS.find(g => g.id === formData.goal)?.label || formData.goal || 'Not set'}
+              </Text>
+              <Text style={styles.modalSummaryItem}>
+                • Training Days: {formData.trainingDays || 3} days/week
+              </Text>
+              <Text style={styles.modalSummaryItem}>
+                • Equipment: {formData.equipment?.join(', ') || 'Not set'}
+              </Text>
+            </View>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => setShowRegenerateModal(false)}
+              >
+                <Text style={styles.modalCancelText}>No, Change Settings</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={styles.modalConfirmButton}
+                onPress={handleConfirmRegenerate}
+              >
+                <Text style={styles.modalConfirmText}>Yes, Regenerate</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardDismissView>
   );
 }
@@ -866,40 +988,6 @@ const styles = StyleSheet.create({
   prettyButtonText: {
     letterSpacing: 0.2,
   },
-  planInfoCard: {
-    marginTop: theme.space.lg,
-    backgroundColor: theme.color.accent.blue + '10',
-    borderColor: theme.color.accent.blue + '30',
-  },
-  planInfoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: theme.space.sm,
-    gap: theme.space.sm,
-  },
-  planInfoTitle: {
-    fontSize: theme.size.body,
-    fontWeight: '600',
-    color: theme.color.ink,
-  },
-  planInfoText: {
-    fontSize: theme.size.label,
-    color: theme.color.muted,
-    marginBottom: theme.space.xs,
-  },
-  viewPlanButton: {
-    marginTop: theme.space.sm,
-    paddingVertical: theme.space.sm,
-    paddingHorizontal: theme.space.md,
-    backgroundColor: theme.color.accent.blue,
-    borderRadius: 12,
-    alignSelf: 'flex-start',
-  },
-  viewPlanButtonText: {
-    color: theme.color.bg,
-    fontSize: theme.size.label,
-    fontWeight: '600',
-  },
   sliderContainer: {
     marginTop: theme.space.sm,
     marginBottom: theme.space.md,
@@ -924,5 +1012,123 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: theme.color.muted,
     fontWeight: '500',
+  },
+  // Plan Management Styles
+  planManagementCard: {
+    marginTop: theme.space.lg,
+    marginBottom: theme.space.lg,
+  },
+  planManagementDescription: {
+    fontSize: theme.size.label,
+    color: theme.color.muted,
+    marginBottom: theme.space.md,
+    lineHeight: 18,
+  },
+  planManagementButtons: {
+    gap: theme.space.sm,
+  },
+  regenerateButton: {
+    backgroundColor: theme.color.accent.primary,
+    borderRadius: theme.radius.md,
+  },
+  regenerateButtonText: {
+    color: theme.color.ink,
+    fontWeight: '600',
+  },
+  viewPlansButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.space.sm,
+    paddingVertical: theme.space.md,
+    borderWidth: 1,
+    borderColor: theme.color.accent.primary,
+    borderRadius: theme.radius.md,
+  },
+  viewPlansButtonText: {
+    color: theme.color.accent.primary,
+    fontSize: theme.size.body,
+    fontWeight: '600',
+  },
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: theme.space.lg,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: theme.color.card,
+    borderRadius: theme.radius.lg,
+    padding: theme.space.lg,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: theme.color.ink,
+    textAlign: 'center',
+    marginBottom: theme.space.md,
+  },
+  modalWarning: {
+    fontSize: theme.size.body,
+    color: theme.color.accent.yellow,
+    textAlign: 'center',
+    marginBottom: theme.space.md,
+    fontWeight: '600',
+  },
+  modalDescription: {
+    fontSize: theme.size.label,
+    color: theme.color.muted,
+    textAlign: 'center',
+    marginBottom: theme.space.md,
+    lineHeight: 18,
+  },
+  modalSettingsSummary: {
+    backgroundColor: theme.color.bg,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+    marginBottom: theme.space.lg,
+  },
+  modalSummaryTitle: {
+    fontSize: theme.size.label,
+    fontWeight: '600',
+    color: theme.color.ink,
+    marginBottom: theme.space.xs,
+  },
+  modalSummaryItem: {
+    fontSize: theme.size.label,
+    color: theme.color.muted,
+    marginBottom: 2,
+  },
+  modalButtons: {
+    gap: theme.space.sm,
+  },
+  modalCancelButton: {
+    paddingVertical: theme.space.md,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    borderRadius: theme.radius.md,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: theme.color.muted,
+    fontSize: theme.size.body,
+    fontWeight: '600',
+  },
+  modalConfirmButton: {
+    paddingVertical: theme.space.md,
+    backgroundColor: theme.color.accent.primary,
+    borderRadius: theme.radius.md,
+    alignItems: 'center',
+  },
+  modalConfirmText: {
+    color: theme.color.ink,
+    fontSize: theme.size.body,
+    fontWeight: '600',
   },
 });

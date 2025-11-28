@@ -11,6 +11,8 @@ import { useNavigation } from '@react-navigation/native';
 import { MoodCharacter } from '@/components/ui/MoodCharacter';
 import { MOOD_CHARACTERS } from '@/constants/fitness';
 
+import ConfettiOverlay from '@/components/ConfettiOverlay';
+
 type PlanTab = 'workout' | 'nutrition' | 'recovery' | 'motivation';
 
 // Solid colors that roughly match the header gradients for each tab
@@ -138,7 +140,7 @@ export default function PlanScreen() {
 
   const handleRetryPlan = async () => {
     if (isRetrying) return;
-    
+
     const todayKey = new Date().toISOString().split('T')[0];
     if (selectedDate !== todayKey) return; // Only allow for today
 
@@ -147,9 +149,9 @@ export default function PlanScreen() {
       "This will delete today's plan and previous check-in data, letting you start fresh.",
       [
         { text: "Cancel", style: "cancel" },
-        { 
-          text: "Re-do Check-in", 
-          style: "destructive", 
+        {
+          text: "Re-do Check-in",
+          style: "destructive",
           onPress: async () => {
             // Delete today's plan, check-in and completions first
             try {
@@ -159,7 +161,7 @@ export default function PlanScreen() {
               console.warn('[Plan] Failed to delete today\'s data:', e);
             }
             // Navigate to check-in screen for a fresh start
-            router.push('/checkin');
+            router.push({ pathname: '/checkin', params: { isRedo: 'true' } });
           }
         }
       ]
@@ -192,25 +194,22 @@ export default function PlanScreen() {
       }
     });
     return () => {
-      try { unsubBeforeRemove(); } catch {}
+      try { unsubBeforeRemove(); } catch { }
     };
   }, [navigation]);
 
   // Animate confetti banner in → hold → out, then auto-dismiss
   useEffect(() => {
     if (!showConfetti) return;
-    Animated.sequence([
-      Animated.timing(confettiAnim, { toValue: 1, duration: 350, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-      Animated.delay(1200),
-      Animated.timing(confettiAnim, { toValue: 0, duration: 300, easing: Easing.in(Easing.ease), useNativeDriver: true }),
-    ]).start(() => {
-      // Defer state updates to avoid "useInsertionEffect must not schedule updates" error
-      setTimeout(() => {
-        setShowConfetti(false);
-        try { router.setParams({ celebrate: undefined as any }); } catch {}
-      }, 0);
-    });
-  }, [showConfetti, confettiAnim]);
+    
+    // Keep visible long enough for particles to fall
+    const timer = setTimeout(() => {
+      setShowConfetti(false);
+      try { router.setParams({ celebrate: undefined as any }); } catch { }
+    }, 4500);
+    
+    return () => clearTimeout(timer);
+  }, [showConfetti]);
 
   const plan = useMemo(() => plans.find(p => p.date === selectedDate), [plans, selectedDate]);
   const todayCheckin = useMemo(() => checkins.find(c => c.date === selectedDate), [checkins, selectedDate]);
@@ -222,30 +221,30 @@ export default function PlanScreen() {
     if (!plan && isToday && celebrate === '1') {
       console.log('[PlanScreen] Navigated from generation but no plan found yet, waiting...');
       setIsWaitingForPlan(true);
-      
+
       let attempts = 0;
       const maxAttempts = 8; // Wait up to 4 seconds (8 * 500ms)
-      
+
       const checkInterval = setInterval(() => {
         attempts++;
         const currentPlan = plans.find(p => p.date === selectedDate);
-        
+
         console.log(`[PlanScreen] Waiting attempt ${attempts}/${maxAttempts} - Plan exists:`, currentPlan ? 'YES' : 'NO');
-        
+
         if (currentPlan) {
           console.log('[PlanScreen] ✅ Plan appeared after waiting!');
           clearInterval(checkInterval);
           setIsWaitingForPlan(false);
           return;
         }
-        
+
         if (attempts >= maxAttempts) {
           console.warn('[PlanScreen] ⚠️ No plan after waiting, staying on plan screen');
           clearInterval(checkInterval);
           setIsWaitingForPlan(false);
         }
       }, 500);
-      
+
       return () => clearInterval(checkInterval);
     }
   }, [plan, isToday, celebrate, selectedDate, plans]);
@@ -264,16 +263,16 @@ export default function PlanScreen() {
   const proteinTarget = plan?.nutrition?.protein_g || 150;
   const fatTarget = Math.round((totalCalorieTarget * 0.25) / 9);
   const carbTarget = Math.round((totalCalorieTarget - (proteinTarget * 4) - (fatTarget * 9)) / 4);
-  
+
   // Generate dynamic meals based on user preferences (supports 1-8 meals)
   const generateMealsData = useCallback(() => {
     // Priority: 1) Actual meals in the plan, 2) User's mealCount preference, 3) Default to 3
     const planMealsCount = plan?.nutrition?.meals?.length || 0;
     const userMealCount = user?.mealCount || 3;
-    
+
     // Use plan's actual meal count if available and valid (1-8), otherwise use user preference
     const mealCount = Math.min(8, Math.max(1, planMealsCount > 0 ? planMealsCount : userMealCount));
-    
+
     // Calorie distributions for 1-8 meals
     // Designed to distribute calories appropriately throughout the day
     const baseCalorieDistribution: Record<number, number[]> = {
@@ -286,7 +285,7 @@ export default function PlanScreen() {
       7: [0.18, 0.07, 0.25, 0.08, 0.22, 0.08, 0.12], // 7 meals - bodybuilder style
       8: [0.15, 0.06, 0.20, 0.07, 0.18, 0.07, 0.15, 0.12], // 8 meals - frequent feeding
     };
-    
+
     // Comprehensive meal templates for all possible meal slots
     const mealTemplates: Record<number, { name: string; insight: string; emoji: string; mealType: string }[]> = {
       1: [
@@ -342,18 +341,18 @@ export default function PlanScreen() {
         { name: 'Before Bed', insight: 'Casein time for overnight gains 😴', emoji: '🥛', mealType: 'before_bed' },
       ],
     };
-    
+
     const distribution = baseCalorieDistribution[mealCount] || baseCalorieDistribution[3];
     const templates = mealTemplates[mealCount] || mealTemplates[3];
-    
+
     // If the plan has meals from AI, try to use their names
     const planMeals = plan?.nutrition?.meals || [];
-    
+
     return templates.map((template, index) => {
       // Use AI-generated meal name if available, otherwise use template
       const aiMealName = planMeals[index]?.name;
       const displayName = aiMealName && aiMealName.length > 0 ? aiMealName : template.name;
-      
+
       return {
         ...template,
         name: displayName,
@@ -361,12 +360,12 @@ export default function PlanScreen() {
       };
     });
   }, [user?.mealCount, totalCalorieTarget, plan?.nutrition?.meals, plan?.nutrition?.meals?.length]);
-  
+
   // Calculate totals from completed meals + extras
   const completedMealTotals = useMemo(() => {
     const mealsData = generateMealsData();
     let calories = 0, protein = 0, fat = 0, carbs = 0;
-    
+
     mealsData.forEach(meal => {
       if (completedMeals.has(meal.mealType)) {
         calories += meal.targetCalories;
@@ -376,10 +375,10 @@ export default function PlanScreen() {
         carbs += Math.round(meal.targetCalories * 0.5 / 4); // 50% carbs
       }
     });
-    
+
     return { calories, protein, fat, carbs };
   }, [completedMeals, generateMealsData]);
-  
+
   const extraTotals = useMemo(() => {
     return dayExtras.reduce((totals, food) => ({
       calories: totals.calories + food.calories,
@@ -390,12 +389,12 @@ export default function PlanScreen() {
   }, [dayExtras]);
   const manualEntries = useMemo(() => dayExtras.filter((f: any) => (f.source ? f.source === 'manual' : !f.imagePath)), [dayExtras]);
   const snapEntries = useMemo(() => dayExtras.filter((f: any) => (f.source ? f.source === 'snap' : !!f.imagePath)), [dayExtras]);
-  
+
   const currentCalories = completedMealTotals.calories + extraTotals.calories;
   const currentProtein = completedMealTotals.protein + extraTotals.protein;
   const currentFat = completedMealTotals.fat + extraTotals.fat;
   const currentCarbs = completedMealTotals.carbs + extraTotals.carbs;
-  
+
   const toggleMealComplete = useCallback((mealType: string) => {
     if (Platform.OS !== 'web') {
       Haptics.selectionAsync();
@@ -413,7 +412,7 @@ export default function PlanScreen() {
     if (Platform.OS !== 'web') {
       Haptics.selectionAsync();
     }
-    
+
     router.push('/snap-food');
   }, []);
   const handleManualEntry = useCallback(() => {
@@ -422,7 +421,7 @@ export default function PlanScreen() {
     }
     router.push({ pathname: '/snap-food', params: { manual: '1' } as any });
   }, []);
-  
+
 
 
   // Do not redirect when viewing past dates; show empty state instead
@@ -505,7 +504,7 @@ export default function PlanScreen() {
           <Card gradient gradientColors={['#FF512F', '#DD2476']} style={styles.headerCard}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 8, gap: 8 }}>
               <Flame fill="#fff" color="#fff" size={24} />
-              <Text style={styles.headerTitle}>Today's Workout</Text>
+              <Text style={[styles.headerTitle, styles.headerTitleCompact]}>Today's Workout</Text>
             </View>
             <Text style={styles.headerSubtitle}>Focus: {plan.workout?.focus?.join(', ') || 'General'}</Text>
             {plan?.isFromBasePlan ? (
@@ -577,7 +576,7 @@ export default function PlanScreen() {
     const hasNutritionAdjustments = (plan?.nutritionAdjustments?.length || 0) > 0;
 
     return (
-      <ScrollView 
+      <ScrollView
         style={styles.tabContent}
         showsVerticalScrollIndicator={false}
         bounces={true}
@@ -590,14 +589,14 @@ export default function PlanScreen() {
           <Card gradient gradientColors={['#11998e', '#38ef7d']} style={styles.headerCard}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 }}>
               <Apple fill="#fff" color="#fff" size={24} />
-              <Text style={styles.headerTitle}>Nutrition Plan</Text>
+              <Text style={[styles.headerTitle, styles.headerTitleCompact]}>Nutrition Plan</Text>
             </View>
             <View style={styles.calorieHeader}>
               <Text style={styles.calorieCount}>
                 {currentCalories} <Text style={{ fontSize: 16, fontWeight: '500', opacity: 0.8 }}>/ {totalCalorieTarget.toLocaleString()} kcal</Text>
               </Text>
             </View>
-            
+
             <View style={styles.macroInsights}>
               <View style={styles.macroRow}>
                 <View style={styles.macroItem}>
@@ -649,7 +648,7 @@ export default function PlanScreen() {
         <View style={styles.mealsContainer}>
           {mealsData.map((meal, index) => {
             const isCompleted = completedMeals.has(meal.mealType);
-            
+
             return (
               <FadeInView key={meal.name} delay={100 + (index * 50)}>
                 <Card style={[styles.mealCard, isCompleted ? styles.completedMealCard : undefined] as any}>
@@ -662,14 +661,14 @@ export default function PlanScreen() {
                         {meal.targetCalories} Cal {isCompleted ? '✓ Eaten' : ''}
                       </Text>
                     </View>
-                    
-                    <BouncyCheckbox 
-                      checked={isCompleted} 
+
+                    <BouncyCheckbox
+                      checked={isCompleted}
                       onPress={() => toggleMealComplete(meal.mealType)}
                       color={theme.color.accent.green}
                     />
                   </View>
-                  
+
                   {/* Meal Insight */}
                   <View style={styles.insightContainer}>
                     <Text style={[styles.insightText, isCompleted && styles.completedMealText]}>
@@ -695,21 +694,21 @@ export default function PlanScreen() {
             );
           })}
         </View>
-        
+
         {/* Quick Actions Row */}
         <FadeInView delay={400}>
           <View style={styles.quickActionsContainer}>
             {/* Manual Entry */}
             <Card style={styles.quickActionCard}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 onPress={() => router.push('/food-entries')}
                 style={styles.quickHistoryButton}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <History size={16} color={theme.color.muted} />
               </TouchableOpacity>
-              
-              <TouchableOpacity 
+
+              <TouchableOpacity
                 onPress={handleManualEntry}
                 style={styles.quickActionContent}
                 disabled={isLoading}
@@ -726,7 +725,7 @@ export default function PlanScreen() {
 
             {/* Snap Food AI */}
             <Card style={styles.quickActionCard}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 onPress={() => router.push('/food-snaps')}
                 style={styles.quickHistoryButton}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -734,7 +733,7 @@ export default function PlanScreen() {
                 <History size={16} color={theme.color.muted} />
               </TouchableOpacity>
 
-              <TouchableOpacity 
+              <TouchableOpacity
                 onPress={handleSnapFood}
                 style={styles.quickActionContent}
                 disabled={isLoading}
@@ -742,7 +741,7 @@ export default function PlanScreen() {
                 <View style={[styles.quickIconCircle, { backgroundColor: theme.color.accent.primary + '15' }]}>
                   <Camera color={theme.color.accent.primary} size={24} />
                 </View>
-                <Text style={styles.quickActionTitle}>Snap AI</Text>
+                <Text style={styles.quickActionTitle}>Snap Food</Text>
                 <Text style={styles.quickActionSubtitle}>
                   {snapEntries.length > 0 ? `${snapEntries.length} added` : 'Scan food'}
                 </Text>
@@ -750,7 +749,7 @@ export default function PlanScreen() {
             </Card>
           </View>
         </FadeInView>
-        
+
         <View style={{ height: 40 }} />
       </ScrollView>
     );
@@ -759,7 +758,7 @@ export default function PlanScreen() {
   const renderRecovery = () => {
     if (!plan?.recovery) {
       return (
-        <ScrollView 
+        <ScrollView
           style={styles.tabContent}
           showsVerticalScrollIndicator={false}
           bounces={true}
@@ -777,7 +776,7 @@ export default function PlanScreen() {
     }
 
     return (
-      <ScrollView 
+      <ScrollView
         style={styles.tabContent}
         showsVerticalScrollIndicator={false}
         bounces={true}
@@ -788,7 +787,7 @@ export default function PlanScreen() {
           <Card gradient gradientColors={['#8E2DE2', '#4A00E0']} style={styles.headerCard}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 }}>
               <Heart fill="#fff" color="#fff" size={24} />
-              <Text style={styles.headerTitle}>Recovery Plan</Text>
+              <Text style={[styles.headerTitle, styles.headerTitleCompact]}>Recovery Plan</Text>
             </View>
             <Text style={styles.headerSubtitle}>
               Rest and recharge for tomorrow
@@ -818,31 +817,43 @@ export default function PlanScreen() {
           </Card>
         </FadeInView>
 
-        {/* Supplements Card */}
-        {(plan?.recovery?.supplements && plan.recovery.supplements.length > 0) && (
-          <FadeInView delay={300}>
-            <Card style={styles.recoveryCard}>
-              <Text style={styles.recoveryTitle}>💊 Today's Supplements</Text>
-              {plan.recovery.supplements.map((item: string, index: number) => {
-                const isCompleted = completedSupplements.has(item);
-                return (
-                  <View key={index} style={styles.supplementRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.recoveryItem, isCompleted && styles.completedText, { marginBottom: 0 }]}>
-                        {item}
-                      </Text>
+        {/* Supplements Card - Check both supplements array and supplementCard */}
+        {(() => {
+          // Combine supplements from both sources
+          const directSupplements = plan?.recovery?.supplements || [];
+          const cardCurrent = plan?.recovery?.supplementCard?.current || [];
+          const cardAddOns = plan?.recovery?.supplementCard?.addOns || [];
+
+          // Merge and dedupe all supplements
+          const allSupplements = [...new Set([...directSupplements, ...cardCurrent, ...cardAddOns])];
+
+          if (allSupplements.length === 0) return null;
+
+          return (
+            <FadeInView delay={300}>
+              <Card style={styles.recoveryCard}>
+                <Text style={styles.recoveryTitle}>💊 Today's Supplements</Text>
+                {allSupplements.map((item: string, index: number) => {
+                  const isCompleted = completedSupplements.has(item);
+                  return (
+                    <View key={index} style={styles.supplementRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.recoveryItem, isCompleted && styles.completedText, { marginBottom: 0 }]}>
+                          {item}
+                        </Text>
+                      </View>
+                      <BouncyCheckbox
+                        checked={isCompleted}
+                        onPress={() => toggleSupplementComplete(item)}
+                        color={theme.color.accent.primary} // Purple for recovery tab
+                      />
                     </View>
-                    <BouncyCheckbox 
-                      checked={isCompleted} 
-                      onPress={() => toggleSupplementComplete(item)} 
-                      color={theme.color.accent.primary} // Purple for recovery tab
-                    />
-                  </View>
-                );
-              })}
-            </Card>
-          </FadeInView>
-        )}
+                  );
+                })}
+              </Card>
+            </FadeInView>
+          );
+        })()}
 
         {/* Daily Debrief Card */}
         {plan?.recovery?.careNotes && (
@@ -879,19 +890,19 @@ export default function PlanScreen() {
     const stressColor = getStressMetricColor(todayCheckin?.stress);
 
     return (
-    <ScrollView 
-      style={styles.tabContent}
-      showsVerticalScrollIndicator={false}
-      bounces={true}
-      scrollEventThrottle={16}
-      keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="on-drag"
-    >
+      <ScrollView
+        style={styles.tabContent}
+        showsVerticalScrollIndicator={false}
+        bounces={true}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Card gradient gradientColors={['#EF4444', '#B91C1C']} style={styles.motivationCard}>
-        <Sparkles size={40} color="#FFFFFF" style={styles.motivationIcon} />
-        <Text style={styles.motivationTitle}>Your Daily Motivation</Text>
-        <Text style={styles.motivationText}>{plan?.motivation || ''}</Text>
-      </Card>
+          <Sparkles size={40} color="#FFFFFF" style={styles.motivationIcon} />
+          <Text style={styles.motivationTitle}>Your Daily Motivation</Text>
+          <Text style={styles.motivationText}>{plan?.motivation || ''}</Text>
+        </Card>
 
         <FadeInView delay={100}>
           <Card style={styles.snapshotCard}>
@@ -900,7 +911,7 @@ export default function PlanScreen() {
             {/* Mood */}
             {moodChar && (
               <View style={styles.snapshotRow}>
-                <MoodCharacter mood={moodChar} selected={false} onPress={() => {}} size={60} />
+                <MoodCharacter mood={moodChar} selected={false} onPress={() => { }} size={60} />
                 <View style={{ marginLeft: 16, flex: 1 }}>
                   <Text style={styles.snapshotLabel}>Mood</Text>
                   <Text style={styles.snapshotValue}>{moodChar.label}</Text>
@@ -910,38 +921,38 @@ export default function PlanScreen() {
 
             {/* Mental State Grid */}
             <View style={styles.mentalGrid}>
-               {/* Motivation */}
-               <View style={styles.mentalItem}>
-                 <Text style={styles.mentalLabel}>Motivation</Text>
-                 <View style={styles.progressBarBg}>
-                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.motivation || 0) * 10}%`, backgroundColor: motivationColor }]} />
-                 </View>
-                 <Text style={styles.mentalValue}>{todayCheckin?.motivation || '-'}/10</Text>
-               </View>
-               {/* Energy */}
-               <View style={styles.mentalItem}>
-                 <Text style={styles.mentalLabel}>Energy</Text>
-                 <View style={styles.progressBarBg}>
-                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.energy || 0) * 10}%`, backgroundColor: energyColor }]} />
-                 </View>
-                 <Text style={styles.mentalValue}>{todayCheckin?.energy || '-'}/10</Text>
-               </View>
-               {/* Stress */}
-               <View style={styles.mentalItem}>
-                 <Text style={styles.mentalLabel}>Stress</Text>
-                 <View style={styles.progressBarBg}>
-                   <View style={[styles.progressBarFill, { width: `${(todayCheckin?.stress || 0) * 10}%`, backgroundColor: stressColor }]} />
-                 </View>
-                 <Text style={styles.mentalValue}>{todayCheckin?.stress || '-'}/10</Text>
-               </View>
+              {/* Motivation */}
+              <View style={styles.mentalItem}>
+                <Text style={styles.mentalLabel}>Motivation</Text>
+                <View style={styles.progressBarBg}>
+                  <View style={[styles.progressBarFill, { width: `${(todayCheckin?.motivation || 0) * 10}%`, backgroundColor: motivationColor }]} />
+                </View>
+                <Text style={styles.mentalValue}>{todayCheckin?.motivation || '-'}/10</Text>
+              </View>
+              {/* Energy */}
+              <View style={styles.mentalItem}>
+                <Text style={styles.mentalLabel}>Energy</Text>
+                <View style={styles.progressBarBg}>
+                  <View style={[styles.progressBarFill, { width: `${(todayCheckin?.energy || 0) * 10}%`, backgroundColor: energyColor }]} />
+                </View>
+                <Text style={styles.mentalValue}>{todayCheckin?.energy || '-'}/10</Text>
+              </View>
+              {/* Stress */}
+              <View style={styles.mentalItem}>
+                <Text style={styles.mentalLabel}>Stress</Text>
+                <View style={styles.progressBarBg}>
+                  <View style={[styles.progressBarFill, { width: `${(todayCheckin?.stress || 0) * 10}%`, backgroundColor: stressColor }]} />
+                </View>
+                <Text style={styles.mentalValue}>{todayCheckin?.stress || '-'}/10</Text>
+              </View>
             </View>
 
             {/* Special Request */}
             {todayCheckin?.specialRequest ? (
               <View style={styles.requestContainer}>
-                <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 4}}>
-                   <AlertCircle size={16} color={theme.color.accent.blue} />
-                   <Text style={[styles.snapshotLabel, {marginLeft: 6, color: theme.color.accent.blue}]}>Special Request</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                  <AlertCircle size={16} color={theme.color.accent.blue} />
+                  <Text style={[styles.snapshotLabel, { marginLeft: 6, color: theme.color.accent.blue }]}>Special Request</Text>
                 </View>
                 <Text style={styles.requestText}>{todayCheckin.specialRequest}</Text>
               </View>
@@ -949,40 +960,40 @@ export default function PlanScreen() {
 
             {/* Bottom Row: Supplements & Intensity */}
             <View style={styles.bottomRow}>
-               <View style={styles.bottomItem}>
-                 <Pill size={20} color={todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted} />
-                 <View style={{marginLeft: 8}}>
-                   <Text style={styles.snapshotLabel}>Supplements</Text>
-                   <Text style={[styles.snapshotValue, { color: todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted }]}>
-                     {todayCheckin?.suppsYN ? 'Taken' : 'Not Taken'}
-                   </Text>
-                 </View>
-               </View>
+              <View style={styles.bottomItem}>
+                <Pill size={20} color={todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted} />
+                <View style={{ marginLeft: 8 }}>
+                  <Text style={styles.snapshotLabel}>Supplements</Text>
+                  <Text style={[styles.snapshotValue, { color: todayCheckin?.suppsYN ? theme.color.accent.green : theme.color.muted }]}>
+                    {todayCheckin?.suppsYN ? 'Taken' : 'Not Taken'}
+                  </Text>
+                </View>
+              </View>
 
-               <View style={styles.bottomItem}>
-                 <Gauge size={20} color={theme.color.accent.primary} />
-                 <View style={{marginLeft: 8}}>
-                   <Text style={styles.snapshotLabel}>Intensity</Text>
-                   <Text style={styles.snapshotValue}>{todayCheckin?.workoutIntensity || '-'}/10</Text>
-                 </View>
-               </View>
+              <View style={styles.bottomItem}>
+                <Gauge size={20} color={theme.color.accent.primary} />
+                <View style={{ marginLeft: 8 }}>
+                  <Text style={styles.snapshotLabel}>Intensity</Text>
+                  <Text style={styles.snapshotValue}>{todayCheckin?.workoutIntensity || '-'}/10</Text>
+                </View>
+              </View>
             </View>
 
           </Card>
         </FadeInView>
 
-      <Card style={styles.actionCard}>
-        <Text style={styles.actionTitle}>Reset & Breathe</Text>
-        <View style={styles.actionButtons}>
-          <Button
-            title="stressed? just breathe"
-            onPress={() => router.push('/breathe' as any)}
-            style={styles.actionButton}
-          />
-        </View>
-      </Card>
-    </ScrollView>
-  );
+        <Card style={styles.actionCard}>
+          <Text style={styles.actionTitle}>Reset & Breathe</Text>
+          <View style={styles.actionButtons}>
+            <Button
+              title="stressed? just breathe"
+              onPress={() => router.push('/breathe' as any)}
+              style={styles.actionButton}
+            />
+          </View>
+        </Card>
+      </ScrollView>
+    );
   };
 
   const renderContent = () => {
@@ -1002,8 +1013,8 @@ export default function PlanScreen() {
 
   return (
     <View style={styles.container}>
-      <Stack.Screen 
-        options={{ 
+      <Stack.Screen
+        options={{
           headerTitle: () => (
             <TouchableOpacity onPress={() => setShowDatePicker(true)} accessibilityRole="button" accessibilityLabel="Open recent days selector" style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Text style={{ color: theme.color.ink, fontWeight: '700', fontSize: 18, marginRight: 6 }}>
@@ -1018,49 +1029,23 @@ export default function PlanScreen() {
             </TouchableOpacity>
           ),
           headerRight: () => isToday && plan && (
-            <TouchableOpacity 
-              onPress={handleRetryPlan} 
-              style={{ paddingHorizontal: 8 }} 
-              accessibilityRole="button" 
+            <TouchableOpacity
+              onPress={handleRetryPlan}
+              style={{ paddingHorizontal: 8 }}
+              accessibilityRole="button"
               accessibilityLabel="Regenerate plan"
               disabled={isRetrying}
             >
-              <RefreshCw color={theme.color.accent.primary} size={20} opacity={isRetrying ? 0.5 : 1} />
+              <RefreshCw color={theme.color.muted} size={20} opacity={isRetrying ? 0.5 : 1} />
             </TouchableOpacity>
           ),
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
-        }} 
+        }}
       />
-      
+
       <SafeAreaView style={styles.safeArea}>
-        {showConfetti && (
-          <Animated.View
-            style={[
-              styles.confettiBanner,
-              {
-                opacity: confettiAnim,
-                transform: [
-                  {
-                    translateY: confettiAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [-20, 0],
-                    }),
-                  },
-                  {
-                    scale: confettiAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.96, 1],
-                    }),
-                  },
-                ],
-              },
-            ]}
-            pointerEvents="none"
-          >
-            <Text style={styles.confettiBannerText}>🎉 Plan Ready! 🎉</Text>
-          </Animated.View>
-        )}
+        <ConfettiOverlay visible={showConfetti} />
         <Modal visible={showDatePicker} transparent animationType="fade" onRequestClose={() => setShowDatePicker(false)}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalCard}>
@@ -1256,6 +1241,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 8,
   },
+  headerTitleCompact: {
+    marginBottom: 0,
+  },
   headerSubtitle: {
     fontSize: 16,
     color: '#FFFFFF',
@@ -1311,6 +1299,7 @@ const styles = StyleSheet.create({
   },
   exerciseInfo: {
     flex: 1,
+    paddingRight: 12,
   },
   exerciseName: {
     fontSize: 16,
