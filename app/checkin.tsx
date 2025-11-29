@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Slider } from '@/components/ui/Slider';
 import { Chip } from '@/components/ui/Chip';
-import { useUserStore, DAILY_CHECKIN_LIMIT, CHECKIN_LIMIT_ERROR } from '@/hooks/useUserStore';
+import { useUserStore, REDO_CHECKIN_LIMIT, CHECKIN_LIMIT_ERROR } from '@/hooks/useUserStore';
 import { 
   MOOD_CHARACTERS,
   SORENESS_AREAS, 
@@ -93,16 +93,16 @@ export default function CheckinScreen() {
   };
 
   const todayKey = useMemo(() => new Date().toISOString().split('T')[0], []);
-  const checkinCountToday = getCheckinCountForDate(todayKey);
-  const checkinLimitReached = checkinCountToday >= DAILY_CHECKIN_LIMIT;
+  const redoCountToday = getCheckinCountForDate(todayKey);
+  const checkinLimitReached = isRedo && redoCountToday >= REDO_CHECKIN_LIMIT;
 
   const handleSubmit = async () => {
     // Prevent double-clicks: immediately disable button
     if (isSubmitting) return;
     if (checkinLimitReached) {
       Alert.alert(
-        'Daily limit reached',
-        `You can submit up to ${DAILY_CHECKIN_LIMIT} check-ins per day. Please come back tomorrow.`,
+        'Redo limit reached',
+        `You can redo your check-in up to ${REDO_CHECKIN_LIMIT} times per day. Note: The mini-game is only available on your first check-in. Please come back tomorrow!`,
         [{ text: 'OK' }]
       );
       return;
@@ -155,8 +155,8 @@ export default function CheckinScreen() {
       console.error('Error submitting checkin:', error);
       if (error instanceof Error && error.message === CHECKIN_LIMIT_ERROR) {
         Alert.alert(
-          'Daily limit reached',
-          `You can only submit ${DAILY_CHECKIN_LIMIT} check-ins per day.`,
+          'Redo limit reached',
+          `You can only redo your check-in ${REDO_CHECKIN_LIMIT} times per day. Note: The mini-game is only available on your first check-in.`,
           [{ text: 'OK' }]
         );
       } else {
@@ -662,9 +662,9 @@ export default function CheckinScreen() {
 
           {checkinLimitReached && (
             <View style={styles.limitBanner}>
-              <Text style={styles.limitTitle}>Daily limit reached</Text>
+              <Text style={styles.limitTitle}>Redo limit reached</Text>
               <Text style={styles.limitSubtitle}>
-                You've already completed {DAILY_CHECKIN_LIMIT} check-ins today. Try again tomorrow for fresh adjustments.
+                You've already redone today's check-in {REDO_CHECKIN_LIMIT} times. Note: The mini-game is only available on your first check-in. Try again tomorrow!
               </Text>
             </View>
           )}
@@ -676,7 +676,7 @@ export default function CheckinScreen() {
           <Button
             title={
               checkinLimitReached
-                ? "Daily Limit Reached"
+                ? "Redo Limit Reached"
                 : isSubmitting 
                   ? "Generating Plan..." 
                   : (mode === 'PRO') && !checkinData.currentWeight

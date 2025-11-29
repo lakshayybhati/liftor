@@ -70,7 +70,7 @@ export const BasePlanSkeleton = () => {
     <View style={styles.container}>
       {/* Header Area */}
       <View style={styles.header}>
-        <Calendar size={32} color={theme.color.primary} style={{ marginBottom: theme.space.sm }} />
+        <Calendar size={32} color={theme.color.accent.primary} style={{ marginBottom: theme.space.sm }} />
         
         <TypingText 
           text="Your Base Plan" 
@@ -136,7 +136,7 @@ export const BasePlanSkeleton = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: theme.color.bg,
+    // backgroundColor: theme.color.bg,
   },
   header: {
     alignItems: 'center',

@@ -5,7 +5,7 @@ import { Dumbbell, Apple, Heart, Sparkles, CheckCircle, Check, Camera, ChevronDo
 import * as Haptics from 'expo-haptics';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { useUserStore } from '@/hooks/useUserStore';
+import { useUserStore, REDO_CHECKIN_LIMIT } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { useNavigation } from '@react-navigation/native';
 import { MoodCharacter } from '@/components/ui/MoodCharacter';
@@ -120,7 +120,7 @@ interface ExtraFood {
 }
 
 export default function PlanScreen() {
-  const { user, plans, checkins, foodLogs, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, addCheckin, deleteTodayPlan } = useUserStore();
+  const { user, plans, checkins, foodLogs, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, addCheckin, deleteTodayPlan, getCheckinCountForDate } = useUserStore();
   const { tab, celebrate } = useLocalSearchParams<{ tab?: string; celebrate?: string }>();
   const [activeTab, setActiveTab] = useState<PlanTab>('workout');
   const [completedExercises, setCompletedExercises] = useState<Set<string>>(new Set());
@@ -143,6 +143,16 @@ export default function PlanScreen() {
 
     const todayKey = new Date().toISOString().split('T')[0];
     if (selectedDate !== todayKey) return; // Only allow for today
+
+    const redoCountToday = getCheckinCountForDate(todayKey);
+    if (redoCountToday >= REDO_CHECKIN_LIMIT) {
+      Alert.alert(
+        'Re-do limit reached',
+        "You've hit your re-do check-ins for the day. Note: The mini-game is only available on your first check-in. Try again tomorrow!",
+        [{ text: 'OK' }]
+      );
+      return;
+    }
 
     Alert.alert(
       "Re-do Today's Check-in?",

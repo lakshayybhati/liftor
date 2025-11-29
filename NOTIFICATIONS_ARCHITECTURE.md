@@ -51,11 +51,13 @@ The notification system has been completely reworked to be:
 │  │ - milestonesEnabled                                             │   │
 │  │ - scheduledWorkoutTime / scheduledWorkoutId                     │   │
 │  │ - scheduledCheckInTime / scheduledCheckInId                     │   │
+│  │ - scheduledCheckInIds (array of next 30 reminder IDs)           │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ Scheduling Methods                                              │   │
 │  │ - scheduleCheckInReminder(time, forceReschedule?)              │   │
+│  │     ↳ Cancels old reminders and pre-schedules next 30 days      │   │
 │  │ - scheduleWorkoutReminder(time, hasVerifiedPlan, force?)       │   │
 │  │ - cancelCheckInReminder()                                       │   │
 │  │ - cancelWorkoutReminder()                                       │   │
@@ -95,12 +97,13 @@ The notification system has been completely reworked to be:
 
 | Type | Trigger | Scheduling |
 |------|---------|------------|
-| **Check-in Reminder** | User's `checkInReminderTime` | Daily at configured time |
+| **Check-in Reminder** | User's `checkInReminderTime` | Pre-schedules the next 30 days at the configured time (no immediate fire) |
 | **Workout Reminder** | User's `preferredTrainingTime` | Daily, 10 min before (only if verified plan exists) |
 
 **Key behaviors:**
 - Only scheduled when user explicitly sets a time
 - Idempotent: won't reschedule if time unchanged
+- Check-in reminders are queued for the next 30 days at explicit timestamps to avoid instant delivery glitches
 - Respects global enable/disable toggle
 - Workout reminders require a verified base plan
 
@@ -169,8 +172,9 @@ The notification system has been completely reworked to be:
 3. NotificationService.scheduleCheckInReminder(newTime)
    a. Checks if checkInRemindersEnabled
    b. Compares with scheduledCheckInTime
-   c. If different: cancel old, schedule new
-   d. Saves new scheduledCheckInTime + ID
+   c. If different: cancel all pending reminders
+   d. Computes the next 30 calendar occurrences and schedules each explicitly
+   e. Saves new scheduledCheckInTime + array of scheduledCheckInIds (first ID kept for legacy paths)
 ```
 
 ### User Toggles Notifications Off (Settings)
@@ -261,4 +265,7 @@ All keys are user-scoped: `key:userId` or `key:anon`
 - [ ] Supabase notifications are delivered and not re-delivered on restart
 - [ ] Milestone notifications respect milestonesEnabled preference
 - [ ] Logging out cleans up notification subscriptions
+
+
+
 

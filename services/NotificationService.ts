@@ -20,6 +20,7 @@ import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { User } from '@/types/user';
+import { getProductionConfig, logProductionMetric } from '@/utils/production-config';
 
 // ============================================================================
 // TYPES
@@ -33,7 +34,10 @@ export interface NotificationPreferences {
   scheduledWorkoutTime?: string;      // The time currently scheduled
   scheduledCheckInTime?: string;      // The time currently scheduled
   scheduledWorkoutId?: string;        // Notification ID for workout reminder
-  scheduledCheckInId?: string;        // Notification ID for check-in reminder
+  scheduledCheckInId?: string;        // Legacy single notification ID (back-compat)
+  scheduledCheckInIds?: string[];     // All queued check-in notification IDs
+  // Track already-notified milestones to avoid spam (e.g., 'streak_7', 'weight_goal_75.0')
+  notifiedMilestones?: string[];
 }
 
 export interface SupabaseNotification {
@@ -68,7 +72,14 @@ const STORAGE_KEYS = {
   PREFERENCES: 'Liftor_notification_prefs_v2', // v2 to migrate from old format
   IN_APP_NOTIFICATIONS: 'Liftor_inAppNotifications_v2',
   DELIVERED_SUPABASE_IDS: 'Liftor_deliveredSupabaseNotifs',
+  // Legacy keys to clean up during migration
+  LEGACY_PREFS: 'Liftor_notification_prefs', // Old global (non-user-scoped) prefs
 } as const;
+
+// Minimum queue size before we top up check-in reminders
+const MIN_CHECKIN_QUEUE_SIZE = 7;
+
+const CHECKIN_SCHEDULE_WINDOW_DAYS = 30;
 
 const scopedKey = (base: string, userId: string | null | undefined) =>
   `${base}:${userId ?? 'anon'}`;
@@ -116,6 +127,11 @@ class NotificationServiceClass {
     this.supabaseClient = supabase;
     this.initialized = true;
 
+    const config = getProductionConfig();
+
+    // Migrate from legacy prefs if needed
+    await this.migrateLegacyPrefs();
+
     // Setup Android notification channel
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {
@@ -128,11 +144,66 @@ class NotificationServiceClass {
     }
 
     // Register for push notifications (but don't schedule anything yet)
-    await this.registerPushToken();
+    const token = await this.registerPushToken();
+
+    // Log initialization in production
+    if (config.isProduction) {
+      logProductionMetric('data', 'notification_service_init', {
+        userId: userId?.substring(0, 8),
+        pushTokenObtained: !!token,
+        platform: Platform.OS,
+      });
+    }
 
     // Subscribe to Supabase custom notifications
     if (userId && supabase) {
       await this.subscribeToSupabaseNotifications();
+    }
+  }
+
+  /**
+   * Migrate from legacy notification prefs (global) to user-scoped prefs.
+   * Also cleans up stale legacy data.
+   */
+  private async migrateLegacyPrefs(): Promise<void> {
+    try {
+      const legacyData = await AsyncStorage.getItem(STORAGE_KEYS.LEGACY_PREFS);
+      if (!legacyData) return; // No legacy data, nothing to migrate
+
+      const legacyPrefs = JSON.parse(legacyData);
+      const currentPrefs = await this.getPreferences();
+
+      // Only migrate if current prefs are default (user hasn't set anything yet)
+      const isCurrentDefault = 
+        currentPrefs.workoutRemindersEnabled === true &&
+        currentPrefs.checkInRemindersEnabled === true &&
+        currentPrefs.milestonesEnabled === true &&
+        !currentPrefs.scheduledCheckInTime &&
+        !currentPrefs.scheduledWorkoutTime;
+
+      if (isCurrentDefault && legacyPrefs) {
+        // Migrate legacy prefs to user-scoped
+        await this.savePreferences({
+          workoutRemindersEnabled: legacyPrefs.workoutRemindersEnabled ?? true,
+          checkInRemindersEnabled: legacyPrefs.checkInRemindersEnabled ?? true,
+          milestonesEnabled: legacyPrefs.milestonesEnabled ?? true,
+        });
+        console.log('[NotificationService] Migrated legacy preferences');
+      }
+
+      // Clean up legacy data to prevent future confusion
+      await AsyncStorage.removeItem(STORAGE_KEYS.LEGACY_PREFS);
+      console.log('[NotificationService] Cleaned up legacy notification prefs');
+
+      const config = getProductionConfig();
+      if (config.isProduction) {
+        logProductionMetric('data', 'notification_prefs_migrated', {
+          hadLegacyData: true,
+          migratedToUserScoped: isCurrentDefault,
+        });
+      }
+    } catch (error) {
+      console.warn('[NotificationService] Legacy migration error (non-fatal):', error);
     }
   }
 
@@ -152,8 +223,13 @@ class NotificationServiceClass {
   // ============================================================================
 
   private async registerPushToken(): Promise<string | null> {
+    const config = getProductionConfig();
+
     if (!Device.isDevice) {
       console.warn('[NotificationService] Push notifications require a physical device');
+      if (config.isProduction) {
+        logProductionMetric('error', 'push_registration_failed', { reason: 'not_physical_device' });
+      }
       return null;
     }
 
@@ -168,12 +244,18 @@ class NotificationServiceClass {
       
       if (finalStatus !== 'granted') {
         console.warn('[NotificationService] Permission not granted');
+        if (config.isProduction) {
+          logProductionMetric('data', 'push_permission_denied', { existingStatus, finalStatus });
+        }
         return null;
       }
 
       const projectId = (Constants as any).expoConfig?.extra?.eas?.projectId;
       if (!projectId) {
         console.warn('[NotificationService] EAS Project ID not found');
+        if (config.isProduction) {
+          logProductionMetric('error', 'push_registration_failed', { reason: 'no_project_id' });
+        }
         return null;
       }
 
@@ -186,9 +268,16 @@ class NotificationServiceClass {
         await this.savePushTokenToBackend(token);
       }
 
+      if (config.isProduction) {
+        logProductionMetric('data', 'push_token_obtained', { platform: Platform.OS });
+      }
+
       return token;
     } catch (error) {
       console.error('[NotificationService] Push registration failed:', error);
+      if (config.isProduction) {
+        logProductionMetric('error', 'push_registration_failed', { error: String(error) });
+      }
       return null;
     }
   }
@@ -280,12 +369,20 @@ class NotificationServiceClass {
       return null;
     }
 
+    const hasExistingSchedule =
+      prefs.scheduledCheckInTime === time &&
+      (
+        (prefs.scheduledCheckInIds && prefs.scheduledCheckInIds.length > 0) ||
+        !!prefs.scheduledCheckInId
+      );
+
     // Check if already scheduled for this time (idempotent)
-    if (!forceReschedule && prefs.scheduledCheckInTime === time && prefs.scheduledCheckInId) {
+    if (!forceReschedule && hasExistingSchedule) {
       console.log('[NotificationService] Check-in reminder already scheduled for', time);
-      return prefs.scheduledCheckInId;
+      return prefs.scheduledCheckInId ?? prefs.scheduledCheckInIds?.[0] ?? null;
     }
 
+    const scheduledIds: string[] = [];
     try {
       // Cancel existing check-in reminder if any
       await this.cancelCheckInReminder();
@@ -293,27 +390,48 @@ class NotificationServiceClass {
       // Parse the time
       const { hour, minute } = this.parseTimeString(time);
 
-      // Schedule new reminder
-      const id = await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Daily Check-in Time! 💪',
-          body: 'How are you feeling today? Complete your check-in to get your personalized plan.',
-          data: { type: 'checkin_reminder', screen: '/checkin' },
-          sound: true,
-        },
-        trigger: { hour, minute, repeats: true },
-      });
+      // Schedule the next N reminders explicitly so the first one never fires immediately
+      const upcomingDates = this.getUpcomingCheckInDates(hour, minute, CHECKIN_SCHEDULE_WINDOW_DAYS);
+
+      for (const date of upcomingDates) {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Daily Check-in Time! 💪',
+            body: 'How are you feeling today? Complete your check-in to get your personalized plan.',
+            data: { type: 'checkin_reminder', screen: '/checkin' },
+            sound: true,
+          },
+          trigger: date,
+        });
+        scheduledIds.push(id);
+      }
 
       // Save the scheduled state
       await this.savePreferences({
         scheduledCheckInTime: time,
-        scheduledCheckInId: id,
+        scheduledCheckInId: scheduledIds[0],
+        scheduledCheckInIds: scheduledIds,
       });
 
-      console.log(`[NotificationService] Check-in reminder scheduled for ${hour}:${String(minute).padStart(2, '0')}`);
-      return id;
+      console.log(
+        `[NotificationService] Scheduled ${scheduledIds.length} check-in reminders starting ${upcomingDates[0].toISOString()}`
+      );
+      return scheduledIds[0] ?? null;
     } catch (error) {
       console.error('[NotificationService] Failed to schedule check-in reminder:', error);
+      // Best-effort cleanup if scheduling partially succeeded
+      try {
+        for (const id of scheduledIds) {
+          await Notifications.cancelScheduledNotificationAsync(id);
+        }
+        await this.savePreferences({
+          scheduledCheckInTime: undefined,
+          scheduledCheckInIds: [],
+          scheduledCheckInId: undefined,
+        });
+      } catch (cleanupError) {
+        console.warn('[NotificationService] Cleanup after scheduling failure failed:', cleanupError);
+      }
       return null;
     }
   }
@@ -326,8 +444,12 @@ class NotificationServiceClass {
       const prefs = await this.getPreferences();
       
       // Cancel by stored ID if available
-      if (prefs.scheduledCheckInId) {
-        await Notifications.cancelScheduledNotificationAsync(prefs.scheduledCheckInId);
+      const idsToCancel = [
+        ...(prefs.scheduledCheckInIds ?? []),
+        ...(prefs.scheduledCheckInId ? [prefs.scheduledCheckInId] : []),
+      ];
+      for (const id of idsToCancel) {
+        await Notifications.cancelScheduledNotificationAsync(id);
       }
 
       // Also cancel any with matching type (cleanup)
@@ -342,6 +464,7 @@ class NotificationServiceClass {
       await this.savePreferences({
         scheduledCheckInTime: undefined,
         scheduledCheckInId: undefined,
+        scheduledCheckInIds: [],
       });
 
       console.log('[NotificationService] Check-in reminder cancelled');
@@ -468,8 +591,70 @@ class NotificationServiceClass {
   // ============================================================================
 
   /**
+   * Generate a unique key for a milestone to track if it was already notified.
+   * - streak: 'streak_7', 'streak_14', 'streak_30'
+   * - weight_goal: 'weight_goal_75.0' (rounded to 1 decimal)
+   * - plan_completed: 'plan_completed_2025-01-15' (by date)
+   */
+  private getMilestoneKey(type: 'streak' | 'weight_goal' | 'plan_completed', details?: any): string {
+    switch (type) {
+      case 'streak':
+        return `streak_${details?.days || 7}`;
+      case 'weight_goal':
+        return `weight_goal_${Number(details?.weight || 0).toFixed(1)}`;
+      case 'plan_completed':
+        return `plan_completed_${details?.date || new Date().toISOString().split('T')[0]}`;
+      default:
+        return `${type}_${Date.now()}`;
+    }
+  }
+
+  /**
+   * Check if a milestone was already notified
+   */
+  async wasMilestoneNotified(type: 'streak' | 'weight_goal' | 'plan_completed', details?: any): Promise<boolean> {
+    const prefs = await this.getPreferences();
+    const key = this.getMilestoneKey(type, details);
+    return (prefs.notifiedMilestones || []).includes(key);
+  }
+
+  /**
+   * Mark a milestone as notified to prevent duplicate notifications
+   */
+  private async markMilestoneNotified(type: 'streak' | 'weight_goal' | 'plan_completed', details?: any): Promise<void> {
+    const prefs = await this.getPreferences();
+    const key = this.getMilestoneKey(type, details);
+    const notified = prefs.notifiedMilestones || [];
+    
+    if (!notified.includes(key)) {
+      // Keep only last 100 milestone keys to prevent unbounded growth
+      const updated = [...notified, key].slice(-100);
+      await this.savePreferences({ notifiedMilestones: updated });
+    }
+  }
+
+  /**
+   * Reset notified milestones for a specific type (e.g., when user sets new goal)
+   */
+  async resetMilestoneTracking(type?: 'streak' | 'weight_goal' | 'plan_completed'): Promise<void> {
+    const prefs = await this.getPreferences();
+    const notified = prefs.notifiedMilestones || [];
+    
+    if (!type) {
+      // Reset all
+      await this.savePreferences({ notifiedMilestones: [] });
+    } else {
+      // Reset only the specified type
+      const filtered = notified.filter(key => !key.startsWith(`${type}_`));
+      await this.savePreferences({ notifiedMilestones: filtered });
+    }
+    console.log(`[NotificationService] Milestone tracking reset for: ${type || 'all'}`);
+  }
+
+  /**
    * Send a milestone notification (one-off, immediate).
    * These are for achievements like streaks, weight goals, etc.
+   * Includes deduplication - won't send the same milestone twice.
    */
   async sendMilestoneNotification(
     type: 'streak' | 'weight_goal' | 'plan_completed',
@@ -479,6 +664,13 @@ class NotificationServiceClass {
     
     if (!prefs.milestonesEnabled) {
       console.log('[NotificationService] Milestone notifications disabled, skipping');
+      return;
+    }
+
+    // Check if already notified (deduplication)
+    const alreadyNotified = await this.wasMilestoneNotified(type, details);
+    if (alreadyNotified) {
+      console.log(`[NotificationService] Milestone already notified, skipping: ${this.getMilestoneKey(type, details)}`);
       return;
     }
 
@@ -509,6 +701,9 @@ class NotificationServiceClass {
         },
         trigger: null, // Immediate
       });
+
+      // Mark as notified to prevent duplicates
+      await this.markMilestoneNotified(type, details);
 
       console.log(`[NotificationService] Milestone notification sent: ${type}`);
     } catch (error) {
@@ -593,6 +788,8 @@ class NotificationServiceClass {
   private async subscribeToSupabaseNotifications(): Promise<void> {
     if (!this.supabaseClient || !this.currentUserId) return;
 
+    const config = getProductionConfig();
+
     try {
       // First, fetch any undelivered notifications
       await this.fetchAndDeliverSupabaseNotifications();
@@ -613,11 +810,25 @@ class NotificationServiceClass {
             await this.deliverSupabaseNotification(payload.new);
           }
         )
-        .subscribe();
+        .subscribe((status: string) => {
+          if (status === 'SUBSCRIBED') {
+            console.log('[NotificationService] Subscribed to Supabase notifications');
+            if (config.isProduction) {
+              logProductionMetric('data', 'supabase_notification_subscribed', { status });
+            }
+          } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            console.error('[NotificationService] Supabase subscription failed:', status);
+            if (config.isProduction) {
+              logProductionMetric('error', 'supabase_notification_subscription_failed', { status });
+            }
+          }
+        });
 
-      console.log('[NotificationService] Subscribed to Supabase notifications');
     } catch (error) {
       console.error('[NotificationService] Failed to subscribe to Supabase notifications:', error);
+      if (config.isProduction) {
+        logProductionMetric('error', 'supabase_notification_subscription_error', { error: String(error) });
+      }
     }
   }
 
@@ -872,6 +1083,9 @@ class NotificationServiceClass {
    * Sync notification schedules with user preferences.
    * This is called when user data changes, but it's IDEMPOTENT.
    * It will NOT reschedule if times haven't changed.
+   * 
+   * Also tops up the check-in reminder queue if running low (e.g., user
+   * hasn't opened the app in a while and the 30-day queue is depleted).
    */
   async syncWithUserPreferences(
     user: User,
@@ -879,14 +1093,53 @@ class NotificationServiceClass {
   ): Promise<void> {
     console.log('[NotificationService] Syncing with user preferences');
 
-    // Schedule check-in reminder if user has set a time
+    // Check if check-in reminder queue needs topping up
     if (user.checkInReminderTime) {
-      await this.scheduleCheckInReminder(user.checkInReminderTime);
+      const needsTopUp = await this.checkIfQueueNeedsTopUp();
+      if (needsTopUp) {
+        console.log('[NotificationService] Check-in queue running low, forcing reschedule');
+        await this.scheduleCheckInReminder(user.checkInReminderTime, true); // force reschedule
+      } else {
+        await this.scheduleCheckInReminder(user.checkInReminderTime);
+      }
     }
 
     // Schedule workout reminder if user has set a preferred time
     if (user.preferredTrainingTime) {
       await this.scheduleWorkoutReminder(user.preferredTrainingTime, hasVerifiedPlan);
+    }
+  }
+
+  /**
+   * Check if the check-in reminder queue is running low and needs topping up.
+   * Returns true if there are fewer than MIN_CHECKIN_QUEUE_SIZE reminders scheduled.
+   */
+  private async checkIfQueueNeedsTopUp(): Promise<boolean> {
+    try {
+      const prefs = await this.getPreferences();
+      
+      // If no scheduled IDs, queue is empty
+      if (!prefs.scheduledCheckInIds || prefs.scheduledCheckInIds.length === 0) {
+        // Check if there's at least a legacy single ID
+        if (!prefs.scheduledCheckInId) {
+          return true; // No reminders at all
+        }
+      }
+
+      // Count how many scheduled check-in reminders still exist
+      const all = await Notifications.getAllScheduledNotificationsAsync();
+      const checkInReminders = all.filter(
+        (n: (typeof all)[number]) => 
+          (n.content?.data as Record<string, unknown> | undefined)?.type === 'checkin_reminder'
+      );
+
+      const count = checkInReminders.length;
+      console.log(`[NotificationService] Check-in queue size: ${count}`);
+
+      return count < MIN_CHECKIN_QUEUE_SIZE;
+    } catch (error) {
+      console.warn('[NotificationService] Error checking queue size:', error);
+      return false; // Don't force reschedule on error
     }
   }
 
@@ -923,6 +1176,25 @@ class NotificationServiceClass {
     return { hour, minute };
   }
 
+  private getUpcomingCheckInDates(hour: number, minute: number, count: number): Date[] {
+    const dates: Date[] = [];
+    const now = new Date();
+    const first = new Date(now);
+    first.setSeconds(0, 0);
+    first.setHours(hour, minute, 0, 0);
+    if (first <= now) {
+      first.setDate(first.getDate() + 1);
+    }
+
+    for (let i = 0; i < Math.max(1, count); i++) {
+      const occurrence = new Date(first);
+      occurrence.setDate(first.getDate() + i);
+      dates.push(occurrence);
+    }
+
+    return dates;
+  }
+
   /**
    * Cancel all scheduled notifications by type
    */
@@ -951,6 +1223,6 @@ class NotificationServiceClass {
 // Export singleton instance
 export const NotificationService = new NotificationServiceClass();
 
-// Export types for external use
-export type { NotificationPreferences, SupabaseNotification, InAppNotification };
+
+
 

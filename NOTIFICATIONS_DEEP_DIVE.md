@@ -1,5 +1,18 @@
 # Notifications Deep-Dive Analysis
 
+> ⚠️ **OUTDATED DOCUMENT** - Last updated: Pre-November 2025  
+> This document describes the **legacy notification system** that has been replaced.  
+> For the current architecture, see **[NOTIFICATIONS_ARCHITECTURE.md](./NOTIFICATIONS_ARCHITECTURE.md)**.
+>
+> **Key changes since this doc:**
+> - `utils/notifications.ts` and `utils/notification-storage.ts` have been **deleted**
+> - All notification logic now flows through `services/NotificationService.ts`
+> - Preferences are now **user-scoped** (not global)
+> - Milestone notifications have **deduplication** to prevent spam
+> - Supabase `user_notifications` table enables backend-driven notifications
+
+---
+
 > **Generated:** Analysis of the current notification system implementation.  
 > **Purpose:** Understand how notifications work today, what triggers them, and identify potential issues.
 

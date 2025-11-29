@@ -1,26 +1,26 @@
 import React, { useEffect, useMemo, useCallback, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator, Animated } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator, Animated, Alert } from 'react-native';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { Activity, TrendingUp, Dumbbell, Plus, ChevronRight, RefreshCw, Flame } from 'lucide-react-native';
+import { Activity, TrendingUp, Dumbbell, Plus, ChevronRight, RefreshCw, Flame, Gamepad2 } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { CircularProgress } from '@/components/ui/CircularProgress';
-import { useUserStore } from '@/hooks/useUserStore';
+import { useUserStore, REDO_CHECKIN_LIMIT } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
 import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription-helpers';
 import { getGameStats, GameStats } from '@/utils/game-storage';
 import { isGenerationInProgress } from '@/services/plan-generation';
-import { getBasePlanJobState, BasePlanStatus } from '@/services/backgroundPlanGeneration';
+import { getBasePlanJobState, BasePlanStatus, validatePendingJobState, isBackgroundGenerationInProgress } from '@/services/backgroundPlanGeneration';
 
 export default function HomeScreen() {
-  const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate, getCurrentBasePlan, basePlans } = useUserStore();
+  const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate, getCurrentBasePlan, basePlans, getCheckinCountForDate } = useUserStore();
   const auth = useAuth();
   const { data: profile, isLoading: isProfileLoading } = useProfile();
   const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
@@ -176,6 +176,7 @@ export default function HomeScreen() {
         status: jobState.status,
         verified: jobState.verified,
         hasBasePlan,
+        isGenerationRunning: isBackgroundGenerationInProgress(),
       });
       
       // If plan is ready but not verified, show plan preview first
@@ -185,11 +186,21 @@ export default function HomeScreen() {
         return true;
       }
       
-      // If plan is pending, redirect to plan building screen
+      // If plan is pending, VALIDATE that generation is actually running
+      // This prevents being stuck on plan-building screen due to stale state
       if (jobState.status === 'pending' && onboardingCompleteFlag) {
-        console.log('[Home] Plan generation pending - redirecting to plan building');
-        router.replace('/plan-building');
-        return true;
+        const isPendingValid = await validatePendingJobState(userId);
+        
+        if (isPendingValid) {
+          console.log('[Home] Plan generation pending AND valid - redirecting to plan building');
+          router.replace('/plan-building');
+          return true;
+        } else {
+          console.log('[Home] Pending state was invalid/stale - staying on home');
+          // The validatePendingJobState function already reset the state
+          // User can now proceed normally
+          return false;
+        }
       }
       
       return false;
@@ -199,17 +210,19 @@ export default function HomeScreen() {
     checkJobState().then(redirected => {
       if (redirected) return;
       
-      // Second check: if onboarded but no base plan, redirect to generate one
-      // This ensures the app is not usable without a base plan
+      // Second check: if onboarded but no base plan, redirect to onboarding
+      // to let them start fresh (the old plan-building state might be corrupted)
       // BUT: Don't redirect if generation is already in progress (prevents duplicate calls)
       if (onboardingCompleteFlag && !hasBasePlan) {
-        if (isGenerationInProgress()) {
+        if (isGenerationInProgress() || isBackgroundGenerationInProgress()) {
           console.log('[Home] User has no base plan, but generation is already in progress - redirecting to plan building');
           router.replace('/plan-building');
           return;
         }
-        console.log('[Home] User has no base plan, redirecting to plan building');
-        router.replace('/plan-building');
+        // No base plan and no generation running - something went wrong
+        // Redirect to onboarding to start fresh
+        console.log('[Home] User has no base plan and no generation running - redirecting to onboarding');
+        router.replace('/onboarding');
         return;
       }
     });
@@ -289,11 +302,22 @@ export default function HomeScreen() {
   };
 
   const handleResetCheckin = useCallback(() => {
+    const todayKey = new Date().toISOString().split('T')[0];
+    const redoCountToday = getCheckinCountForDate(todayKey);
+    if (redoCountToday >= REDO_CHECKIN_LIMIT) {
+      Alert.alert(
+        'Re-do limit reached',
+        "You've hit your re-do check-ins for the day. Note: The mini-game is only available on your first check-in. Try again tomorrow!",
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
     router.push({ pathname: '/checkin', params: { isRedo: 'true' } });
-  }, []);
+  }, [getCheckinCountForDate]);
 
   const handleViewPlan = () => {
     if (todayPlan) {
@@ -336,6 +360,7 @@ export default function HomeScreen() {
   const today = new Date().toISOString().split('T')[0];
   const playedToday = gameStats?.todayDate === today && gameStats?.todayScore !== null;
   const highScore = gameStats?.highScore || 0;
+  const todaysScore = playedToday ? gameStats?.todayScore ?? 0 : null;
 
   return (
     <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
@@ -467,7 +492,7 @@ export default function HomeScreen() {
                         Your personalized roadmap is ready.
                       </Text>
 
-                      <View style={{ flexDirection: 'row', marginTop: 20, gap: 10 }}>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 20, gap: 10 }}>
                         <View style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                           <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.25)', alignItems: 'center', justifyContent: 'center' }}>
                             <Dumbbell color="#fff" size={16} fill="rgba(255,255,255,0.2)" />
@@ -487,11 +512,19 @@ export default function HomeScreen() {
                             <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 11, fontWeight: '500' }}>{todayPlan?.nutrition?.protein_g || 0}g protein</Text>
                           </View>
                         </View>
-                      </View>
 
-                      {playedToday && (
-                        <Text style={styles.scoreText}>💪 Score - {gameStats?.todayScore}</Text>
-                      )}
+                        {todaysScore !== null && (
+                          <View style={{ flex: 1, minWidth: 140, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                            <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.25)', alignItems: 'center', justifyContent: 'center' }}>
+                              <Gamepad2 color="#fff" size={16} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Today's Score</Text>
+                              <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 11, fontWeight: '500' }}>{todaysScore}</Text>
+                            </View>
+                          </View>
+                        )}
+                      </View>
                     </View>
                   </Card>
                 </TouchableOpacity>

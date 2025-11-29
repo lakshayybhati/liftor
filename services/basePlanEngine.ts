@@ -471,6 +471,7 @@ export async function generateBasePlan(user: User): Promise<WeeklyBasePlan> {
             isLocked: false,
             isGenerating: false,
             generationProgress: 7,
+            editCounts: {},
           };
           
           console.log('\n═══════════════════════════════════════════════════════════');
@@ -485,8 +486,13 @@ export async function generateBasePlan(user: User): Promise<WeeklyBasePlan> {
           console.error(`❌ [Engine] Attempt ${attempt} failed:`, error);
           
           if (error instanceof BasePlanGenerationError) {
-            lastError = error;
-            lastError.attempt = attempt;
+            // Create new error with attempt number since attempt is readonly
+            lastError = new BasePlanGenerationError(
+              error.message,
+              error.stage,
+              error.details,
+              attempt
+            );
           } else {
             lastError = new BasePlanGenerationError(
               (error as Error).message || 'Unknown error during plan generation',

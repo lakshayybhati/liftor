@@ -26,7 +26,6 @@ export const testUser: User = {
   supplements: ['Creatine', 'Whey Protein'],
   personalGoals: ['Bigger arms', 'Better endurance'],
   perceivedLacks: ['Protein intake', 'Recovery'],
-  preferredExercises: ['Bench Press', 'Squats'],
   avoidExercises: ['Deadlifts'],
   sessionLength: 60,
   mealCount: 5,

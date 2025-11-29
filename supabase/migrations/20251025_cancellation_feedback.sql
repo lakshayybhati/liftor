@@ -10,16 +10,39 @@ create table if not exists public.cancellation_feedback (
 
 alter table public.cancellation_feedback enable row level security;
 
--- Users can insert their own feedback
-create policy if not exists "cxl_feedback_insert_own"
-  on public.cancellation_feedback for insert
-  to authenticated
-  with check (user_id = auth.uid());
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'cancellation_feedback'
+      and policyname = 'cxl_feedback_insert_own'
+  ) then
+    create policy "cxl_feedback_insert_own"
+      on public.cancellation_feedback for insert
+      to authenticated
+      with check (user_id = auth.uid());
+  end if;
+end
+$$;
 
 -- Users can read their own feedback
-create policy if not exists "cxl_feedback_select_own"
-  on public.cancellation_feedback for select
-  using (user_id = auth.uid());
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'cancellation_feedback'
+      and policyname = 'cxl_feedback_select_own'
+  ) then
+    create policy "cxl_feedback_select_own"
+      on public.cancellation_feedback for select
+      using (user_id = auth.uid());
+  end if;
+end
+$$;
 
 -- Minimal grants; RLS restricts access
 revoke all on public.cancellation_feedback from anon, authenticated;

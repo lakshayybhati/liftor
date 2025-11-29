@@ -47,6 +47,15 @@ export default function PlanPreviewScreen() {
   const navigation = useNavigation();
   const [isActivatingPlan, setIsActivatingPlan] = useState(false);
 
+  const MAX_EDITS_PER_DAY = 2;
+
+  const getDayEditCount = (dayKey: string) => {
+    // Optional per-day edit tracking stored on the base plan
+    // Falls back to 0 when not present (older plans)
+    const editCounts = basePlan?.editCounts as Record<string, number> | undefined;
+    return editCounts?.[dayKey] ?? 0;
+  };
+
   // Reset expansion when day changes
   useEffect(() => {
     setExpandedWorkout(false);
@@ -222,9 +231,15 @@ export default function PlanPreviewScreen() {
       console.warn('[PlanPreview] No base plan found, waiting for state propagation...');
 
       let attempts = 0;
-      const maxAttempts = 5;
+      const maxAttempts = 20; // Increased to 10 seconds (20 * 500ms) to prevent premature redirects
 
       const checkInterval = setInterval(() => {
+        // Don't count attempts while store is still loading
+        if (storeLoading) {
+          console.log('[PlanPreview] Store still loading, waiting...');
+          return;
+        }
+
         attempts++;
         const planNow = getCurrentBasePlan();
         console.log(`[PlanPreview] Attempt ${attempts}/${maxAttempts} - Plan exists:`, planNow ? 'YES' : 'NO');
@@ -415,7 +430,16 @@ export default function PlanPreviewScreen() {
   };
 
   const handleEditDay = () => {
-    setShowEditInput(!showEditInput);
+    const currentEditCount = getDayEditCount(selectedDay);
+    if (currentEditCount >= MAX_EDITS_PER_DAY) {
+      Alert.alert(
+        'Edit Limit Reached',
+        `You can only edit each day ${MAX_EDITS_PER_DAY} times per plan.`
+      );
+      return;
+    }
+
+    setShowEditInput(true);
     setEditText('');
   };
 
@@ -942,7 +966,7 @@ Please modify the plan based on their request and return ONLY the updated day da
           <View style={styles.header}>
             <View style={styles.headerTopRow}>
               <View>
-                <Text style={styles.headerWelcome}>Welcome back,</Text>
+                <Text style={styles.headerWelcome}>Welcome</Text>
                 <Text style={styles.headerTitle}>Your Weekly Plan</Text>
               </View>
               <View style={styles.headerIconContainer}>
@@ -996,6 +1020,18 @@ Please modify the plan based on their request and return ONLY the updated day da
                 Want to make changes to this day? Describe what you&apos;d like to modify.
               </Text>
 
+              {/* Edit limit helper text */}
+              {!isHistoricalView && (
+                <Text style={styles.editLimitText}>
+                  You can edit each day up to {MAX_EDITS_PER_DAY} times per plan.{' '}
+                  {(() => {
+                    const used = getDayEditCount(selectedDay);
+                    const remaining = Math.max(0, MAX_EDITS_PER_DAY - used);
+                    return `Remaining edits for this day: ${remaining}.`;
+                  })()}
+                </Text>
+              )}
+
               {showEditInput && (
                 <View style={styles.editInputContainer}>
                   <TextInput
@@ -1003,7 +1039,15 @@ Please modify the plan based on their request and return ONLY the updated day da
                     placeholder="e.g., Replace squats with lunges, add more protein to breakfast, reduce workout time to 30 minutes..."
                     placeholderTextColor={theme.color.muted}
                     value={editText}
-                    onChangeText={setEditText}
+                    onChangeText={(text) => {
+                      const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+                      if (words <= 50) {
+                        setEditText(text);
+                      } else {
+                        const limited = text.trim().split(/\s+/).slice(0, 50).join(' ');
+                        setEditText(limited);
+                      }
+                    }}
                     multiline
                     numberOfLines={4}
                     textAlignVertical="top"
@@ -1066,12 +1110,17 @@ Please modify the plan based on their request and return ONLY the updated day da
 
               {!showEditInput && (
                 <Button
-                  title="Edit This Day"
+                  title={
+                    getDayEditCount(selectedDay) >= MAX_EDITS_PER_DAY
+                      ? 'Edit Limit Reached'
+                      : 'Edit This Day'
+                  }
                   onPress={handleEditDay}
                   variant="outline"
                   size="small"
                   style={styles.editButton}
                   icon={<Edit3 size={16} color={theme.color.accent.primary} />}
+                  disabled={getDayEditCount(selectedDay) >= MAX_EDITS_PER_DAY}
                 />
               )}
             </Card>
@@ -1627,6 +1676,13 @@ const styles = StyleSheet.create({
   editButton: {
     alignSelf: 'center',
     paddingHorizontal: theme.space.xl,
+  },
+  editLimitText: {
+    fontSize: 12,
+    color: theme.color.muted,
+    textAlign: 'center',
+    marginTop: theme.space.sm,
+    fontStyle: 'italic',
   },
   progressContainer: {
     marginVertical: theme.space.md,

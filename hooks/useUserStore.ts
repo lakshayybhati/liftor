@@ -62,7 +62,8 @@ const FOOD_LOG_STORAGE_KEY = 'Liftor_food_log';
 const EXTRAS_STORAGE_KEY = 'Liftor_extras';
 const COMPLETIONS_STORAGE_KEY = 'Liftor_plan_completions';
 
-export const DAILY_CHECKIN_LIMIT = 2;
+// Users can redo the same day's check-in twice after the initial submission
+export const REDO_CHECKIN_LIMIT = 2;
 export const CHECKIN_LIMIT_ERROR = 'CHECKIN_LIMIT_REACHED';
 
 // Helper to namespace keys per-authenticated user to avoid cross-account leakage
@@ -493,7 +494,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.log('[UserStore] ✅ Background sync completed');
     } catch (error) {
       console.error('Error loading user data:', error);
-      // Don't set isLoading(false) again here - it's already set after local data load
+      // Ensure loading state is cleared even on errors to prevent stuck loading screens
+      setIsLoading(false);
     }
   }, [uid, supabase]); // KEYS are derived from uid, so uid is sufficient
   // Queue processing for offline ops
@@ -877,7 +879,17 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
   // Reload scoped data whenever the authenticated user changes
   useEffect(() => {
-    if (isAuthLoading || !uid) return; // prevent anon→uid oscillation triggers during auth bootstrap
+    // Wait for auth to complete before making any decisions
+    if (isAuthLoading) return;
+    
+    // If auth is done but no uid (not logged in), mark loading as complete
+    // This prevents the app from being stuck on loading screen for logged-out users
+    if (!uid) {
+      console.log('[UserStore] No uid (user not logged in), marking load complete');
+      setIsLoading(false);
+      return;
+    }
+    
     // Reset in-memory state immediately to avoid showing previous user's data
     setUser(null);
     setCheckins([]);
@@ -929,12 +941,14 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   const addCheckin = useCallback(async (checkin: CheckinData) => {
     try {
       const dateKey = checkin.date;
-      const existingCount = checkinCounts[dateKey] ?? 0;
-      if (existingCount >= DAILY_CHECKIN_LIMIT) {
+      const totalSubmissionsForDate = checkinCounts[dateKey] ?? 0;
+      // Use checkinCounts to determine if this is a redo (not checkins array, which may have been cleared by deleteTodayPlan)
+      const isRedoSubmission = totalSubmissionsForDate > 0;
+      const redoCountForDate = Math.max(0, totalSubmissionsForDate - 1);
+
+      if (isRedoSubmission && redoCountForDate >= REDO_CHECKIN_LIMIT) {
         throw new Error(CHECKIN_LIMIT_ERROR);
       }
-
-      const existingIdx = checkins.findIndex(c => c.date === checkin.date);
       // Robust upsert: filter out ANY existing check-ins for this date first
       // This prevents duplicates even if multiple exist due to race conditions or bugs
       const otherCheckins = checkins.filter(c => c.date !== checkin.date);
@@ -948,10 +962,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       setCheckins(updatedCheckins);
       await AsyncStorage.setItem(KEYS.CHECKINS, JSON.stringify(updatedCheckins));
 
-      // Track how many check-ins happened each day (for redo limit enforcement)
+      // Track total submissions per day so we can derive redo counts (initial + re-dos)
+      // Always increment count for each submission (don't reset even if checkin was deleted)
       const updatedCounts = {
         ...checkinCounts,
-        [dateKey]: existingCount + 1,
+        [dateKey]: totalSubmissionsForDate + 1,
       };
       setCheckinCounts(updatedCounts);
       await AsyncStorage.setItem(KEYS.CHECKIN_COUNTS, JSON.stringify(updatedCounts));
@@ -1024,7 +1039,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Log success in production
       const config = getProductionConfig();
       if (config.isProduction) {
-        logProductionMetric('data', 'checkin_added', { date: checkin.date, isRedo: existingIdx >= 0 });
+        logProductionMetric('data', 'checkin_added', { date: checkin.date, isRedo: isRedoSubmission });
       }
     } catch (error) {
       console.error('Error saving checkin:', error);
@@ -1309,7 +1324,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
               isLocked: (inserted as any).is_locked,
               editCount: normalizedNewPlan.editCount,
             } as any;
-            const merged = [...lockedPreviousPlans, serverPlan];
+            const merged = [...deactivatedPreviousPlans, serverPlan];
             setBasePlans(merged);
             await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(merged));
             planSnapshot = serverPlan;
@@ -1864,13 +1879,28 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         return false;
       }
 
+      // Enforce per-day edit limit (2 edits per day per plan)
+      const currentEditCounts = currentBasePlan.editCounts || {};
+      const existingCount = currentEditCounts[dayKey] ?? 0;
+      const MAX_EDITS_PER_DAY = 2;
+      if (existingCount >= MAX_EDITS_PER_DAY) {
+        console.warn(`[UserStore] Edit limit reached for ${dayKey} (count=${existingCount})`);
+        return false;
+      }
+
+      const updatedEditCounts = {
+        ...currentEditCounts,
+        [dayKey]: existingCount + 1,
+      };
+
       // Create updated base plan with the modified day
       const updatedBasePlan = {
         ...currentBasePlan,
         days: {
           ...currentBasePlan.days,
           [dayKey]: dayData
-        }
+        },
+        editCounts: updatedEditCounts,
       };
 
       // Update the base plans array
@@ -1959,7 +1989,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   }, [checkins]);
 
   const getCheckinCountForDate = useCallback((date: string) => {
-    return checkinCounts[date] ?? 0;
+    const totalSubmissions = checkinCounts[date] ?? 0;
+    return totalSubmissions > 0 ? totalSubmissions - 1 : 0;
   }, [checkinCounts]);
 
   const getTodayPlan = useCallback(() => {
@@ -2441,6 +2472,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         AsyncStorage.removeItem(KEYS.COMPLETIONS),
         AsyncStorage.removeItem(KEYS.CHECKIN_COUNTS),
         AsyncStorage.removeItem(scopedKey('Liftor_food_ops', uid)),
+        // Clear additional user-scoped data
+        AsyncStorage.removeItem(scopedKey('Liftor_basePlanJobState', uid)),
+        AsyncStorage.removeItem(scopedKey('Liftor_game_stats', uid)),
+        AsyncStorage.removeItem(scopedKey('Liftor_inAppNotifications_v2', uid)),
+        AsyncStorage.removeItem(scopedKey('Liftor_deliveredSupabaseNotifs', uid)),
       ]);
 
       console.log('All data cleared successfully (subscription data preserved)');
@@ -2448,7 +2484,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.error('Error clearing data:', error);
       throw error;
     }
-  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, KEYS.COMPLETIONS, uid]);
+  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, KEYS.COMPLETIONS, KEYS.CHECKIN_COUNTS, uid]);
 
   const value = useMemo(() => ({
     user,
@@ -2500,7 +2536,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     calculatePlanStats,
     setLastBasePlanGeneratedAt,
     deleteBasePlan,
-  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, deleteTodayPlan, addBasePlan, updateBasePlanDay, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getCheckinCountForDate, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, recalculateAdherence, clearAllData, syncLocalToBackend, loadUserData, processFoodOpsQueue, hydrateFromDatabase, canRegenerateBasePlan, getTimeUntilNextRegeneration, renameBasePlan, activateBasePlan, calculatePlanStats, setLastBasePlanGeneratedAt, deleteBasePlan]);
+  }), [user, checkins, plans, basePlans, foodLogs, extras, isLoading, updateUser, addCheckin, addPlan, deleteTodayPlan, addBasePlan, updateBasePlanDay, updateWeeklyBasePlan, getCurrentBasePlan, getRecentCheckins, getTodayCheckin, getCheckinCountForDate, getTodayPlan, getTodayFoodLog, getTodayExtras, addFoodEntry, addExtraFood, removeExtraFood, getNutritionProgress, getStreak, getWeightData, getLatestWeight, getWeightProgress, getCompletedMealsForDate, getCompletedExercisesForDate, getCompletedSupplementsForDate, toggleMealCompleted, toggleExerciseCompleted, toggleSupplementCompleted, recalculateAdherence, clearAllData, syncLocalToBackend, loadUserData, processFoodOpsQueue, hydrateFromDatabase, canRegenerateBasePlan, getTimeUntilNextRegeneration, renameBasePlan, activateBasePlan, calculatePlanStats, setLastBasePlanGeneratedAt, deleteBasePlan]);
 
   return value;
 });

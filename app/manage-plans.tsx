@@ -307,7 +307,7 @@ export default function ManagePlansScreen() {
           </Text>
           <Button
             title="Go to Onboarding"
-            onPress={() => router.push('/onboarding/start')}
+            onPress={() => router.push('/onboarding')}
             style={styles.emptyButton}
           />
         </View>

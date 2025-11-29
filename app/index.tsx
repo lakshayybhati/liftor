@@ -1,30 +1,49 @@
-import { Redirect } from 'expo-router';
+import { Redirect, Stack } from 'expo-router';
 import React from 'react';
+import { ActivityIndicator, View, StyleSheet, Text } from 'react-native';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
 import { useUserStore } from '@/hooks/useUserStore';
+import { theme } from '@/constants/colors';
+
+function LoadingScreen({ message }: { message: string }) {
+  return (
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator size="large" color={theme.color.accent.primary} />
+      <Text style={styles.loadingText}>{message}</Text>
+    </View>
+  );
+}
 
 export default function Index() {
   const { session, isAuthLoading } = useAuth();
   const { data: profile, isLoading: isProfileLoading } = useProfile();
   const { user, isLoading: isUserLoading } = useUserStore();
 
-  // While auth state is loading, render nothing to avoid redirect loops
-  if (isAuthLoading) {
-    console.log('[Index] Auth loading...');
-    return null;
+  const showLoading = isAuthLoading || isProfileLoading || isUserLoading;
+  const loadingMessage = isAuthLoading
+    ? 'Checking your session...'
+    : 'Loading your personalized plan...';
+
+  if (showLoading) {
+    console.log('[Index] Waiting for auth/profile/user state to load...');
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false }} />
+        <LoadingScreen message={loadingMessage} />
+      </>
+    );
   }
 
   // If logged out, go to Login
   if (!session) {
     console.log('[Index] No session, redirecting to login');
-    return <Redirect href="/auth/login" />;
-  }
-
-  // New users → Onboarding (wait for both profile and local user to hydrate first)
-  if (isProfileLoading || isUserLoading) {
-    console.log('[Index] Loading profile or user data...');
-    return null;
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false }} />
+        <Redirect href="/auth/login" />
+      </>
+    );
   }
 
   const onboarded = Boolean(profile?.onboarding_complete) || Boolean(user?.onboardingComplete);
@@ -41,10 +60,35 @@ export default function Index() {
 
   if (!onboarded && !subscriptionActive) {
     console.log('[Index] User not onboarded and no active subscription, redirecting to onboarding');
-    return <Redirect href="/onboarding" />;
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false }} />
+        <Redirect href="/onboarding" />
+      </>
+    );
   }
 
   // Authenticated and onboarded → Home
   console.log('[Index] User authenticated and onboarded, redirecting to home');
-  return <Redirect href="/(tabs)/home" />;
+  return (
+    <>
+      <Stack.Screen options={{ headerShown: false }} />
+      <Redirect href="/(tabs)/home" />
+    </>
+  );
 }
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: theme.color.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  loadingText: {
+    marginTop: 16,
+    color: theme.color.ink,
+    fontSize: 16,
+  },
+});

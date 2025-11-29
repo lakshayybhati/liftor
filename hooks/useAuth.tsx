@@ -269,6 +269,14 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
               return true;
             }
             (global as any).__AUTH_LOG_ERROR__?.('Upsert after RLS denial failed', upErrFallback);
+            
+            // Detect stale session: user no longer exists in auth.users (FK violation 23503)
+            const isFkViolation = (upErrFallback as any)?.code === '23503' || /foreign key constraint/i.test(upErrFallback.message || '');
+            if (isFkViolation) {
+              console.warn('[Auth] User does not exist in auth.users (stale session). Signing out.');
+              try { await supabase.auth.signOut(); } catch {}
+              return false;
+            }
           } catch (e) {
             (global as any).__AUTH_LOG_ERROR__?.('Upsert attempt after RLS denial threw', e);
           }
@@ -297,6 +305,14 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         if (upErr) {
           (global as any).__AUTH_LOG_ERROR__?.('Profile creation error', upErr);
           logProductionMetric('error', 'profile_create_failed', { error: upErr.message, uid });
+          
+          // Detect stale session: user no longer exists in auth.users (FK violation 23503)
+          const isFkViolation = (upErr as any)?.code === '23503' || /foreign key constraint/i.test(upErr.message || '');
+          if (isFkViolation) {
+            console.warn('[Auth] User does not exist in auth.users (stale session). Signing out.');
+            try { await supabase.auth.signOut(); } catch {}
+            return false;
+          }
           
           // Retry on transient errors
           if (retries > 0) {

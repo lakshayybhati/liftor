@@ -246,6 +246,10 @@ export interface WeeklyBasePlan {
   isGenerating?: boolean;
   generationProgress?: number; // 1-7
   editCount?: number;
+  // Per-day edit counters to limit how often each day can be modified
+  editCounts?: {
+    [dayKey: string]: number;
+  };
   // Base Plan Management fields
   name?: string;              // User-editable name, defaults to "Plan - {date}"
   isActive?: boolean;         // Whether this plan is currently in use

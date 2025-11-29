@@ -15,7 +15,7 @@ import { runEnvironmentDiagnostics } from "@/utils/environment-diagnostics";
 import { validateProductionConfig, getProductionConfig } from "@/utils/production-config";
 import * as Notifications from 'expo-notifications';
 import { NotificationService } from '@/services/NotificationService';
-import { getBasePlanJobState } from '@/services/backgroundPlanGeneration';
+import { getBasePlanJobState, cleanupStaleJobStates } from '@/services/backgroundPlanGeneration';
 
 // Prevent splash screen from hiding automatically
 SplashScreen.preventAutoHideAsync().catch((err) => {
@@ -264,6 +264,7 @@ function NotificationsInit() {
 function RootLayoutNav() {
   return (
     <Stack screenOptions={{ headerBackTitle: "Back" }}>
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="onboarding" options={{ headerShown: false }} />
       <Stack.Screen name="paywall" options={{ headerShown: false }} />
@@ -276,6 +277,7 @@ function RootLayoutNav() {
       <Stack.Screen name="generating-base-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan" options={{ headerShown: true }} />
       <Stack.Screen name="history" options={{ headerShown: false }} />
+      <Stack.Screen name="notifications" options={{ headerShown: false }} />
       <Stack.Screen name="auth/login" options={{ headerShown: false }} />
       <Stack.Screen name="auth/signup" options={{ headerShown: false }} />
       <Stack.Screen name="auth/verify-otp" options={{ headerShown: true, title: 'Verify Code' }} />
@@ -329,6 +331,15 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       console.log('[App] Auth and user data loaded, preparing app');
       console.log('[App] Session exists:', !!session);
       
+      // Clean up any stale job states from previous sessions
+      // This prevents users from being stuck on plan-building screen
+      const userId = session?.user?.id ?? null;
+      cleanupStaleJobStates(userId).then(() => {
+        console.log('[App] Stale job states cleaned up');
+      }).catch((err) => {
+        console.warn('[App] Error cleaning up stale job states:', err);
+      });
+      
       // Small delay to ensure everything is mounted and state is stable
       const timer = setTimeout(() => {
         console.log('[App] ✅ App ready, hiding splash screen');
@@ -376,20 +387,8 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     );
   }
   
-  if (initError && __DEV__) {
-    // Show error banner in dev mode
-    return (
-      <>
-        <View style={{ backgroundColor: '#ff9800', padding: 8 }}>
-          <Text style={{ color: '#000', fontSize: 12, textAlign: 'center' }}>
-            {initError}
-          </Text>
-        </View>
-        {children}
-      </>
-    );
-  }
-
+  // Don't show error banner in UI - just log to console
+  // The app still works even if initialization was slow
   return <>{children}</>;
 }
 

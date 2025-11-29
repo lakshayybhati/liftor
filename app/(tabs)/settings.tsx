@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, Swi
 import { Image as ExpoImage } from 'expo-image';
 // Dynamic import of print/sharing to avoid build errors when modules are unavailable
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp, Bell, Pill } from 'lucide-react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp, Bell, Pill, Inbox } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { useUserStore } from '@/hooks/useUserStore';
 import { GOALS } from '@/constants/fitness';
@@ -25,6 +26,7 @@ export default function SettingsScreen() {
   const [notifyWhenAvailable, setNotifyWhenAvailable] = useState(false);
   const [showFaqs, setShowFaqs] = useState(false);
   const [allNotificationsEnabled, setAllNotificationsEnabled] = useState(true);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   // Handle case where auth context isn't ready yet
   if (!auth) {
@@ -81,6 +83,20 @@ export default function SettingsScreen() {
       } catch {}
     })();
   }, []);
+
+  // Refresh unread notification count on focus
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+      (async () => {
+        try {
+          const unreadCount = await NotificationService.getUnreadCount();
+          if (isActive) setUnreadNotificationCount(unreadCount);
+        } catch {}
+      })();
+      return () => { isActive = false; };
+    }, [])
+  );
 
   // Real subscription status via RevenueCat
   const [subscriptionInfo, setSubscriptionInfo] = useState<{ status: 'trial' | 'elite' | 'none'; label: string }>({ status: 'trial', label: 'Trial' });
@@ -502,6 +518,28 @@ export default function SettingsScreen() {
                 thumbColor={allNotificationsEnabled ? theme.color.accent.primary : theme.color.muted}
               />
             </View>
+
+            {/* Notification Center Link */}
+            <TouchableOpacity
+              style={styles.notificationCenterLink}
+              onPress={() => router.push('/notifications')}
+              activeOpacity={0.7}
+            >
+              <View style={styles.notificationCenterLeft}>
+                <Inbox size={20} color={theme.color.muted} />
+                <Text style={styles.notificationCenterText}>View Notification History</Text>
+              </View>
+              <View style={styles.notificationCenterRight}>
+                {unreadNotificationCount > 0 && (
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadBadgeText}>
+                      {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
+                    </Text>
+                  </View>
+                )}
+                <ChevronRight size={20} color={theme.color.muted} />
+              </View>
+            </TouchableOpacity>
           </Card>
 
           <Card style={styles.faqCard}>
@@ -981,6 +1019,42 @@ const styles = StyleSheet.create({
   notificationToggleLeft: {
     flex: 1,
     paddingRight: theme.space.sm,
+  },
+  notificationCenterLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: theme.space.md,
+    marginTop: theme.space.md,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.line,
+  },
+  notificationCenterLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.space.sm,
+  },
+  notificationCenterText: {
+    fontSize: 14,
+    color: theme.color.muted,
+  },
+  notificationCenterRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.space.xs,
+  },
+  unreadBadge: {
+    backgroundColor: theme.color.accent.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: theme.radius.pill,
+    minWidth: 22,
+    alignItems: 'center',
+  },
+  unreadBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#fff',
   },
   modalButton: {
     backgroundColor: theme.color.accent.primary,

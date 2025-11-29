@@ -14,6 +14,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { User, WeeklyBasePlan } from '@/types/user';
 import { generateBasePlan, isGenerationInProgress, getCurrentGenerationId } from '@/services/basePlanEngine';
 import { NotificationService } from '@/services/NotificationService';
+import { recordGenerationTime, calculateProfileComplexity } from '@/utils/plan-time-estimator';
 
 // ============================================================================
 // TYPES
@@ -30,24 +31,12 @@ export interface BasePlanJobState {
   verified: boolean; // true only after user taps "Start my journey"
 }
 
-export interface InAppNotification {
-  id: string;
-  type: 'base_plan_ready' | 'base_plan_error' | 'general';
-  title: string;
-  body: string;
-  createdAt: string;
-  read: boolean;
-  link?: string;
-  data?: any;
-}
-
 // ============================================================================
 // STORAGE KEYS
 // ============================================================================
 
 const STORAGE_KEYS = {
   JOB_STATE: 'Liftor_basePlanJobState',
-  NOTIFICATIONS: 'Liftor_inAppNotifications',
 } as const;
 
 // Namespace storage keys per user
@@ -58,15 +47,54 @@ const scopedKey = (base: string, userId: string | null | undefined) =>
 // JOB STATE MANAGEMENT
 // ============================================================================
 
+// Maximum time a job can be "pending" before considered stale (15 minutes)
+const STALE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * Check if a pending job is stale (started too long ago without completing)
+ */
+function isJobStale(state: BasePlanJobState): boolean {
+  if (state.status !== 'pending' || !state.startedAt) {
+    return false;
+  }
+  
+  const startedAt = new Date(state.startedAt).getTime();
+  const now = Date.now();
+  const elapsed = now - startedAt;
+  
+  return elapsed > STALE_JOB_TIMEOUT_MS;
+}
+
 /**
  * Get the current base plan job state
+ * Automatically cleans up stale pending states
  */
 export async function getBasePlanJobState(userId: string | null): Promise<BasePlanJobState> {
   try {
     const key = scopedKey(STORAGE_KEYS.JOB_STATE, userId);
     const data = await AsyncStorage.getItem(key);
     if (data) {
-      return JSON.parse(data);
+      const state = JSON.parse(data) as BasePlanJobState;
+      
+      // Check for stale pending state
+      // If the job has been "pending" for too long and no generation is actually running,
+      // reset it to idle to prevent the user from being stuck
+      if (state.status === 'pending' && isJobStale(state) && !isBackgroundGenerationInProgress()) {
+        console.warn('[BackgroundGen] ⚠️ Detected stale pending job, resetting to idle');
+        console.warn(`   Started at: ${state.startedAt}`);
+        console.warn(`   Current time: ${new Date().toISOString()}`);
+        
+        // Reset to idle
+        const resetState: BasePlanJobState = {
+          ...state,
+          status: 'idle',
+          error: 'Previous generation timed out. Please try again.',
+        };
+        await AsyncStorage.setItem(key, JSON.stringify(resetState));
+        return resetState;
+      }
+      
+      return state;
     }
   } catch (error) {
     console.error('[BackgroundGen] Error reading job state:', error);
@@ -116,98 +144,83 @@ export async function resetBasePlanJobState(userId: string | null): Promise<void
 }
 
 /**
+ * Validate if a "pending" job state is actually valid.
+ * A pending state is valid ONLY if:
+ * 1. There's an actual generation running in memory, OR
+ * 2. The job was started recently (within timeout window)
+ * 
+ * If invalid, this function resets the state to idle and returns false.
+ */
+export async function validatePendingJobState(userId: string | null): Promise<boolean> {
+  const state = await getBasePlanJobState(userId);
+  
+  // Not pending - nothing to validate
+  if (state.status !== 'pending') {
+    return false;
+  }
+  
+  // Check if generation is actually running in memory
+  if (isBackgroundGenerationInProgress()) {
+    console.log('[BackgroundGen] ✅ Pending state valid - generation in progress');
+    return true;
+  }
+  
+  // Check if job is stale
+  if (isJobStale(state)) {
+    console.warn('[BackgroundGen] ⚠️ Pending state invalid - job is stale');
+    await resetBasePlanJobState(userId);
+    return false;
+  }
+  
+  // If no generation is running but job is recent, it might have crashed
+  // Give it a grace period of 30 seconds before considering it invalid
+  if (state.startedAt) {
+    const startedAt = new Date(state.startedAt).getTime();
+    const elapsed = Date.now() - startedAt;
+    const GRACE_PERIOD_MS = 30 * 1000; // 30 seconds
+    
+    if (elapsed > GRACE_PERIOD_MS) {
+      console.warn('[BackgroundGen] ⚠️ Pending state invalid - no generation running after grace period');
+      await saveBasePlanJobState(userId, {
+        status: 'error',
+        error: 'Generation process was interrupted. Please try again.',
+        completedAt: new Date().toISOString(),
+      });
+      return false;
+    }
+  }
+  
+  // Within grace period - might still be initializing
+  console.log('[BackgroundGen] ⏳ Pending state - within grace period');
+  return true;
+}
+
+/**
+ * Clean up stale job states on app startup.
+ * Call this from _layout.tsx during app initialization.
+ */
+export async function cleanupStaleJobStates(userId: string | null): Promise<void> {
+  try {
+    const state = await getBasePlanJobState(userId); // This already handles stale detection
+    
+    // If still pending after getBasePlanJobState (which checks for stale), validate it
+    if (state.status === 'pending') {
+      const isValid = await validatePendingJobState(userId);
+      if (!isValid) {
+        console.log('[BackgroundGen] Cleaned up stale job state on startup');
+      }
+    }
+  } catch (error) {
+    console.error('[BackgroundGen] Error cleaning up stale job states:', error);
+  }
+}
+
+/**
  * Mark the plan as verified (user tapped "Start my journey")
  */
 export async function verifyBasePlan(userId: string | null): Promise<void> {
   await saveBasePlanJobState(userId, { verified: true });
   console.log('[BackgroundGen] Plan verified by user');
-}
-
-// ============================================================================
-// IN-APP NOTIFICATION CENTER
-// ============================================================================
-
-/**
- * Get all in-app notifications
- */
-export async function getInAppNotifications(userId: string | null): Promise<InAppNotification[]> {
-  try {
-    const key = scopedKey(STORAGE_KEYS.NOTIFICATIONS, userId);
-    const data = await AsyncStorage.getItem(key);
-    if (data) {
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error('[BackgroundGen] Error reading notifications:', error);
-  }
-  return [];
-}
-
-/**
- * Add an in-app notification
- */
-export async function addInAppNotification(
-  userId: string | null,
-  notification: Omit<InAppNotification, 'id' | 'createdAt' | 'read'>
-): Promise<void> {
-  try {
-    const notifications = await getInAppNotifications(userId);
-    const newNotification: InAppNotification = {
-      ...notification,
-      id: `notif_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-      createdAt: new Date().toISOString(),
-      read: false,
-    };
-    notifications.unshift(newNotification); // Add to front
-    
-    // Keep only last 50 notifications
-    const trimmed = notifications.slice(0, 50);
-    
-    const key = scopedKey(STORAGE_KEYS.NOTIFICATIONS, userId);
-    await AsyncStorage.setItem(key, JSON.stringify(trimmed));
-    console.log('[BackgroundGen] In-app notification added:', notification.type);
-  } catch (error) {
-    console.error('[BackgroundGen] Error adding notification:', error);
-  }
-}
-
-/**
- * Mark a notification as read
- */
-export async function markNotificationRead(
-  userId: string | null,
-  notificationId: string
-): Promise<void> {
-  try {
-    const notifications = await getInAppNotifications(userId);
-    const updated = notifications.map(n => 
-      n.id === notificationId ? { ...n, read: true } : n
-    );
-    const key = scopedKey(STORAGE_KEYS.NOTIFICATIONS, userId);
-    await AsyncStorage.setItem(key, JSON.stringify(updated));
-  } catch (error) {
-    console.error('[BackgroundGen] Error marking notification read:', error);
-  }
-}
-
-/**
- * Get unread notification count
- */
-export async function getUnreadNotificationCount(userId: string | null): Promise<number> {
-  const notifications = await getInAppNotifications(userId);
-  return notifications.filter(n => !n.read).length;
-}
-
-/**
- * Clear all notifications
- */
-export async function clearAllNotifications(userId: string | null): Promise<void> {
-  try {
-    const key = scopedKey(STORAGE_KEYS.NOTIFICATIONS, userId);
-    await AsyncStorage.removeItem(key);
-  } catch (error) {
-    console.error('[BackgroundGen] Error clearing notifications:', error);
-  }
 }
 
 // ============================================================================
@@ -297,17 +310,25 @@ export async function startBasePlanGeneration(
     verified: false,
   });
   
+  // Track generation start time for performance metrics
+  const generationStartTime = Date.now();
+  const profileComplexity = calculateProfileComplexity(user);
+  
   // Start generation in background (don't await!)
   currentGenerationPromise = (async (): Promise<WeeklyBasePlan | null> => {
     try {
       console.log('[BackgroundGen] Generation started in background...');
+      console.log(`   Profile complexity: ${profileComplexity}/100`);
       
       // Call the actual generation
       const basePlan = await generateBasePlan(user);
       
+      // Calculate actual generation duration
+      const generationDuration = Math.round((Date.now() - generationStartTime) / 1000);
       console.log('[BackgroundGen] Generation completed successfully!');
       console.log(`   Plan ID: ${basePlan.id}`);
       console.log(`   Days: ${Object.keys(basePlan.days).length}`);
+      console.log(`   Duration: ${generationDuration}s`);
       
       // Save the plan
       await addBasePlan(basePlan);
@@ -324,16 +345,26 @@ export async function startBasePlanGeneration(
       // OS notification and in-app notification center entry
       await sendPlanReadyNotification();
       
+      // Record generation time for future estimation improvement
+      await recordGenerationTime(
+        userId ?? 'anon',
+        generationDuration,
+        profileComplexity,
+        true // success
+      );
+      
       console.log('═══════════════════════════════════════════════════════════');
       console.log('✅ [BackgroundGen] Background generation COMPLETE');
       console.log(`   Job ID: ${jobId}`);
       console.log(`   Plan ID: ${basePlan.id}`);
+      console.log(`   Total time: ${generationDuration}s`);
       console.log('═══════════════════════════════════════════════════════════');
       
       return basePlan;
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const failedDuration = Math.round((Date.now() - generationStartTime) / 1000);
       console.error('[BackgroundGen] Generation failed:', errorMessage);
       
       // Update job state to error
@@ -348,10 +379,19 @@ export async function startBasePlanGeneration(
       // OS notification and in-app notification center entry
       await sendPlanErrorNotification(errorMessage);
       
+      // Record failed generation time (helps understand failure patterns)
+      await recordGenerationTime(
+        userId ?? 'anon',
+        failedDuration,
+        profileComplexity,
+        false // failed
+      );
+      
       console.error('═══════════════════════════════════════════════════════════');
       console.error('❌ [BackgroundGen] Background generation FAILED');
       console.error(`   Job ID: ${jobId}`);
       console.error(`   Error: ${errorMessage}`);
+      console.error(`   Failed after: ${failedDuration}s`);
       console.error('═══════════════════════════════════════════════════════════');
       
       return null;

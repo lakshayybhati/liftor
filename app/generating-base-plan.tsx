@@ -11,6 +11,8 @@ import { runPlanGenerationDiagnostics, logPlanGenerationAttempt } from '@/utils/
 import { getProductionConfig } from '@/utils/production-config';
 import Purchases from 'react-native-purchases';
 import Constants from 'expo-constants';
+import { useKeepAwake } from 'expo-keep-awake';
+import { NotificationService } from '@/services/NotificationService';
 import { BasePlanSkeleton } from '@/components/BasePlanSkeleton';
 
 // ============================================================================
@@ -69,6 +71,9 @@ const SLOW_PROMPTS = [
 ];
 
 export default function GeneratingBasePlanScreen() {
+  // Prevent screen from sleeping while generating
+  useKeepAwake();
+
   // Generate a unique ID for this component instance to track mount/unmount
   const instanceIdRef = useRef(Math.random().toString(36).substring(7));
   
@@ -278,7 +283,7 @@ export default function GeneratingBasePlanScreen() {
       }
       
       // When complete, ensure we show the final phase briefly
-      setCurrentPhase(3);
+      setCurrentPhase(4);
       
       const generationTime = Date.now() - startTime;
       if (slowTimerRef.current) {
@@ -302,6 +307,11 @@ export default function GeneratingBasePlanScreen() {
         isLocked: basePlan.isLocked,
         dayCount: Object.keys(basePlan.days || {}).length
       });
+      
+      // Notify user (even if they are looking at the screen, this ensures history/badge is updated)
+      // Move notification to after save and make it non-blocking to prioritize navigation
+      NotificationService.sendBasePlanReadyNotification().catch(e => console.warn('Notification failed', e));
+      
       await addBasePlan(basePlan);
       console.log('[GenerateBasePlan] ✅ Plan saved to store successfully');
       
@@ -331,14 +341,9 @@ export default function GeneratingBasePlanScreen() {
         try {
           unlockNavigation();
           console.log('[GenerateBasePlan] 🚀 Attempting navigation to plan-preview');
-          router.push('/plan-preview');
-          console.log('[GenerateBasePlan] ✅ Navigation push executed');
-          
-          // Ensure navigation with replace after a delay
-          setTimeout(() => {
-            console.log('[GenerateBasePlan] 🔄 Ensuring navigation with replace');
-            router.replace('/plan-preview');
-          }, 500);
+          // Use replace immediately for faster transition and to prevent going back to loading
+          router.replace('/plan-preview');
+          console.log('[GenerateBasePlan] ✅ Navigation replace executed');
         } catch (navError) {
           console.error('[GenerateBasePlan] ❌ Navigation error:', navError);
           
@@ -349,7 +354,7 @@ export default function GeneratingBasePlanScreen() {
             try { router.replace('/plan-preview'); } catch {}
           }, 100);
         }
-      }, 1500);
+      }, 500);
 
     } catch (error) {
       // Reset generation guard
@@ -376,6 +381,9 @@ export default function GeneratingBasePlanScreen() {
         errorStage,
         retryCount
       });
+      
+      // Notify user of error
+      await NotificationService.sendBasePlanErrorNotification(isBasePlanError ? (error as BasePlanGenerationError).message : 'Unknown error');
 
       // Check if component is still mounted before updating state
       if (!isMountedRef.current) {
@@ -444,7 +452,7 @@ export default function GeneratingBasePlanScreen() {
 
     // Animate through phases to simulate progress
     // Updated timing for two-stage pipeline (Generation + Verification)
-    const phaseTimings = [3000, 10000, 18000]; // Faster progression
+    const phaseTimings = [13000, 23000, 39000]; // Faster progression
     
     const timeouts = phaseTimings.map((time, index) => {
       return setTimeout(() => {
@@ -692,7 +700,7 @@ const styles = StyleSheet.create({
     borderColor: theme.color.line,
   },
   progressCardError: {
-    borderColor: theme.color.accent.red || '#FF6B6B',
+    borderColor: theme.color.accent.primary,
   },
   progressTitle: {
     fontSize: 20,

@@ -12,6 +12,8 @@ import {
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '@/hooks/useAuth';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const PADDLE_WIDTH = 100;
@@ -20,6 +22,8 @@ const BALL_SIZE = 40; // Initial size
 const GRAVITY = 0.45; // Slightly adjusted for better feel
 const BASE_SPEED = -17; // Higher bounce
 const MAX_SPEED = -34; // Higher cap
+const ASCENT_SPEED = 28;
+const HIGH_SCORE_KEY = 'Liftor_miniGameHighScore';
 
 interface Props {
   visible: boolean;
@@ -31,8 +35,16 @@ interface Props {
 
 export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGameEnd, loadingMessage, onExit }: Props) {
   const insets = useSafeAreaInsets();
+  const { session } = useAuth();
+  const highScoreKey = `${HIGH_SCORE_KEY}:${session?.user?.id ?? 'anon'}`;
   const [score, setScore] = useState(0);
   const [gameOver, setGameOver] = useState(false);
+  const [highScore, setHighScore] = useState(0);
+  const highScoreRef = useRef(0);
+
+  useEffect(() => {
+    highScoreRef.current = highScore;
+  }, [highScore]);
   
   // Intro / Countdown State
   const [gamePhase, setGamePhase] = useState<'intro' | 'countdown' | 'playing' | 'gameover'>('intro');
@@ -66,6 +78,44 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
   const countdownScaleAnim = useRef(new Animated.Value(0.5)).current;
 
   const requestRef = useRef<number>(0);
+
+  const loadHighScore = useCallback(async () => {
+    try {
+      const stored = await AsyncStorage.getItem(highScoreKey);
+      if (stored) {
+        const parsed = parseInt(stored, 10);
+        if (!Number.isNaN(parsed)) {
+          setHighScore(parsed);
+          return;
+        }
+      }
+      setHighScore(0);
+    } catch (error) {
+      console.warn('[MiniGame] Failed to load high score', error);
+    }
+  }, [highScoreKey]);
+
+  const persistHighScore = useCallback(
+    async (newScore: number) => {
+      try {
+        await AsyncStorage.setItem(highScoreKey, String(newScore));
+      } catch (error) {
+        console.warn('[MiniGame] Failed to save high score', error);
+      }
+    },
+    [highScoreKey],
+  );
+
+  const maybeUpdateHighScore = useCallback(
+    (finalScore: number) => {
+      if (finalScore > highScoreRef.current) {
+        setHighScore(finalScore);
+        persistHighScore(finalScore);
+        highScoreRef.current = finalScore;
+      }
+    },
+    [persistHighScore],
+  );
 
   // Pan Responder for Paddle
   const panResponder = useRef(
@@ -116,6 +166,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
   // Main Visibility & Sequence Logic
   useEffect(() => {
     if (visible) {
+      loadHighScore();
       // Reset
       setGamePhase('intro');
       setCountdown(3);
@@ -162,7 +213,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [visible]);
+  }, [visible, loadHighScore]);
 
   // Countdown Logic
   useEffect(() => {
@@ -242,9 +293,10 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       duration: 300,
       useNativeDriver: true,
     }).start(() => {
+      maybeUpdateHighScore(gameState.current.score);
       onGameEnd(gameState.current.score);
     });
-  }, [onGameEnd]);
+  }, [onGameEnd, maybeUpdateHighScore]);
 
   const animate = (time: number) => {
     if (!gameState.current.isPlaying) return;
@@ -271,6 +323,12 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       state.ballX = Math.max(0, Math.min(state.ballX, SCREEN_WIDTH - (BALL_SIZE * state.scale)));
     }
 
+    const topBoundary = insets.top;
+    if (state.ballY <= topBoundary && state.vy < 0) {
+      state.ballY = topBoundary;
+      state.vy = Math.max(Math.abs(state.speed) * 0.5, 10);
+    }
+
     // Paddle Collision
     const paddleY = SCREEN_HEIGHT - insets.bottom - 150;
     const ballBottom = state.ballY + (BALL_SIZE * state.scale);
@@ -295,7 +353,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       nextSpeed = Math.min(nextSpeed, Math.abs(MAX_SPEED));
       state.speed = -nextSpeed;
       
-      state.vy = state.speed; 
+      state.vy = -Math.max(nextSpeed, ASCENT_SPEED);
       
       const hitPoint = ballCenterX - (state.paddleX + PADDLE_WIDTH / 2);
       state.vx += hitPoint * 0.15;
@@ -309,6 +367,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       setGameOver(true);
       setGamePhase('gameover');
       gameState.current.isPlaying = false;
+      maybeUpdateHighScore(state.score);
       return;
     }
 
@@ -320,6 +379,11 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
 
   const paddleY = SCREEN_HEIGHT - insets.bottom - 150;
 
+  const handleExit = () => {
+    maybeUpdateHighScore(gameState.current.score);
+    onExit?.();
+  };
+
   return (
     <Animated.View style={[styles.container, { opacity: opacityAnim }]}>
       <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
@@ -327,7 +391,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       {/* Exit Button */}
       <TouchableOpacity 
         style={[styles.exitButton, { top: insets.top + 16 }]} 
-        onPress={onExit}
+        onPress={handleExit}
       >
         <Text style={styles.exitButtonText}>Exit Game</Text>
       </TouchableOpacity>
@@ -335,7 +399,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       {/* Intro Text */}
       {gamePhase === 'intro' && (
         <Animated.View style={[styles.centerContainer, { opacity: introFadeAnim }]}>
-          <Text style={styles.introText}>Enjoy as we build your amazing day...</Text>
+          <Text style={styles.introText}>Enjoy as we build your amazing plan...</Text>
         </Animated.View>
       )}
 
@@ -353,6 +417,7 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
         <View style={styles.centerContainer}>
           <Text style={styles.gameOverTitle}>Oops!</Text>
           <Text style={styles.gameOverScore}>Score: {score}</Text>
+          <Text style={styles.gameOverHighScore}>High score: {highScore}</Text>
           <TouchableOpacity onPress={restartGame} style={styles.restartButton}>
             <Text style={styles.restartButtonText}>Try Again</Text>
           </TouchableOpacity>
@@ -363,13 +428,19 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       {(gamePhase === 'playing' || gamePhase === 'gameover') && (
         <>
           <View style={[styles.scoreContainer, { marginTop: insets.top + 60 }]}>
-            <Text style={styles.scoreLabel}>SCORE</Text>
-            <Text style={styles.scoreValue}>{score}</Text>
+            <View style={styles.scoreBlock}>
+              <Text style={styles.scoreLabel}>SCORE</Text>
+              <Text style={styles.scoreValue}>{score}</Text>
+            </View>
+            <View style={styles.scoreBlock}>
+              <Text style={styles.scoreLabel}>HIGH</Text>
+              <Text style={styles.highScoreValue}>{highScore}</Text>
+            </View>
           </View>
           
           <View style={styles.gameArea} {...panResponder.panHandlers}>
             {/* Only show ball if playing */}
-            {gamePhase === 'playing' && (
+          {gamePhase === 'playing' && (
               <Animated.View
                 style={[
                   styles.ball,
@@ -448,23 +519,39 @@ const styles = StyleSheet.create({
   },
   scoreContainer: {
     position: 'absolute',
-    alignItems: 'center',
-    top: 100,
     zIndex: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    alignSelf: 'center',
+  },
+  scoreBlock: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
+    minWidth: 110,
   },
   scoreLabel: {
     color: 'rgba(255,255,255,0.6)',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 2,
+    letterSpacing: 1.5,
+    marginBottom: 4,
   },
   scoreValue: {
     color: '#FFFFFF',
-    fontSize: 64,
+    fontSize: 36,
     fontWeight: '900',
     textShadowColor: 'rgba(0,0,0,0.3)',
-    textShadowOffset: { width: 0, height: 4 },
-    textShadowRadius: 8,
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+  },
+  highScoreValue: {
+    color: '#FFD25E',
+    fontSize: 32,
+    fontWeight: '800',
   },
   gameArea: {
     ...StyleSheet.absoluteFillObject,
@@ -514,9 +601,14 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   gameOverScore: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 24,
-    marginBottom: 32,
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 26,
+    marginBottom: 8,
+  },
+  gameOverHighScore: {
+    color: '#FFD25E',
+    fontSize: 16,
+    marginBottom: 24,
   },
   restartButton: {
     backgroundColor: '#FFFFFF',
