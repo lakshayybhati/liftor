@@ -1,12 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
-import { getSubscriptionTier, getSubscriptionStatusText, openManageSubscription } from '@/utils/subscription-helpers';
+import { getSubscriptionStatusText } from '@/utils/subscription-helpers';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
+import { useSessionStatus } from '@/hooks/useSessionStatus';
 import { TrendingUp, Clipboard, Sparkles, Trophy, ChevronLeft, User } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -14,17 +15,22 @@ export default function ManageSubscriptionScreen() {
   const router = useRouter();
   const auth = useAuth();
   const { data: profile } = useProfile();
+  const { isSubscribed, isTrial } = useSessionStatus();
   const insets = useSafeAreaInsets();
   const [statusText, setStatusText] = useState<string>('');
-  const [tierLabel, setTierLabel] = useState<string>('Premium');
 
   const userName = profile?.name?.split(' ')[0] || auth?.session?.user?.user_metadata?.name?.split(' ')[0] || 'Athlete';
 
+  // Derive tier label from session status (single source of truth)
+  const tierLabel = useMemo(() => {
+    if (isSubscribed) return 'Elite';
+    if (isTrial) return 'Trial';
+    return 'Premium';
+  }, [isSubscribed, isTrial]);
+
   useEffect(() => {
     (async () => {
-      const tier = await getSubscriptionTier();
       const text = await getSubscriptionStatusText();
-      setTierLabel(tier.label === 'Elite' ? 'Elite' : tier.label === 'Trial' ? 'Trial' : 'Premium');
       setStatusText(text);
     })();
   }, []);
@@ -91,7 +97,7 @@ export default function ManageSubscriptionScreen() {
 
 
         {statusText && statusText !== 'No active subscription' && (
-          <Text style={styles.statusText}>{statusText}</Text>
+          <Text style={[styles.statusText, isTrial && { opacity: 0.4 }]}>{statusText}</Text>
         )}
       </ScrollView>
     </View>

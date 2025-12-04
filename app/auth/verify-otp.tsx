@@ -78,13 +78,43 @@ export default function VerifyOtpScreen() {
   }, [mode, identifier, name]);
 
   const onChangeDigit = useCallback((index: number, val: string) => {
-    const only = val.replace(/\D/g, '').slice(-1);
-    setDigits(prev => {
-      const next = [...prev];
-      next[index] = only;
-      return next;
-    });
-    if (only && index < 5) inputsRef.current[index + 1]?.focus();
+    // Sanitize input to digits only
+    const clean = val.replace(/\D/g, '');
+
+    // If empty, just clear the current digit
+    if (!clean) {
+      setDigits(prev => {
+        const next = [...prev];
+        next[index] = '';
+        return next;
+      });
+      return;
+    }
+
+    // If we have more than 1 char, it's likely a paste or fast type
+    if (clean.length > 1) {
+      setDigits(prev => {
+        const next = [...prev];
+        // Fill starting from current index
+        for (let i = 0; i < clean.length; i++) {
+          if (index + i < 6) {
+            next[index + i] = clean[i];
+          }
+        }
+        return next;
+      });
+      // Focus the box after the last filled one, or the last box if full
+      const nextIndex = Math.min(index + clean.length, 5);
+      inputsRef.current[nextIndex]?.focus();
+    } else {
+      // Single character entry
+      setDigits(prev => {
+        const next = [...prev];
+        next[index] = clean;
+        return next;
+      });
+      if (index < 5) inputsRef.current[index + 1]?.focus();
+    }
   }, []);
 
   const onSubmit = useCallback(async () => {
@@ -123,62 +153,61 @@ export default function VerifyOtpScreen() {
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
           <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
             <View style={styles.container}>
-        <Stack.Screen 
-          options={{ 
-            title: 'Verify Code', 
-            headerShown: true, 
-            headerBackVisible: false,
-            gestureEnabled: false,
-            headerStyle: {
-              backgroundColor: '#000000',
-            },
-            headerTintColor: '#FFFFFF',
-            headerTitleStyle: {
-              color: '#FFFFFF',
-              fontWeight: '600',
-            },
-            headerLeft: () => (
-              <TouchableOpacity onPress={onBack} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Back">
-                <Text style={{ color: theme.color.accent.primary, fontWeight: '600' }}>Back</Text>
+              <Stack.Screen
+                options={{
+                  title: 'Verify Code',
+                  headerShown: true,
+                  headerBackVisible: false,
+                  gestureEnabled: false,
+                  headerStyle: {
+                    backgroundColor: '#000000',
+                  },
+                  headerTintColor: '#FFFFFF',
+                  headerTitleStyle: {
+                    color: '#FFFFFF',
+                    fontWeight: '600',
+                  },
+                  headerLeft: () => (
+                    <TouchableOpacity onPress={onBack} style={{ paddingHorizontal: 8 }} accessibilityRole="button" accessibilityLabel="Back">
+                      <Text style={{ color: theme.color.accent.primary, fontWeight: '600' }}>Back</Text>
+                    </TouchableOpacity>
+                  )
+                }}
+              />
+              <Text style={styles.title}>Enter the 6‑digit code</Text>
+              <Text style={styles.subtitle}>Sent to {masked}</Text>
+              {error && <Text style={styles.error}>{error}</Text>}
+              <View style={styles.otpRow}>
+                {digits.map((d, i) => (
+                  <TextInput
+                    key={i}
+                    ref={(el) => { inputsRef.current[i] = el; }}
+                    style={styles.otpBox}
+                    keyboardType="number-pad"
+                    returnKeyType={i === 5 ? 'done' : 'next'}
+                    blurOnSubmit={false}
+                    value={d}
+                    onChangeText={(val) => onChangeDigit(i, val)}
+                    onKeyPress={({ nativeEvent }) => {
+                      if (nativeEvent.key === 'Backspace' && !digits[i] && i > 0) inputsRef.current[i - 1]?.focus();
+                      if ((nativeEvent.key === 'Enter' || nativeEvent.key === '\n') && i === 5 && canSubmit) {
+                        onSubmit();
+                      }
+                    }}
+                    onSubmitEditing={() => {
+                      if (i === 5) {
+                        if (canSubmit) onSubmit();
+                      } else {
+                        inputsRef.current[i + 1]?.focus();
+                      }
+                    }}
+                  />
+                ))}
+              </View>
+              <Button title={isAuthLoading ? 'Verifying…' : 'Verify'} onPress={onSubmit} disabled={!canSubmit || isAuthLoading} />
+              <TouchableOpacity onPress={onResend} disabled={cooldown > 0} style={styles.resendBtn}>
+                <Text style={[styles.resendText, cooldown > 0 && { opacity: 0.5 }]}>Resend {cooldown > 0 ? `in ${cooldown}s` : ''}</Text>
               </TouchableOpacity>
-            )
-          }} 
-        />
-        <Text style={styles.title}>Enter the 6‑digit code</Text>
-        <Text style={styles.subtitle}>Sent to {masked}</Text>
-        {error && <Text style={styles.error}>{error}</Text>}
-        <View style={styles.otpRow}>
-          {digits.map((d, i) => (
-            <TextInput
-              key={i}
-              ref={(el) => { inputsRef.current[i] = el; }}
-              style={styles.otpBox}
-              keyboardType="number-pad"
-              returnKeyType={i === 5 ? 'done' : 'next'}
-              blurOnSubmit={false}
-              maxLength={1}
-              value={d}
-              onChangeText={(val) => onChangeDigit(i, val)}
-              onKeyPress={({ nativeEvent }) => {
-                if (nativeEvent.key === 'Backspace' && !digits[i] && i > 0) inputsRef.current[i - 1]?.focus();
-                if ((nativeEvent.key === 'Enter' || nativeEvent.key === '\n') && i === 5 && canSubmit) {
-                  onSubmit();
-                }
-              }}
-              onSubmitEditing={() => {
-                if (i === 5) {
-                  if (canSubmit) onSubmit();
-                } else {
-                  inputsRef.current[i + 1]?.focus();
-                }
-              }}
-            />
-          ))}
-        </View>
-        <Button title={isAuthLoading ? 'Verifying…' : 'Verify'} onPress={onSubmit} disabled={!canSubmit || isAuthLoading} />
-        <TouchableOpacity onPress={onResend} disabled={cooldown > 0} style={styles.resendBtn}>
-          <Text style={[styles.resendText, cooldown > 0 && { opacity: 0.5 }]}>Resend {cooldown > 0 ? `in ${cooldown}s` : ''}</Text>
-        </TouchableOpacity>
             </View>
           </ScrollView>
         </KeyboardAvoidingView>

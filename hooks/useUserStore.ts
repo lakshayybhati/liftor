@@ -2,9 +2,12 @@ import createContextHook from '@nkzw/create-context-hook';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { NotificationService } from '@/services/NotificationService';
-import type { User, CheckinData, DailyPlan, WeeklyBasePlan, WorkoutPlan, NutritionPlan, RecoveryPlan } from '@/types/user';
+import { playCompletionSound } from '@/utils/sound-effects';
+import type { User, CheckinData, DailyPlan, WeeklyBasePlan, WorkoutPlan, NutritionPlan, RecoveryPlan, WeeklyPlanStatus } from '@/types/user';
 import { useAuth } from '@/hooks/useAuth';
 import { logProductionMetric, getProductionConfig } from '@/utils/production-config';
+import { getWeekStartFromIso } from '@/utils/weekCycle';
+import { saveLocalPlan, archiveActivePlan } from '@/utils/localPlanStorage';
 
 interface FoodEntry {
   id: string;
@@ -50,6 +53,94 @@ interface PlanCompletionDay {
   completedMeals: string[];
   completedExercises: string[];
   completedSupplements: string[];
+}
+
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function getPlanWeekStart(plan: WeeklyBasePlan, timezone?: string): string {
+  return plan.weekStartDate || getWeekStartFromIso(plan.createdAt, timezone);
+}
+
+function normalizeWeeklyPlan(plan: WeeklyBasePlan, timezone?: string): WeeklyBasePlan {
+  const createdAt = plan.createdAt || new Date().toISOString();
+  const status: WeeklyPlanStatus =
+    plan.status ||
+    (plan.isActive ? 'active' : plan.isLocked ? 'archived' : 'generated');
+  const defaultName = plan.name || `Plan - ${new Date(createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+
+  return {
+    ...plan,
+    createdAt,
+    weekStartDate: getPlanWeekStart({ ...plan, createdAt }, timezone),
+    status,
+    name: defaultName,
+    isActive: status === 'active',
+    isLocked: status === 'archived' ? true : plan.isLocked ?? false,
+  };
+}
+
+function dedupeWeeklyPlans(plans: WeeklyBasePlan[]): WeeklyBasePlan[] {
+  // Strategy: Preserve ALL plans with valid UUIDs or archived status.
+  // This ensures "View All Plans" shows complete history including regenerated plans.
+
+  const preservedPlans: WeeklyBasePlan[] = [];
+  const temporaryPlans: WeeklyBasePlan[] = [];
+
+  for (const plan of plans) {
+    // Plans with valid UUIDs are from the database - ALWAYS preserve them
+    const hasValidUuid = UUID_REGEX.test(plan.id);
+
+    // Archived plans with modified IDs (e.g., "archived_uuid_timestamp") are also preserved
+    const hasArchivedPrefix = plan.id.startsWith('archived_');
+
+    // Archived plans are always preserved (backwards compat)
+    const isArchived = plan.status === 'archived' ||
+      (plan.isLocked && plan.status !== 'active' && plan.status !== 'generated');
+
+    if (hasValidUuid || isArchived || hasArchivedPrefix) {
+      preservedPlans.push(plan);
+    } else {
+      // Temporary/local plans without proper UUIDs get deduped
+      temporaryPlans.push(plan);
+    }
+  }
+
+  // Only dedupe temporary plans by week (keep the most recent for each week)
+  const byWeek = new Map<string, WeeklyBasePlan>();
+  for (const plan of temporaryPlans) {
+    const key = getPlanWeekStart(plan);
+    const existing = byWeek.get(key);
+    if (!existing) {
+      byWeek.set(key, plan);
+      continue;
+    }
+
+    const existingTime = new Date(existing.createdAt).getTime();
+    const incomingTime = new Date(plan.createdAt).getTime();
+    if (incomingTime >= existingTime) {
+      byWeek.set(key, plan);
+    }
+  }
+
+  // Combine: preserved plans (from DB) + deduped temporary plans
+  // Also dedupe by ID to prevent exact duplicates
+  const seen = new Set<string>();
+  const result: WeeklyBasePlan[] = [];
+
+  for (const plan of [...preservedPlans, ...Array.from(byWeek.values())]) {
+    if (!seen.has(plan.id)) {
+      seen.add(plan.id);
+      result.push(plan);
+    }
+  }
+
+  return result.sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+}
+
+function isUuid(value?: string): boolean {
+  return typeof value === 'string' && UUID_REGEX.test(value);
 }
 
 // Base storage keys (now namespaced per Supabase user below)
@@ -598,7 +689,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             .select('*')
             .eq('user_id', uid)
             .order('created_at', { ascending: true })
-            .limit(10)
+            .limit(50) // Increased to support plan history in "View All Plans"
         ),
         retrySupabaseOperation(async () =>
           await supabase
@@ -720,16 +811,34 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       // Map and persist base plans
       try {
         if (Array.isArray(dbBasePlans) && dbBasePlans.length > 0) {
-          const mapped = dbBasePlans.map((bp: any) => ({
-            id: bp.id,
-            createdAt: bp.created_at,
-            days: bp.days,
-            isLocked: bp.is_locked,
-          })) as WeeklyBasePlan[];
+          const mapped = dbBasePlans.map((bp: any) =>
+            normalizeWeeklyPlan(
+              {
+                id: bp.id,
+                createdAt: bp.created_at,
+                days: bp.days,
+                isLocked: bp.is_locked,
+                status: bp.status as WeeklyPlanStatus | undefined,
+                weekStartDate: bp.week_start_date ?? undefined,
+                activatedAt: bp.activated_at ?? undefined,
+                generatedAt: bp.generated_at ?? undefined,
+                generationJobId: bp.generation_job_id ?? undefined,
+                // Redo tracking fields
+                redoUsed: bp.redo_used ?? false,
+                redoReason: bp.redo_reason ?? undefined,
+                originalPlanId: bp.original_plan_id ?? undefined,
+                // Daily redo limit tracking
+                redoCountToday: bp.redo_count_today ?? 0,
+                lastRedoDate: bp.last_redo_date ?? undefined,
+              } as WeeklyBasePlan,
+              user?.timezone
+            )
+          );
 
-          setBasePlans(mapped);
-          await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(mapped));
-          console.log('[Hydrate] Base plans loaded:', mapped.length);
+          const deduped = dedupeWeeklyPlans(mapped);
+          setBasePlans(deduped);
+          await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(deduped));
+          console.log('[Hydrate] Base plans loaded:', deduped.length);
         }
       } catch (e) {
         console.warn('[Hydrate] Failed to map/persist base plans', e);
@@ -849,7 +958,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   useEffect(() => {
     if (isLoading) return;
     if (!basePlans || basePlans.length === 0) return;
-    
+
     const hasActivePlan = basePlans.some(plan => plan.isActive === true);
     if (!hasActivePlan) {
       console.log('[UserStore] No active plan found, auto-activating the most recent plan');
@@ -861,17 +970,17 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           break;
         }
       }
-      
+
       // Update the plan to be active
       const now = new Date().toISOString();
-      const updatedPlans = basePlans.map(plan => 
-        plan.id === planToActivate.id 
+      const updatedPlans = basePlans.map(plan =>
+        plan.id === planToActivate.id
           ? { ...plan, isActive: true, activatedAt: plan.activatedAt || now }
           : plan
       );
-      
+
       setBasePlans(updatedPlans);
-      AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedPlans)).catch(() => {});
+      AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedPlans)).catch(() => { });
       console.log('[UserStore] ✅ Auto-activated plan:', planToActivate.id);
     }
   }, [basePlans, isLoading, KEYS.BASE_PLANS]);
@@ -881,7 +990,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
   useEffect(() => {
     // Wait for auth to complete before making any decisions
     if (isAuthLoading) return;
-    
+
     // If auth is done but no uid (not logged in), mark loading as complete
     // This prevents the app from being stuck on loading screen for logged-out users
     if (!uid) {
@@ -889,7 +998,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       setIsLoading(false);
       return;
     }
-    
+
     // Reset in-memory state immediately to avoid showing previous user's data
     setUser(null);
     setCheckins([]);
@@ -1090,6 +1199,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       setPlans(updatedPlans);
       await AsyncStorage.setItem(KEYS.PLANS, JSON.stringify(updatedPlans));
 
+      // Play completion sound for new plans (with haptic feedback)
+      if (idx < 0) {
+        playCompletionSound().catch(() => {});
+      }
+
       // Immediately sync to Supabase for persistence across refreshes
       if (uid && supabase) {
         try {
@@ -1206,81 +1320,187 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.log('[UserStore] addBasePlan called with plan ID:', basePlan.id);
       console.log('[UserStore] Current basePlans count:', basePlans.length);
       console.log('[UserStore] New plan has', Object.keys(basePlan.days || {}).length, 'days');
+      console.log('[UserStore] New plan weekStartDate from server:', basePlan.weekStartDate);
+      console.log('[UserStore] New plan status:', basePlan.status);
 
-      const now = new Date().toISOString();
-      
-      // Format default name as "Plan - {Month Day, Year}"
-      const createdDate = new Date(basePlan.createdAt || now);
-      const defaultName = `Plan - ${createdDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+      const normalizedNewPlan = normalizeWeeklyPlan(basePlan, user?.timezone);
+      const weekKey = getPlanWeekStart(normalizedNewPlan, user?.timezone);
+      console.log('[UserStore] Computed weekKey:', weekKey);
 
-      const normalizedNewPlan: WeeklyBasePlan = {
-        ...basePlan,
-        createdAt: basePlan.createdAt || now,
-        isLocked: basePlan.isLocked ?? false,
-        // New fields for plan management
-        name: basePlan.name || defaultName,
-        isActive: true, // New plans are automatically active
-        activatedAt: now,
-      };
+      const nowIso = new Date().toISOString();
 
-      // Deactivate previous plans and calculate their stats
-      const deactivatedPreviousPlans = basePlans.map(plan => {
-        if (plan.isActive) {
-          // Calculate stats for the deactivated plan
-          const startDate = plan.activatedAt ? new Date(plan.activatedAt) : new Date(plan.createdAt);
-          const endDate = new Date();
-          const daysActive = Math.max(1, Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
-          
-          // Get check-ins during this period for weight change
-          const startDateStr = startDate.toISOString().split('T')[0];
-          const periodCheckins = checkins.filter(c => c.date >= startDateStr).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-          
-          let weightChangeKg: number | undefined;
-          const weightsInPeriod = periodCheckins
-            .map(c => c.currentWeight ?? c.bodyWeight)
-            .filter((w): w is number => typeof w === 'number' && !isNaN(w));
-          if (weightsInPeriod.length >= 2) {
-            weightChangeKg = weightsInPeriod[weightsInPeriod.length - 1] - weightsInPeriod[0];
-          }
+      // Enhanced filtering:
+      // - Always keep archived plans as-is
+      // - Convert any legacy/previous plans for the SAME week into archived history
+      //   instead of dropping them, so they stay visible in "My Base Plans"
+      // - Prevent exact-duplicate IDs
+      const replacedPlans: WeeklyBasePlan[] = [];
 
-          // Calculate consistency from daily plans
-          const periodPlans = plans.filter(p => p.date >= startDateStr);
-          let consistencyPercent: number | undefined;
-          if (periodPlans.length > 0) {
-            const validAdherence = periodPlans
-              .map(p => p.adherence)
-              .filter((a): a is number => typeof a === 'number' && !isNaN(a));
-            if (validAdherence.length > 0) {
-              consistencyPercent = Math.round((validAdherence.reduce((sum, a) => sum + a, 0) / validAdherence.length) * 100);
+      const filteredPlans = basePlans
+        .map((plan) => {
+          // 1) When server reuses a plan row ID, archive the old version with a unique ID
+          if (plan.id === normalizedNewPlan.id) {
+            // Only archive if the plan has content and isn't the exact same object
+            if (plan.days && Object.keys(plan.days).length > 0) {
+              const archivedId = `archived_${plan.id}_${Date.now()}`;
+              replacedPlans.push({
+                ...plan,
+                id: archivedId,
+                status: 'archived',
+                isActive: false,
+                isLocked: true,
+                deactivatedAt: plan.deactivatedAt || nowIso,
+              });
             }
+            return null;
           }
 
-          return {
-            ...plan,
-            isLocked: true,
-            isActive: false,
-            deactivatedAt: now,
-            stats: { weightChangeKg, consistencyPercent, daysActive },
-          };
-        }
-        return {
-          ...plan,
-          isLocked: true,
-        };
-      });
+          // 2) Already-archived plans are always preserved
+          const isAlreadyArchived =
+            plan.status === 'archived' ||
+            (plan.isLocked && plan.status !== 'active' && plan.status !== 'generated');
+          if (isAlreadyArchived) {
+            return plan;
+          }
 
-      const updatedBasePlans = [...deactivatedPreviousPlans, normalizedNewPlan];
+          const planWeekKey = plan.weekStartDate || getPlanWeekStart(plan);
+
+          // 3) Legacy plans (non‑UUID id or missing status) should be preserved as
+          // historical when we add the first server-generated plan.
+          const isLegacyPlan = !isUuid(plan.id) || !plan.status;
+          if (isLegacyPlan && basePlans.length === 1) {
+            replacedPlans.push({
+              ...plan,
+              status: 'archived',
+              isActive: false,
+              isLocked: true,
+              deactivatedAt: plan.deactivatedAt || nowIso,
+            });
+            return null;
+          }
+
+          // 4) For non-archived plans from the same week, archive them instead of
+          // dropping them so users can still see the old plan.
+          if (planWeekKey === weekKey) {
+            // If the new plan has the same ID (server reused row), give archived plan a unique ID
+            const archivedId = plan.id === normalizedNewPlan.id
+              ? `archived_${plan.id}_${Date.now()}`
+              : plan.id;
+            replacedPlans.push({
+              ...plan,
+              id: archivedId,
+              status: 'archived',
+              isActive: false,
+              isLocked: true,
+              deactivatedAt: plan.deactivatedAt || nowIso,
+            });
+            return null;
+          }
+
+          // 5) Different-week non-archived plans are kept as-is
+          return plan;
+        })
+        .filter((p): p is WeeklyBasePlan => !!p);
+
+      console.log('[UserStore] After filtering (preserving archived & legacy), plans remaining:', filteredPlans.length);
+      console.log('[UserStore] Replaced/archived plans:', replacedPlans.length);
+      console.log('[UserStore] Plan IDs - filtered:', filteredPlans.map(p => p.id.slice(0, 8)));
+      console.log('[UserStore] Plan IDs - replaced:', replacedPlans.map(p => p.id.slice(0, 8)));
+      console.log('[UserStore] New plan ID:', normalizedNewPlan.id.slice(0, 8));
+
+      // Combine all plans: filtered + replaced (archived) + new
+      const allPlansBeforeDedupe = [...filteredPlans, ...replacedPlans, normalizedNewPlan];
+      console.log('[UserStore] Total plans before dedupe:', allPlansBeforeDedupe.length);
+
+      let updatedBasePlans = dedupeWeeklyPlans(allPlansBeforeDedupe);
+      console.log('[UserStore] After deduplication, total plans:', updatedBasePlans.length);
+      console.log('[UserStore] Final plan IDs:', updatedBasePlans.map(p => `${p.id.slice(0, 8)} (${p.status})`));
+
+      if (normalizedNewPlan.status === 'active') {
+        const now = new Date().toISOString();
+        updatedBasePlans = updatedBasePlans.map(plan => {
+          if (plan.id === normalizedNewPlan.id) {
+            return {
+              ...plan,
+              status: 'active',
+              isActive: true,
+              isLocked: false,
+              activatedAt: plan.activatedAt || now,
+              deactivatedAt: undefined,
+            };
+          }
+          if (plan.status === 'active') {
+            // Calculate stats for deactivated plan
+            const startDate = plan.activatedAt ? new Date(plan.activatedAt) : new Date(plan.createdAt);
+            const endDate = new Date();
+            const daysActive = Math.max(1, Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
+            const startDateStr = startDate.toISOString().split('T')[0];
+
+            const periodCheckins = checkins
+              .filter(c => c.date >= startDateStr)
+              .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+            let weightChangeKg: number | undefined;
+            const weightsInPeriod = periodCheckins
+              .map(c => c.currentWeight ?? c.bodyWeight)
+              .filter((w): w is number => typeof w === 'number' && !isNaN(w));
+            if (weightsInPeriod.length >= 2) {
+              weightChangeKg = weightsInPeriod[weightsInPeriod.length - 1] - weightsInPeriod[0];
+            }
+
+            const periodPlans = plans.filter(p => p.date >= startDateStr);
+            let consistencyPercent: number | undefined;
+            if (periodPlans.length > 0) {
+              const validAdherence = periodPlans
+                .map(p => p.adherence)
+                .filter((a): a is number => typeof a === 'number' && !isNaN(a));
+              if (validAdherence.length > 0) {
+                consistencyPercent = Math.round((validAdherence.reduce((sum, a) => sum + a, 0) / validAdherence.length) * 100);
+              }
+            }
+
+            return {
+              ...plan,
+              status: 'archived',
+              isActive: false,
+              isLocked: true,
+              deactivatedAt: now,
+              stats: { weightChangeKg, consistencyPercent, daysActive },
+            };
+          }
+          return plan;
+        });
+      }
+
       console.log('[UserStore] Updating state with', updatedBasePlans.length, 'plans...');
       setBasePlans(updatedBasePlans);
       console.log('[UserStore] ✅ State updated');
-      
+
+      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
+      console.log('[UserStore] ✅ AsyncStorage save complete');
+
+      // Save to local plan storage for "View All Plans" feature
+      // This ensures plans are preserved locally even if server sync fails
+      if (uid) {
+        try {
+          // Archive any currently active plan first
+          await archiveActivePlan(uid, checkins, plans);
+          // Save the new plan locally
+          await saveLocalPlan(uid, normalizedNewPlan, checkins, plans);
+          console.log('[UserStore] ✅ Plan saved to local storage');
+        } catch (localStorageError) {
+          console.warn('[UserStore] Failed to save to local storage:', localStorageError);
+          // Non-blocking - don't throw
+        }
+      }
+
       // Update lastBasePlanGeneratedAt in user profile (both local and server)
       if (user) {
+        const now = new Date().toISOString();
         const updatedUser = { ...user, lastBasePlanGeneratedAt: now };
         setUser(updatedUser);
-        try { await AsyncStorage.setItem(KEYS.USER, JSON.stringify(updatedUser)); } catch {}
-        
-        // Critical: Sync to server to prevent date manipulation bypass
+        try { await AsyncStorage.setItem(KEYS.USER, JSON.stringify(updatedUser)); } catch { }
+
         if (uid) {
           try {
             await retrySupabaseOperation(async () =>
@@ -1296,42 +1516,45 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         }
       }
 
-      console.log('[UserStore] Saving to AsyncStorage...');
-      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedBasePlans));
-      console.log('[UserStore] ✅ AsyncStorage save complete');
-
-      // Best-effort: persist to Supabase weekly_base_plans so edits survive reloads and cross-device
-      let planSnapshot: WeeklyBasePlan = normalizedNewPlan;
-      if (uid) {
+      // Persist plan snapshot + status to Supabase when possible
+      const planSnapshot: WeeklyBasePlan = normalizedNewPlan;
+      if (uid && isUuid(normalizedNewPlan.id)) {
         try {
-          const inserted = await retrySupabaseOperation(async () =>
+          await retrySupabaseOperation(async () =>
             await supabase
               .from('weekly_base_plans')
-              .insert({
-                user_id: uid,
+              .update({
                 days: normalizedNewPlan.days as any,
-                is_locked: !!normalizedNewPlan.isLocked,
+                status: normalizedNewPlan.status as unknown as string,
+                is_locked: normalizedNewPlan.status === 'archived',
               } as any)
-              .select('*')
-              .single()
+              .eq('id', normalizedNewPlan.id)
           );
-
-          if (inserted && (inserted as any).id) {
-            const serverPlan: WeeklyBasePlan = {
-              id: (inserted as any).id,
-              createdAt: (inserted as any).created_at,
-              days: (inserted as any).days,
-              isLocked: (inserted as any).is_locked,
-              editCount: normalizedNewPlan.editCount,
-            } as any;
-            const merged = [...deactivatedPreviousPlans, serverPlan];
-            setBasePlans(merged);
-            await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(merged));
-            planSnapshot = serverPlan;
-            console.log('[UserStore] ✅ weekly_base_plans inserted and local state/id aligned');
-          }
         } catch (e) {
-          console.warn('[UserStore] weekly_base_plans insert failed (will remain local-only until next sync)', e);
+          console.warn('[UserStore] weekly_base_plans update failed', e);
+        }
+
+        // Sync archived status for previously active plans to database
+        // This ensures "View All Plans" shows all historical plans from the database
+        const archivedPlans = updatedBasePlans.filter(p =>
+          p.status === 'archived' && p.id !== normalizedNewPlan.id && isUuid(p.id)
+        );
+        for (const archivedPlan of archivedPlans) {
+          try {
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('weekly_base_plans')
+                .update({
+                  status: 'archived',
+                  is_locked: true,
+                  deactivated_at: archivedPlan.deactivatedAt || new Date().toISOString(),
+                } as any)
+                .eq('id', archivedPlan.id)
+            );
+            console.log('[UserStore] ✅ Archived plan synced to DB:', archivedPlan.id);
+          } catch (e) {
+            console.warn('[UserStore] Failed to sync archived plan:', archivedPlan.id, e);
+          }
         }
 
         try {
@@ -1346,7 +1569,6 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         }
       }
 
-      // Log success in production
       const config = getProductionConfig();
       if (config.isProduction) {
         logProductionMetric('data', 'base_plan_added', {
@@ -1356,6 +1578,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       }
 
       console.log('[UserStore] ✅ addBasePlan completed successfully');
+
+      // Play completion sound (with haptic feedback)
+      playCompletionSound().catch(() => {});
     } catch (error) {
       console.error('[UserStore] ❌ Error saving base plan:', error);
 
@@ -1367,10 +1592,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         });
       }
 
-      // Re-throw to let caller know there was an error
       throw error;
     }
-  }, [basePlans, KEYS.BASE_PLANS, uid, supabase]);
+  }, [basePlans, KEYS.BASE_PLANS, uid, supabase, user, checkins, plans]);
 
   // Define getCurrentBasePlan BEFORE syncLocalToBackend since it's used as a dependency
   const getCurrentBasePlan = useCallback(() => {
@@ -1381,17 +1605,26 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       return undefined;
     }
 
-    // Priority 1: Plan explicitly marked as active (new isActive field)
-    const activePlan = basePlans.find(plan => plan.isActive === true);
+    // Priority 1: Latest generated plan waiting for activation
+    const pendingActivation = basePlans
+      .filter(plan => plan.status === 'generated')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (pendingActivation.length > 0) {
+      console.log('[UserStore] getCurrentBasePlan result (generated):', `Plan ID: ${pendingActivation[0].id}`);
+      return pendingActivation[0];
+    }
+
+    // Priority 2: Active plan
+    const activePlan = basePlans.find(plan => plan.status === 'active' || plan.isActive === true);
     if (activePlan) {
-      console.log('[UserStore] getCurrentBasePlan result (isActive):', `Plan ID: ${activePlan.id}`);
+      console.log('[UserStore] getCurrentBasePlan result (active):', `Plan ID: ${activePlan.id}`);
       return activePlan;
     }
 
     // No active plan found - this shouldn't happen, but handle gracefully
     // Return the most recent plan (it will be auto-activated on next addBasePlan or activateBasePlan call)
     console.log('[UserStore] WARNING: No active plan found, returning most recent plan');
-    
+
     // Priority 2 (Backward compatibility): Prefer the **most recently created** UNLOCKED plan.
     for (let i = basePlans.length - 1; i >= 0; i--) {
       const plan = basePlans[i];
@@ -1407,8 +1640,11 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     return latest;
   }, [basePlans]);
 
-  // Check if user can regenerate base plan (14+ days since last generation)
-  // Uses server time to prevent date manipulation
+  const { isProduction } = getProductionConfig();
+  const BASE_PLAN_REGEN_COOLDOWN_DAYS = isProduction ? 14 : 0; // allow instant regen while testing
+
+  // Check if user can regenerate base plan (14+ days in production)
+  // Uses server time first to prevent date manipulation
   const canRegenerateBasePlan = useCallback(async (): Promise<boolean> => {
     // First check local cache for quick response
     if (!user?.lastBasePlanGeneratedAt) {
@@ -1422,7 +1658,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         const { data, error } = await supabase
           .rpc('get_server_time_and_last_plan', { p_user_id: uid })
           .maybeSingle();
-        
+
         // If RPC doesn't exist, fall back to simpler query
         if (error?.code === 'PGRST202') {
           // Fallback: Get profile with server time comparison
@@ -1431,16 +1667,16 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
             .select('last_base_plan_generated_at')
             .eq('id', uid)
             .maybeSingle();
-          
+
           if (!profile?.last_base_plan_generated_at) {
             return true;
           }
-          
+
           // Use local check as fallback (still better than nothing)
           const lastGenerated = new Date(profile.last_base_plan_generated_at);
           const now = new Date();
           const daysSince = Math.floor((now.getTime() - lastGenerated.getTime()) / (1000 * 60 * 60 * 24));
-          return daysSince >= 14;
+          return daysSince >= BASE_PLAN_REGEN_COOLDOWN_DAYS;
         }
 
         if (data && typeof data === 'object') {
@@ -1458,8 +1694,8 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const lastGenerated = new Date(user.lastBasePlanGeneratedAt);
     const now = new Date();
     const daysSinceLastGeneration = Math.floor((now.getTime() - lastGenerated.getTime()) / (1000 * 60 * 60 * 24));
-    return daysSinceLastGeneration >= 14;
-  }, [user?.lastBasePlanGeneratedAt, uid, supabase]);
+    return daysSinceLastGeneration >= BASE_PLAN_REGEN_COOLDOWN_DAYS;
+  }, [user?.lastBasePlanGeneratedAt, uid, supabase, BASE_PLAN_REGEN_COOLDOWN_DAYS]);
 
   // Get time until next regeneration is allowed (uses server time when available)
   const getTimeUntilNextRegeneration = useCallback(async (): Promise<{ days: number; hours: number } | null> => {
@@ -1478,7 +1714,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
           .select('last_base_plan_generated_at')
           .eq('id', uid)
           .maybeSingle();
-        
+
         if (profile?.last_base_plan_generated_at) {
           lastGeneratedTime = new Date(profile.last_base_plan_generated_at);
           // Get approximate server time (Supabase servers are synced)
@@ -1496,19 +1732,19 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       serverNow = new Date();
     }
 
-    const nextAllowed = new Date(lastGeneratedTime.getTime() + 14 * 24 * 60 * 60 * 1000);
-    
+    const nextAllowed = new Date(lastGeneratedTime.getTime() + BASE_PLAN_REGEN_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+
     if (serverNow >= nextAllowed) {
       return null;
     }
-    
+
     const msRemaining = nextAllowed.getTime() - serverNow.getTime();
     const totalHours = Math.floor(msRemaining / (1000 * 60 * 60));
     const days = Math.floor(totalHours / 24);
     const hours = totalHours % 24;
-    
+
     return { days, hours };
-  }, [user?.lastBasePlanGeneratedAt, uid, supabase]);
+  }, [user?.lastBasePlanGeneratedAt, uid, supabase, BASE_PLAN_REGEN_COOLDOWN_DAYS]);
 
   // Rename a base plan
   const renameBasePlan = useCallback(async (planId: string, newName: string): Promise<boolean> => {
@@ -1521,9 +1757,10 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
       const updatedPlans = [...basePlans];
       updatedPlans[planIndex] = { ...updatedPlans[planIndex], name: newName };
-      
-      setBasePlans(updatedPlans);
-      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedPlans));
+
+      const dedupedPlans = dedupeWeeklyPlans(updatedPlans);
+      setBasePlans(dedupedPlans);
+      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(dedupedPlans));
 
       // Sync to Supabase profile snapshot if this is the active plan
       // Note: weekly_base_plans table may not have a 'name' column, so we only update profile snapshot
@@ -1558,7 +1795,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
     const startDate = plan.activatedAt ? new Date(plan.activatedAt) : new Date(plan.createdAt);
     const endDate = plan.deactivatedAt ? new Date(plan.deactivatedAt) : new Date();
-    
+
     // Calculate days active
     const daysActive = Math.max(1, Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
 
@@ -1573,7 +1810,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const weightsInPeriod = periodCheckins
       .map(c => c.currentWeight ?? c.bodyWeight)
       .filter((w): w is number => typeof w === 'number' && !isNaN(w));
-    
+
     if (weightsInPeriod.length >= 2) {
       weightChangeKg = weightsInPeriod[weightsInPeriod.length - 1] - weightsInPeriod[0];
     }
@@ -1582,7 +1819,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
     const periodPlans = plans.filter(p => p.date >= startDateStr && p.date <= endDateStr);
-    
+
     let consistencyPercent: number | undefined;
     if (periodPlans.length > 0) {
       const validAdherence = periodPlans
@@ -1608,19 +1845,21 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       const now = new Date().toISOString();
       const updatedPlans = basePlans.map((plan, idx) => {
         if (idx === planIndex) {
-          // Activate this plan
           return {
             ...plan,
+            status: 'active' as WeeklyPlanStatus,
             isActive: true,
+            isLocked: false,
             activatedAt: now,
-            deactivatedAt: undefined, // Clear any previous deactivation
+            deactivatedAt: undefined,
           };
-        } else if (plan.isActive) {
-          // Deactivate currently active plan and calculate its stats
+        } else if (plan.status === 'active' || plan.isActive) {
           const stats = calculatePlanStats(plan.id);
           return {
             ...plan,
+            status: 'archived' as WeeklyPlanStatus,
             isActive: false,
+            isLocked: true,
             deactivatedAt: now,
             stats: stats || plan.stats,
           };
@@ -1628,16 +1867,32 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         return plan;
       });
 
-      setBasePlans(updatedPlans);
-      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedPlans));
+      const dedupedPlans = dedupeWeeklyPlans(updatedPlans);
+      setBasePlans(dedupedPlans);
+      await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(dedupedPlans));
 
       // Sync to Supabase - only update profile snapshot since weekly_base_plans
       // may not have is_active/activated_at/deactivated_at columns
       if (uid) {
         try {
-          // Update profile snapshot with the newly active plan
           const activatedPlan = updatedPlans.find(p => p.id === planId);
           if (activatedPlan) {
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('weekly_base_plans')
+                .update({ status: 'archived', is_locked: true })
+                .eq('user_id', uid)
+                .eq('status', 'active')
+                .neq('id', planId)
+            );
+
+            await retrySupabaseOperation(async () =>
+              await supabase
+                .from('weekly_base_plans')
+                .update({ status: 'active', is_locked: false, activated_at: now })
+                .eq('id', planId)
+            );
+
             await retrySupabaseOperation(async () =>
               await supabase
                 .from('profiles')
@@ -1645,7 +1900,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
                 .eq('id', uid)
             );
           }
-          console.log('[UserStore] ✅ Plan activation synced to profile snapshot');
+          console.log('[UserStore] ✅ Plan activation synced to Supabase');
         } catch (e) {
           console.warn('[UserStore] Failed to sync plan activation to Supabase', e);
         }
@@ -1664,7 +1919,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     if (!user) return;
     const updatedUser = { ...user, lastBasePlanGeneratedAt: timestamp };
     await updateUser(updatedUser);
-    
+
     // Also sync to Supabase
     if (uid) {
       try {
@@ -1702,7 +1957,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       }
 
       const updatedPlans = basePlans.filter(p => p.id !== planId);
-      
+
       setBasePlans(updatedPlans);
       await AsyncStorage.setItem(KEYS.BASE_PLANS, JSON.stringify(updatedPlans));
 
@@ -2058,9 +2313,12 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const earliestLoggedWeight = weightHistory.length > 0 ? weightHistory[0].weight : undefined;
 
     const goal = user.goalWeight as number;
+    // Use profile weight as the starting point if available (onboarding weight),
+    // otherwise fall back to the first logged check-in weight.
     const start =
+      (typeof user.weight === 'number' ? user.weight : undefined) ??
       earliestLoggedWeight ??
-      (typeof user.weight === 'number' ? user.weight : current);
+      current;
 
     const remaining = Math.abs(current - goal);
     // Determine if goal requires gaining or losing based on start weight
@@ -2144,7 +2402,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
 
   // Accept fresh completion data to avoid stale closure issues
   const updatePlanAdherenceAndSync = useCallback(async (
-    date: string, 
+    date: string,
     freshCompletions?: { completedMeals?: string[]; completedExercises?: string[] }
   ) => {
     try {
@@ -2199,9 +2457,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const next = { ...completionsByDate, [date]: { ...prev, completedMeals: nextMealsArr } };
     await persistCompletions(next);
     // Pass fresh data to avoid stale state issues
-    updatePlanAdherenceAndSync(date, { 
-      completedMeals: nextMealsArr, 
-      completedExercises: prev.completedExercises 
+    updatePlanAdherenceAndSync(date, {
+      completedMeals: nextMealsArr,
+      completedExercises: prev.completedExercises
     });
   }, [completionsByDate, persistCompletions, updatePlanAdherenceAndSync]);
 
@@ -2213,9 +2471,9 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
     const next = { ...completionsByDate, [date]: { ...prev, completedExercises: nextExercisesArr } };
     await persistCompletions(next);
     // Pass fresh data to avoid stale state issues
-    updatePlanAdherenceAndSync(date, { 
-      completedMeals: prev.completedMeals, 
-      completedExercises: nextExercisesArr 
+    updatePlanAdherenceAndSync(date, {
+      completedMeals: prev.completedMeals,
+      completedExercises: nextExercisesArr
     });
   }, [completionsByDate, persistCompletions, updatePlanAdherenceAndSync]);
 
@@ -2460,9 +2718,38 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       setCompletionsByDate({});
       setCheckinCounts({});
 
+      // Clear database tables (if user is authenticated)
+      // Order matters: plan_versions cascades from daily_plans, daily_plans refs weekly_base_plans
+      if (uid && supabase) {
+        console.log('[ClearData] Clearing database tables for user...');
+        try {
+          // Delete plan generation jobs first (no dependencies)
+          await supabase.from('plan_generation_jobs').delete().eq('user_id', uid);
+
+          // Delete daily_plans (plan_versions will cascade delete)
+          await supabase.from('daily_plans').delete().eq('user_id', uid);
+
+          // Delete weekly_base_plans (all base plans and previous plans)
+          await supabase.from('weekly_base_plans').delete().eq('user_id', uid);
+
+          // Delete checkins
+          await supabase.from('checkins').delete().eq('user_id', uid);
+
+          // Delete food extras
+          await supabase.from('food_extras').delete().eq('user_id', uid);
+
+          console.log('[ClearData] Database tables cleared successfully');
+        } catch (dbError) {
+          console.warn('[ClearData] Failed to clear some database tables:', dbError);
+          // Continue with local storage clearing even if DB fails
+        }
+      }
+
       // Then clear AsyncStorage (scoped to current uid). Intentionally preserve any
-      // subscription-related keys (e.g., RevenueCat cache, paywall bypass) and notification prefs.
+      // subscription-related keys (e.g., RevenueCat cache, paywall bypass), but remove all
+      // other user data and per-user preferences / analytics stored locally.
       await Promise.all([
+        // Core per-user store data
         AsyncStorage.removeItem(KEYS.USER),
         AsyncStorage.removeItem(KEYS.CHECKINS),
         AsyncStorage.removeItem(KEYS.PLANS),
@@ -2471,12 +2758,25 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
         AsyncStorage.removeItem(KEYS.EXTRAS),
         AsyncStorage.removeItem(KEYS.COMPLETIONS),
         AsyncStorage.removeItem(KEYS.CHECKIN_COUNTS),
+
+        // Queued food operations
         AsyncStorage.removeItem(scopedKey('Liftor_food_ops', uid)),
-        // Clear additional user-scoped data
+
+        // Background job + game stats
         AsyncStorage.removeItem(scopedKey('Liftor_basePlanJobState', uid)),
         AsyncStorage.removeItem(scopedKey('Liftor_game_stats', uid)),
+        AsyncStorage.removeItem(scopedKey('Liftor_miniGameHighScore', uid)),
+
+        // Notifications (preferences and local mirrors)
+        AsyncStorage.removeItem(scopedKey('Liftor_notification_prefs_v2', uid)),
+        AsyncStorage.removeItem('Liftor_notification_prefs'), // legacy, non-scoped
         AsyncStorage.removeItem(scopedKey('Liftor_inAppNotifications_v2', uid)),
         AsyncStorage.removeItem(scopedKey('Liftor_deliveredSupabaseNotifs', uid)),
+
+        // Local analytics / logs that may contain user data
+        AsyncStorage.removeItem('Liftor_generationTimeHistory'),
+        AsyncStorage.removeItem('Liftor_lastEstimateAccuracy'),
+        AsyncStorage.removeItem('production_logs'),
       ]);
 
       console.log('All data cleared successfully (subscription data preserved)');
@@ -2484,7 +2784,7 @@ export const [UserProvider, useUserStore] = createContextHook(() => {
       console.error('Error clearing data:', error);
       throw error;
     }
-  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, KEYS.COMPLETIONS, KEYS.CHECKIN_COUNTS, uid]);
+  }, [KEYS.USER, KEYS.CHECKINS, KEYS.PLANS, KEYS.BASE_PLANS, KEYS.FOOD_LOG, KEYS.EXTRAS, KEYS.COMPLETIONS, KEYS.CHECKIN_COUNTS, uid, supabase]);
 
   const value = useMemo(() => ({
     user,

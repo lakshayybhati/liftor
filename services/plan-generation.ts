@@ -9,7 +9,7 @@
 
 import type { User, WeeklyBasePlan, CheckinData, DailyPlan } from '@/types/user';
 import { 
-  generateBasePlan, 
+  generateBasePlan,
   generateDailyPlan as generateDaily,
   BasePlanGenerationError,
   isGenerationInProgress,
@@ -26,14 +26,7 @@ export {
 };
 
 /**
- * Generate a weekly base plan for a user
- * 
- * This is the main entry point for base plan generation.
- * Uses a two-stage AI pipeline:
- * 1. Generate: Fast AI call to create the plan
- * 2. Verify: Thorough review and fix any issues
- * 
- * @throws BasePlanGenerationError if generation fails (NO FALLBACK)
+ * @deprecated Client-side weekly plan generation is deprecated. Use server-side generation.
  */
 export async function generateWeeklyBasePlan(user: User): Promise<WeeklyBasePlan> {
   return await generateBasePlan(user);

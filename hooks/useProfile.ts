@@ -55,6 +55,17 @@ export interface Profile {
   subscription_expiration_at?: string | null;
   subscription_renewal_at?: string | null;
   last_rc_event?: unknown | null;
+  
+  // Local trial fields (server-managed 3-day trial)
+  trial_type?: 'none' | 'local' | 'storekit' | null;
+  trial_active?: boolean;
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
+  has_had_local_trial?: boolean;
+  
+  // Discount eligibility
+  discount_eligible_immediate?: boolean;
+  discount_used_at?: string | null;
 }
 
 export function useProfile() {
@@ -77,7 +88,6 @@ export function useProfile() {
       const profile = data as any;
       if (profile) {
         profile.training_style_preferences = profile.preferred_exercises;
-        // keep original for safety or delete if purely using new name
       }
       return profile as Profile;
     },

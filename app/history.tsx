@@ -34,7 +34,7 @@ const getMoodEmoji = (mood?: string | number): string => {
     const moodIndex = Math.max(0, Math.min(4, mood - 1)); // Convert 1-5 to 0-4 index
     return MOOD_OPTIONS[moodIndex]?.emoji || '😐'; // Fallback to neutral
   }
-  
+
   if (typeof mood === 'string') {
     // If it's already an emoji string, return it
     if (mood.match(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]/u)) {
@@ -52,7 +52,7 @@ const getMoodEmoji = (mood?: string | number): string => {
     }
     return '😐';
   }
-  
+
   // Fallback to neutral emoji when no mood data
   return '😐';
 };
@@ -65,17 +65,17 @@ const getLatestCheckinForDate = (checkins: any[], date: string) => {
 
 export default function HistoryScreen() {
   const userStore = useUserStore();
-  
+
   // Handle case where user store is temporarily unavailable during data clearing
   if (!userStore) {
     return (
       <View style={styles.container}>
-        <Stack.Screen 
-          options={{ 
+        <Stack.Screen
+          options={{
             title: 'History & Progress',
             headerStyle: { backgroundColor: theme.color.bg },
             headerTintColor: theme.color.ink,
-          }} 
+          }}
         />
         <SafeAreaView style={styles.safeArea}>
           <View style={styles.loadingContainer}>
@@ -85,10 +85,10 @@ export default function HistoryScreen() {
       </View>
     );
   }
-  
+
   const { getRecentCheckins, plans, getWeightData, getWeightProgress, user, recalculateAdherence } = userStore;
   const [timeRange, setTimeRange] = useState<TimeRange>('7d');
-  
+
   // Use ref to store the latest recalculateAdherence function
   const recalculateRef = useRef(recalculateAdherence);
   recalculateRef.current = recalculateAdherence;
@@ -104,7 +104,7 @@ export default function HistoryScreen() {
   );
 
   const days = timeRange === '7d' ? 7 : timeRange === '14d' ? 14 : 30;
-  
+
   // Memoized data selectors for performance
   const memoizedData = useMemo(() => {
     const cutoffDate = new Date();
@@ -117,10 +117,10 @@ export default function HistoryScreen() {
     const recentPlans = plans
       .filter(p => p.date >= cutoffDateStr)
       .sort((a, b) => a.date.localeCompare(b.date));
-    
+
     const weightData = getWeightData();
     const weightProgress = getWeightProgress();
-    
+
     return {
       recentCheckins,
       recentPlans,
@@ -131,7 +131,7 @@ export default function HistoryScreen() {
       hasWeightData: weightData.length > 0
     };
   }, [getRecentCheckins, plans, getWeightData, getWeightProgress, days]);
-  
+
   const { recentCheckins, recentPlans, weightData, weightProgress, hasCheckins, hasPlans, hasWeightData } = memoizedData;
 
   // Memoized statistics calculations with error handling
@@ -141,7 +141,7 @@ export default function HistoryScreen() {
       const energyLevels = recentCheckins
         .filter(c => c.energy && typeof c.energy === 'number')
         .map(c => c.energy!);
-      
+
       if (energyLevels.length === 0) return 0;
       return Math.round((energyLevels.reduce((a, b) => a + b, 0) / energyLevels.length) * 10) / 10;
     };
@@ -151,7 +151,7 @@ export default function HistoryScreen() {
       const stressLevels = recentCheckins
         .filter(c => c.stress && typeof c.stress === 'number')
         .map(c => c.stress!);
-      
+
       if (stressLevels.length === 0) return 0;
       return Math.round((stressLevels.reduce((a, b) => a + b, 0) / stressLevels.length) * 10) / 10;
     };
@@ -166,35 +166,35 @@ export default function HistoryScreen() {
       // Prefer adherence when available: calculate based ONLY on days with actual data
       // This ensures new users see accurate stats based on their activity, not empty days
       const plansWithAdherence = recentPlans.filter(p => typeof p.adherence === 'number');
-      
+
       if (plansWithAdherence.length > 0) {
         // Sort chronologically to ensure we weight the correct days
         plansWithAdherence.sort((a, b) => a.date.localeCompare(b.date));
-        
+
         // For new users (3 or fewer days of data), use simple average - no weighting
         // This prevents confusing percentages when the user is just starting out
         const n = plansWithAdherence.length;
-        
+
         if (n <= 3) {
           // Simple average for new users - just average the days they've actually used
           const sum = plansWithAdherence.reduce((acc, p) => acc + (p.adherence || 0), 0);
           return Math.round((sum / n) * 100);
         }
-        
+
         // For users with more data, use weighted average (recent days matter more)
         let weightedSum = 0;
         let totalWeight = 0;
-        
+
         plansWithAdherence.forEach((p, index) => {
           // Calculate weight: more recent (higher index) = higher weight
           // index n-1 is the most recent day -> weight 1.0
           const distFromEnd = (n - 1) - index;
           const weight = Math.max(0.3, 1.0 - (distFromEnd * 0.1));
-          
+
           weightedSum += (p.adherence || 0) * weight;
           totalWeight += weight;
         });
-        
+
         const avg = totalWeight > 0 ? weightedSum / totalWeight : 0;
         return Math.round(avg * 100);
       }
@@ -208,7 +208,7 @@ export default function HistoryScreen() {
 
         const firstCheckinDate = new Date(checkinDates[0]);
         const today = new Date();
-        
+
         // Calculate days between first check-in and today (inclusive)
         const timeDiff = today.getTime() - firstCheckinDate.getTime();
         const daysActive = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
@@ -221,7 +221,7 @@ export default function HistoryScreen() {
 
       return 0;
     };
-    
+
     return {
       averageEnergy: getAverageEnergy(),
       averageStress: getAverageStress(),
@@ -279,7 +279,7 @@ export default function HistoryScreen() {
             {(hasPlans || hasCheckins) ? `${statistics.completionRate}%` : '--'}
           </Text>
           <Text style={styles.statLabel} numberOfLines={1}>
-            {statistics.adherenceDaysCount > 0 
+            {statistics.adherenceDaysCount > 0
               ? `${statistics.adherenceDaysCount}d Avg`
               : 'Avg'}
           </Text>
@@ -294,11 +294,11 @@ export default function HistoryScreen() {
     const hasWeightGoal = weightProgress !== null;
     const isNegative = rate < 0;
     const displayRate = Math.abs(rate);
-    
+
     // Determine motivational text based on weight progress
     const getMotivationText = (r: number) => {
       if (!hasWeightGoal) return "Set a weight goal to track progress!";
-      
+
       // Negative progress - moving in wrong direction
       if (r < 0) {
         const absR = Math.abs(r);
@@ -307,7 +307,7 @@ export default function HistoryScreen() {
         if (absR >= 10) return "Small setback - you've got this! 🎯";
         return "Stay focused on your goal! ✨";
       }
-      
+
       // Positive progress
       if (r === 0) return "Your journey begins now! 💪";
       if (r >= 100) return "Goal reached! You did it! 🎉🔥";
@@ -316,7 +316,7 @@ export default function HistoryScreen() {
       if (r >= 75) return "Amazing progress! Keep going! 🚀";
       if (r >= 50) return "Halfway there! Stay strong! 🎯";
       if (r >= 25) return "Great start! Keep it up! ✨";
-      
+
       // For lower percentages, give specific next-step encouragement
       const nextMilestone = Math.ceil((r + 1) / 10) * 10;
       return `Push to ${nextMilestone}%! You got this!`;
@@ -333,14 +333,14 @@ export default function HistoryScreen() {
             {hasWeightGoal ? `${isNegative ? '-' : ''}${displayRate}%` : '--'}
           </Text>
         </View>
-        
+
         <View style={styles.sliderTrack}>
           <View style={[
             styles.sliderFill,
             { width: `${isNegative ? 0 : Math.min(100, displayRate)}%` }
           ]} />
         </View>
-        
+
         <Text style={styles.motivationText}>
           {getMotivationText(rate)}
         </Text>
@@ -363,11 +363,11 @@ export default function HistoryScreen() {
     // Filter weight data to respect selected time range
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
-    
+
     const recentWeightData = weightData
       .filter(point => new Date(point.date) >= cutoffDate)
       .slice(-Math.min(days, 15)); // Show up to 15 entries for readability
-    
+
     // Safety check: if no weight data in selected time range, show message
     if (recentWeightData.length === 0) {
       return (
@@ -377,7 +377,7 @@ export default function HistoryScreen() {
         </Card>
       );
     }
-    
+
     const withGoal = typeof user?.goalWeight === 'number' && !Number.isNaN(user.goalWeight);
     const rawMin = Math.min(...recentWeightData.map(d => d.weight), withGoal ? user!.goalWeight! : Infinity);
     const rawMax = Math.max(...recentWeightData.map(d => d.weight), withGoal ? user!.goalWeight! : -Infinity);
@@ -421,7 +421,7 @@ export default function HistoryScreen() {
 
           {/* Goal line (dashed) */}
           {withGoal && (
-            <View 
+            <View
               style={[
                 styles.goalLine,
                 { bottom: `${(((user!.goalWeight! - minWeight) / weightRange) * 100)}%` }
@@ -440,9 +440,9 @@ export default function HistoryScreen() {
           ))}
 
           {/* SVG Chart - proper line rendering */}
-          <Svg 
-            width="100%" 
-            height="100%" 
+          <Svg
+            width="100%"
+            height="100%"
             style={styles.svgChart}
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
@@ -463,7 +463,7 @@ export default function HistoryScreen() {
                 strokeLinejoin="round"
               />
             )}
-            
+
             {/* Draw points */}
             {recentWeightData.map((point, index) => {
               const denom = Math.max(1, recentWeightData.length - 1);
@@ -535,15 +535,15 @@ export default function HistoryScreen() {
           {energyData.map((checkin, index) => {
             const height = (checkin.energy! / maxEnergy) * 100;
             const date = new Date(checkin.date);
-            
+
             return (
               <View key={index} style={styles.chartBar}>
                 <View style={styles.barContainer}>
-                  <View 
+                  <View
                     style={[
-                      styles.bar, 
+                      styles.bar,
                       { height: `${height}%` }
-                    ]} 
+                    ]}
                   />
                 </View>
                 <Text style={styles.barLabel}>
@@ -560,68 +560,68 @@ export default function HistoryScreen() {
 
   const renderRecentCheckins = () => {
     const timeRangeLabel = timeRange === '7d' ? '7 Days' : timeRange === '14d' ? '14 Days' : '30 Days';
-    
+
     return (
       <Card style={styles.checkinsCard}>
         <Text style={styles.checkinsTitle}>Recent Check-ins (Last {timeRangeLabel})</Text>
-      {recentCheckins.length === 0 ? (
-        <Text style={styles.noDataText}>No check-ins yet</Text>
-      ) : (
-        <View style={styles.checkinsList}>
-          {recentCheckins.slice(0, Math.min(days, 20)).map((checkin, index) => {
-            const date = new Date(checkin.date);
-            
-            return (
-              <View key={index} style={styles.checkinItem}>
-                <View style={styles.checkinDate}>
-                  <Text style={styles.checkinDateText}>
-                    {date.toLocaleDateString('en-US', { 
-                      month: 'short', 
-                      day: 'numeric' 
-                    })}
-                  </Text>
-                  <Text style={styles.checkinMode}>{checkin.mode}</Text>
-                </View>
-                
-                <View style={styles.checkinMetrics}>
-                  {checkin.energy && (
+        {recentCheckins.length === 0 ? (
+          <Text style={styles.noDataText}>No check-ins yet</Text>
+        ) : (
+          <View style={styles.checkinsList}>
+            {recentCheckins.slice(0, Math.min(days, 20)).map((checkin, index) => {
+              const date = new Date(checkin.date);
+
+              return (
+                <View key={index} style={styles.checkinItem}>
+                  <View style={styles.checkinDate}>
+                    <Text style={styles.checkinDateText}>
+                      {date.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric'
+                      })}
+                    </Text>
+                    <Text style={styles.checkinMode}>{checkin.mode}</Text>
+                  </View>
+
+                  <View style={styles.checkinMetrics}>
+                    {checkin.energy && (
+                      <View style={styles.metric}>
+                        <Text style={styles.metricLabel}>Energy</Text>
+                        <Text style={styles.metricValue}>{checkin.energy}/10</Text>
+                      </View>
+                    )}
+                    {checkin.stress && (
+                      <View style={styles.metric}>
+                        <Text style={styles.metricLabel}>Stress</Text>
+                        <Text style={styles.metricValue}>{checkin.stress}/10</Text>
+                      </View>
+                    )}
                     <View style={styles.metric}>
-                      <Text style={styles.metricLabel}>Energy</Text>
-                      <Text style={styles.metricValue}>{checkin.energy}/10</Text>
+                      <Text style={styles.metricLabel}>Mood</Text>
+                      <Text style={styles.metricValue}>{getMoodEmoji((checkin as any).moodCharacter || checkin.mood)}</Text>
                     </View>
-                  )}
-                  {checkin.stress && (
-                    <View style={styles.metric}>
-                      <Text style={styles.metricLabel}>Stress</Text>
-                      <Text style={styles.metricValue}>{checkin.stress}/10</Text>
-                    </View>
-                  )}
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Mood</Text>
-                    <Text style={styles.metricValue}>{getMoodEmoji((checkin as any).moodCharacter || checkin.mood)}</Text>
                   </View>
                 </View>
-              </View>
-            );
-          })}
-        </View>
-      )}
-    </Card>
+              );
+            })}
+          </View>
+        )}
+      </Card>
     );
   };
 
   return (
     <View style={styles.container}>
-      <Stack.Screen 
-        options={{ 
+      <Stack.Screen
+        options={{
           title: 'History & Progress',
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
-        }} 
+        }}
       />
-      
+
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView 
+        <ScrollView
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           bounces={true}
@@ -667,8 +667,9 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 8,
+    borderRadius: theme.radius.md - 4,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   activeTimeRange: {
     backgroundColor: theme.color.accent.primary,

@@ -260,4 +260,17 @@ export interface WeeklyBasePlan {
     consistencyPercent?: number; // Avg adherence during active period
     daysActive?: number;      // Total days this plan was active
   };
+  status?: WeeklyPlanStatus;
+  weekStartDate?: string;
+  generatedAt?: string;
+  generationJobId?: string | null;
+  // Redo tracking
+  redoUsed?: boolean;           // TRUE after user has used their one-time redo
+  redoReason?: string;          // User feedback text for the redo request
+  originalPlanId?: string;      // Reference to the original plan before redo
+  // Daily redo limit tracking (PRODUCTION: max 2 redos per day)
+  redoCountToday?: number;      // Number of redos used today (resets daily)
+  lastRedoDate?: string;        // Date (YYYY-MM-DD) when last redo was used
 }
+
+export type WeeklyPlanStatus = 'pending' | 'generating' | 'generated' | 'active' | 'archived';

@@ -70,10 +70,10 @@ export interface InAppNotification {
 
 const STORAGE_KEYS = {
   PREFERENCES: 'Liftor_notification_prefs_v2', // v2 to migrate from old format
-  IN_APP_NOTIFICATIONS: 'Liftor_inAppNotifications_v2',
   DELIVERED_SUPABASE_IDS: 'Liftor_deliveredSupabaseNotifs',
   // Legacy keys to clean up during migration
   LEGACY_PREFS: 'Liftor_notification_prefs', // Old global (non-user-scoped) prefs
+  // NOTE: IN_APP_NOTIFICATIONS removed - now stored in Supabase user_notifications table
 } as const;
 
 // Minimum queue size before we top up check-in reminders
@@ -174,7 +174,7 @@ class NotificationServiceClass {
       const currentPrefs = await this.getPreferences();
 
       // Only migrate if current prefs are default (user hasn't set anything yet)
-      const isCurrentDefault = 
+      const isCurrentDefault =
         currentPrefs.workoutRemindersEnabled === true &&
         currentPrefs.checkInRemindersEnabled === true &&
         currentPrefs.milestonesEnabled === true &&
@@ -222,6 +222,44 @@ class NotificationServiceClass {
   // PUSH TOKEN REGISTRATION
   // ============================================================================
 
+  /**
+   * Register push token EARLY - immediately after login/signup.
+   * This is called separately from initialize() to ensure we capture the push token
+   * as soon as possible, even during onboarding before the user has completed setup.
+   * 
+   * This ensures the server can send "plan ready" notifications even if the user
+   * closes the app during plan generation.
+   */
+  async registerPushTokenEarly(userId: string, supabase: any): Promise<string | null> {
+    console.log('[NotificationService] 🔔 Early push token registration for user:', userId?.substring(0, 8));
+
+    // Temporarily set user context for token registration
+    const prevUserId = this.currentUserId;
+    const prevSupabase = this.supabaseClient;
+
+    this.currentUserId = userId;
+    this.supabaseClient = supabase;
+
+    try {
+      const token = await this.registerPushToken();
+      if (token) {
+        console.log('[NotificationService] ✅ Early push token saved successfully');
+      } else {
+        console.warn('[NotificationService] ⚠️ Early push token registration returned no token');
+      }
+      return token;
+    } catch (error) {
+      console.error('[NotificationService] ❌ Early push token registration failed:', error);
+      return null;
+    } finally {
+      // Restore previous context if not fully initialized yet
+      if (!this.initialized) {
+        this.currentUserId = prevUserId;
+        this.supabaseClient = prevSupabase;
+      }
+    }
+  }
+
   private async registerPushToken(): Promise<string | null> {
     const config = getProductionConfig();
 
@@ -236,12 +274,12 @@ class NotificationServiceClass {
     try {
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
-      
+
       if (existingStatus !== 'granted') {
         const { status } = await Notifications.requestPermissionsAsync();
         finalStatus = status;
       }
-      
+
       if (finalStatus !== 'granted') {
         console.warn('[NotificationService] Permission not granted');
         if (config.isProduction) {
@@ -388,7 +426,12 @@ class NotificationServiceClass {
       await this.cancelCheckInReminder();
 
       // Parse the time
-      const { hour, minute } = this.parseTimeString(time);
+      const parsed = this.parseTimeString(time);
+      if (!parsed) {
+        console.warn('[NotificationService] Invalid check-in time:', time);
+        return null;
+      }
+      const { hour, minute } = parsed;
 
       // Schedule the next N reminders explicitly so the first one never fires immediately
       const upcomingDates = this.getUpcomingCheckInDates(hour, minute, CHECKIN_SCHEDULE_WINDOW_DAYS);
@@ -442,7 +485,7 @@ class NotificationServiceClass {
   async cancelCheckInReminder(): Promise<void> {
     try {
       const prefs = await this.getPreferences();
-      
+
       // Cancel by stored ID if available
       const idsToCancel = [
         ...(prefs.scheduledCheckInIds ?? []),
@@ -520,7 +563,12 @@ class NotificationServiceClass {
       await this.cancelWorkoutReminder();
 
       // Parse the time and calculate reminder time (10 min before)
-      const { hour, minute } = this.parseTimeString(preferredTime);
+      const parsed = this.parseTimeString(preferredTime);
+      if (!parsed) {
+        console.warn('[NotificationService] Invalid workout time:', preferredTime);
+        return null;
+      }
+      const { hour, minute } = parsed;
       let reminderHour = hour;
       let reminderMinute = minute - 10;
       if (reminderMinute < 0) {
@@ -560,7 +608,7 @@ class NotificationServiceClass {
   async cancelWorkoutReminder(): Promise<void> {
     try {
       const prefs = await this.getPreferences();
-      
+
       // Cancel by stored ID if available
       if (prefs.scheduledWorkoutId) {
         await Notifications.cancelScheduledNotificationAsync(prefs.scheduledWorkoutId);
@@ -625,7 +673,7 @@ class NotificationServiceClass {
     const prefs = await this.getPreferences();
     const key = this.getMilestoneKey(type, details);
     const notified = prefs.notifiedMilestones || [];
-    
+
     if (!notified.includes(key)) {
       // Keep only last 100 milestone keys to prevent unbounded growth
       const updated = [...notified, key].slice(-100);
@@ -639,7 +687,7 @@ class NotificationServiceClass {
   async resetMilestoneTracking(type?: 'streak' | 'weight_goal' | 'plan_completed'): Promise<void> {
     const prefs = await this.getPreferences();
     const notified = prefs.notifiedMilestones || [];
-    
+
     if (!type) {
       // Reset all
       await this.savePreferences({ notifiedMilestones: [] });
@@ -661,7 +709,7 @@ class NotificationServiceClass {
     details?: any
   ): Promise<void> {
     const prefs = await this.getPreferences();
-    
+
     if (!prefs.milestonesEnabled) {
       console.log('[NotificationService] Milestone notifications disabled, skipping');
       return;
@@ -712,68 +760,69 @@ class NotificationServiceClass {
   }
 
   // ============================================================================
-  // BASE PLAN NOTIFICATIONS (State-transition based)
+  // BASE PLAN NOTIFICATIONS (Server-sent only)
   // ============================================================================
 
   /**
    * Send base plan ready notification.
-   * This should ONLY be called when the plan actually transitions to 'ready'.
+   * 
+   * NOTE: For server-side plan generation, the server sends push notifications
+   * and inserts into user_notifications table. This method is now a no-op
+   * to prevent duplicate notifications.
+   * 
+   * For client-side generation fallback, we add to Supabase user_notifications
+   * which will sync to the in-app notification center. The server handles push.
+   * 
+   * @deprecated - Server now handles all base plan notifications
    */
   async sendBasePlanReadyNotification(): Promise<void> {
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
+    // NO LOCAL OS NOTIFICATION - Server sends push notifications
+    // Just log for debugging - the server handles notification delivery
+    console.log('[NotificationService] Base plan ready - server handles notification delivery');
+
+    // If this is called from client-side generation, add to Supabase for in-app center
+    // The server's push notification will reach the user via Expo push service
+    if (this.supabaseClient && this.currentUserId) {
+      try {
+        await this.addInAppNotification({
+          type: 'base_plan_ready',
           title: '🎉 Your plan is ready!',
           body: 'Your personalized fitness plan has been generated. Tap to review and start your journey.',
-          data: { type: 'base_plan_ready', screen: '/plan-preview' },
-          sound: true,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
-        },
-        trigger: null, // Immediate
-      });
-
-      // Also add to in-app notifications
-      await this.addInAppNotification({
-        type: 'base_plan_ready',
-        title: '🎉 Your plan is ready!',
-        body: 'Your personalized fitness plan has been generated. Tap to review and start your journey.',
-        link: '/plan-preview',
-      });
-
-      console.log('[NotificationService] Base plan ready notification sent');
-    } catch (error) {
-      console.error('[NotificationService] Failed to send base plan ready notification:', error);
+          link: '/plan-preview',
+        });
+      } catch (error) {
+        console.warn('[NotificationService] Failed to add plan ready to in-app center:', error);
+      }
     }
   }
 
   /**
    * Send base plan error notification.
-   * This should ONLY be called when generation actually fails.
+   * 
+   * NOTE: For server-side plan generation, the server sends push notifications
+   * and inserts into user_notifications table. This method is now a no-op
+   * to prevent duplicate notifications.
+   * 
+   * @deprecated - Server now handles all base plan notifications
    */
   async sendBasePlanErrorNotification(errorMessage: string): Promise<void> {
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
+    // NO LOCAL OS NOTIFICATION - Server sends push notifications
+    // Just log for debugging - the server handles notification delivery
+    console.log('[NotificationService] Base plan error - server handles notification delivery');
+
+    // If this is called from client-side generation, add to Supabase for in-app center
+    if (this.supabaseClient && this.currentUserId) {
+      try {
+        await this.addInAppNotification({
+          type: 'base_plan_error',
           title: '⚠️ Plan generation issue',
           body: 'We had trouble generating your plan. Tap to try again.',
-          data: { type: 'base_plan_error', screen: '/plan-building', error: errorMessage },
-          sound: true,
-        },
-        trigger: null, // Immediate
-      });
-
-      // Also add to in-app notifications
-      await this.addInAppNotification({
-        type: 'base_plan_error',
-        title: '⚠️ Plan generation issue',
-        body: 'We had trouble generating your plan. Tap to try again.',
-        link: '/plan-building',
-        data: { error: errorMessage },
-      });
-
-      console.log('[NotificationService] Base plan error notification sent');
-    } catch (error) {
-      console.error('[NotificationService] Failed to send base plan error notification:', error);
+          link: '/plan-building',
+          data: { error: errorMessage },
+        });
+      } catch (error) {
+        console.warn('[NotificationService] Failed to add plan error to in-app center:', error);
+      }
     }
   }
 
@@ -883,7 +932,14 @@ class NotificationServiceClass {
   }
 
   /**
-   * Deliver a single Supabase notification
+   * Deliver a single Supabase notification.
+   * 
+   * NOTE: We NO LONGER send a local OS notification here because:
+   * - The server already sends push notifications via Expo push service
+   * - This would cause duplicate notifications
+   * 
+   * This method now only marks the notification as delivered in Supabase
+   * so it doesn't get processed again.
    */
   private async deliverSupabaseNotification(notification: SupabaseNotification): Promise<void> {
     try {
@@ -894,32 +950,10 @@ class NotificationServiceClass {
         return;
       }
 
-      // Send OS notification
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: notification.title,
-          body: notification.body,
-          data: {
-            type: 'custom',
-            notificationId: notification.id,
-            screen: notification.screen,
-            ...notification.data,
-          },
-          sound: true,
-        },
-        trigger: null, // Immediate
-      });
+      // NO LOCAL OS NOTIFICATION - Server already sends push notification
+      // The push notification is delivered directly to the device via Expo push service
 
-      // Add to in-app notifications
-      await this.addInAppNotification({
-        type: 'custom',
-        title: notification.title,
-        body: notification.body,
-        link: notification.screen,
-        data: notification.data,
-      });
-
-      // Mark as delivered locally
+      // Mark as delivered locally to prevent reprocessing
       await this.markSupabaseNotificationDelivered(notification.id);
 
       // Mark as delivered in Supabase
@@ -930,7 +964,7 @@ class NotificationServiceClass {
           .eq('id', notification.id);
       }
 
-      console.log('[NotificationService] Supabase notification delivered:', notification.id);
+      console.log('[NotificationService] Supabase notification marked as delivered:', notification.id);
     } catch (error) {
       console.error('[NotificationService] Error delivering Supabase notification:', error);
     }
@@ -959,10 +993,10 @@ class NotificationServiceClass {
     try {
       const deliveredIds = await this.getDeliveredSupabaseIds();
       deliveredIds.add(id);
-      
+
       // Keep only last 1000 IDs to prevent unbounded growth
       const idsArray = Array.from(deliveredIds).slice(-1000);
-      
+
       const key = scopedKey(STORAGE_KEYS.DELIVERED_SUPABASE_IDS, this.currentUserId);
       await AsyncStorage.setItem(key, JSON.stringify(idsArray));
     } catch (error) {
@@ -971,82 +1005,161 @@ class NotificationServiceClass {
   }
 
   // ============================================================================
-  // IN-APP NOTIFICATION CENTER
+  // IN-APP NOTIFICATION CENTER (Server-backed via Supabase)
   // ============================================================================
 
   /**
-   * Get all in-app notifications
+   * Get all in-app notifications from Supabase.
+   * All notifications now come from the server via user_notifications table.
    */
   async getInAppNotifications(): Promise<InAppNotification[]> {
+    if (!this.supabaseClient || !this.currentUserId) {
+      console.log('[NotificationService] No Supabase client or user, returning empty notifications');
+      return [];
+    }
+
     try {
-      const key = scopedKey(STORAGE_KEYS.IN_APP_NOTIFICATIONS, this.currentUserId);
-      const stored = await AsyncStorage.getItem(key);
-      if (stored) {
-        return JSON.parse(stored);
+      const { data: notifications, error } = await this.supabaseClient
+        .from('user_notifications')
+        .select('*')
+        .eq('user_id', this.currentUserId)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error('[NotificationService] Error fetching notifications from Supabase:', error);
+        return [];
       }
+
+      if (!notifications) {
+        return [];
+      }
+
+      // Transform Supabase notifications to InAppNotification format
+      return notifications.map((n: SupabaseNotification) => ({
+        id: n.id,
+        type: (n.type as InAppNotification['type']) || 'general',
+        title: n.title,
+        body: n.body,
+        createdAt: n.created_at,
+        read: n.read,
+        link: n.screen,
+        data: n.data,
+      }));
     } catch (error) {
       console.error('[NotificationService] Error reading in-app notifications:', error);
+      return [];
     }
-    return [];
   }
 
   /**
-   * Add an in-app notification
+   * Add an in-app notification (now inserts to Supabase for server consistency)
+   * Note: For most cases, the server should insert notifications directly.
+   * This method is kept for backward compatibility with local-only events.
    */
   async addInAppNotification(
     notification: Omit<InAppNotification, 'id' | 'createdAt' | 'read'>
   ): Promise<void> {
+    if (!this.supabaseClient || !this.currentUserId) {
+      console.warn('[NotificationService] Cannot add notification - no Supabase client or user');
+      return;
+    }
+
     try {
-      const notifications = await this.getInAppNotifications();
-      const newNotification: InAppNotification = {
-        ...notification,
-        id: `notif_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        createdAt: new Date().toISOString(),
-        read: false,
-      };
-      notifications.unshift(newNotification);
+      const { error } = await this.supabaseClient
+        .from('user_notifications')
+        .insert({
+          user_id: this.currentUserId,
+          title: notification.title,
+          body: notification.body,
+          type: notification.type,
+          screen: notification.link,
+          data: notification.data || {},
+          delivered: true, // Local additions are considered delivered
+          read: false,
+        });
 
-      // Keep only last 50 notifications
-      const trimmed = notifications.slice(0, 50);
-
-      const key = scopedKey(STORAGE_KEYS.IN_APP_NOTIFICATIONS, this.currentUserId);
-      await AsyncStorage.setItem(key, JSON.stringify(trimmed));
+      if (error) {
+        console.error('[NotificationService] Error adding notification to Supabase:', error);
+      } else {
+        console.log('[NotificationService] Notification added to Supabase');
+      }
     } catch (error) {
       console.error('[NotificationService] Error adding in-app notification:', error);
     }
   }
 
   /**
-   * Mark an in-app notification as read
+   * Mark an in-app notification as read in Supabase
    */
   async markInAppNotificationRead(notificationId: string): Promise<void> {
+    if (!this.supabaseClient || !this.currentUserId) {
+      console.warn('[NotificationService] Cannot mark notification read - no Supabase client');
+      return;
+    }
+
     try {
-      const notifications = await this.getInAppNotifications();
-      const updated = notifications.map(n =>
-        n.id === notificationId ? { ...n, read: true } : n
-      );
-      const key = scopedKey(STORAGE_KEYS.IN_APP_NOTIFICATIONS, this.currentUserId);
-      await AsyncStorage.setItem(key, JSON.stringify(updated));
+      const { error } = await this.supabaseClient
+        .from('user_notifications')
+        .update({ read: true })
+        .eq('id', notificationId)
+        .eq('user_id', this.currentUserId);
+
+      if (error) {
+        console.error('[NotificationService] Error marking notification read:', error);
+      }
     } catch (error) {
       console.error('[NotificationService] Error marking notification read:', error);
     }
   }
 
   /**
-   * Get unread notification count
+   * Get unread notification count from Supabase
    */
   async getUnreadCount(): Promise<number> {
-    const notifications = await this.getInAppNotifications();
-    return notifications.filter(n => !n.read).length;
+    if (!this.supabaseClient || !this.currentUserId) {
+      return 0;
+    }
+
+    try {
+      const { count, error } = await this.supabaseClient
+        .from('user_notifications')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', this.currentUserId)
+        .eq('read', false);
+
+      if (error) {
+        console.error('[NotificationService] Error getting unread count:', error);
+        return 0;
+      }
+
+      return count || 0;
+    } catch (error) {
+      console.error('[NotificationService] Error getting unread count:', error);
+      return 0;
+    }
   }
 
   /**
-   * Clear all in-app notifications
+   * Clear all in-app notifications for this user in Supabase
    */
   async clearAllInAppNotifications(): Promise<void> {
+    if (!this.supabaseClient || !this.currentUserId) {
+      console.warn('[NotificationService] Cannot clear notifications - no Supabase client');
+      return;
+    }
+
     try {
-      const key = scopedKey(STORAGE_KEYS.IN_APP_NOTIFICATIONS, this.currentUserId);
-      await AsyncStorage.removeItem(key);
+      const { error } = await this.supabaseClient
+        .from('user_notifications')
+        .delete()
+        .eq('user_id', this.currentUserId);
+
+      if (error) {
+        console.error('[NotificationService] Error clearing notifications:', error);
+      } else {
+        console.log('[NotificationService] All notifications cleared from Supabase');
+      }
     } catch (error) {
       console.error('[NotificationService] Error clearing notifications:', error);
     }
@@ -1117,7 +1230,7 @@ class NotificationServiceClass {
   private async checkIfQueueNeedsTopUp(): Promise<boolean> {
     try {
       const prefs = await this.getPreferences();
-      
+
       // If no scheduled IDs, queue is empty
       if (!prefs.scheduledCheckInIds || prefs.scheduledCheckInIds.length === 0) {
         // Check if there's at least a legacy single ID
@@ -1129,7 +1242,7 @@ class NotificationServiceClass {
       // Count how many scheduled check-in reminders still exist
       const all = await Notifications.getAllScheduledNotificationsAsync();
       const checkInReminders = all.filter(
-        (n: (typeof all)[number]) => 
+        (n: (typeof all)[number]) =>
           (n.content?.data as Record<string, unknown> | undefined)?.type === 'checkin_reminder'
       );
 
@@ -1149,16 +1262,42 @@ class NotificationServiceClass {
 
   /**
    * Parse a time string like "9:00 AM" or "Morning (7-10 AM)" into hour/minute
+   * Returns null if parsing fails.
    */
-  private parseTimeString(timeStr: string): { hour: number; minute: number } {
-    // Handle window-style times like "Morning (7-10 AM)"
-    const windowMatch = timeStr.match(/\((\d+)-\d+\s*(AM|PM)\)/i);
+  private parseTimeString(timeStr: string): { hour: number; minute: number } | null {
+    if (!timeStr) return null;
+
+    // Known presets mapping for workout times
+    const PRESETS: Record<string, number> = {
+      'Early Morning (5-7 AM)': 5,
+      'Morning (7-10 AM)': 7,
+      'Late Morning (10-12 PM)': 10,
+      'Afternoon (12-4 PM)': 12,
+      'Evening (4-7 PM)': 16,
+      'Night (7-10 PM)': 19,
+      'Late Night (10+ PM)': 22,
+    };
+
+    if (PRESETS[timeStr] !== undefined) {
+      return { hour: PRESETS[timeStr], minute: 0 };
+    }
+
+    // Handle window-style times like "Morning (7-10 AM)" if not in presets
+    // This is a fallback for legacy or custom strings following the pattern
+    const windowMatch = timeStr.match(/\((\d+)(?:-\d+)?\s*(AM|PM)?\)/i);
     if (windowMatch) {
       let hour = parseInt(windowMatch[1], 10);
-      const isPM = windowMatch[2].toUpperCase() === 'PM';
-      if (isPM && hour !== 12) hour += 12;
-      else if (!isPM && hour === 12) hour = 0;
-      return { hour, minute: 0 };
+      // If AM/PM is explicitly in the capture group
+      const period = windowMatch[2]?.toUpperCase();
+
+      // Heuristic: if no period found in parens, check the whole string
+      const isPM = period === 'PM' || (!period && timeStr.toUpperCase().includes('PM'));
+
+      if (!isNaN(hour)) {
+        if (isPM && hour !== 12) hour += 12;
+        else if (!isPM && hour === 12) hour = 0;
+        return { hour, minute: 0 };
+      }
     }
 
     // Handle simple times like "9:00 AM"
@@ -1167,12 +1306,15 @@ class NotificationServiceClass {
     const isAM = time.includes('AM');
     const timePart = time.replace(/AM|PM/gi, '').trim();
     const [hourStr, minuteStr] = timePart.split(':');
+
     let hour = parseInt(hourStr, 10);
     const minute = parseInt(minuteStr || '0', 10);
-    
+
+    if (isNaN(hour)) return null;
+
     if (isPM && hour !== 12) hour += 12;
     else if (isAM && hour === 12) hour = 0;
-    
+
     return { hour, minute };
   }
 

@@ -57,12 +57,15 @@ export async function testChunkedSystem() {
         const dayPlan = basePlan.days[day];
         
         // Check calories and protein
-        const hasCorrectCalories = dayPlan.nutrition.total_kcal === testUser.dailyCalorieTarget;
+      const hasCorrectCalories =
+        Math.abs(dayPlan.nutrition.total_kcal - testUser.dailyCalorieTarget) <= 100;
         const hasCorrectProtein = dayPlan.nutrition.protein_g === Math.round(testUser.weight! * 2.2 * 0.9);
         
         if (!hasCorrectCalories || !hasCorrectProtein) {
           console.log(`❌ ${day}: Incorrect nutrition values`);
-          console.log(`  Calories: ${dayPlan.nutrition.total_kcal} (expected ${testUser.dailyCalorieTarget})`);
+        console.log(
+          `  Calories: ${dayPlan.nutrition.total_kcal} (expected ≈${testUser.dailyCalorieTarget} ±100)`,
+        );
           console.log(`  Protein: ${dayPlan.nutrition.protein_g} (expected ${Math.round(testUser.weight! * 2.2 * 0.9)})`);
           allDaysValid = false;
         } else {
@@ -96,7 +99,7 @@ export async function testChunkedSystem() {
         const dayPlan = basePlan.days[day];
         console.log(`${day.toUpperCase()}:`);
         console.log(`  Focus: ${dayPlan.workout.focus.join(', ')}`);
-        console.log(`  Exercises: ${dayPlan.workout.blocks.flatMap(b => b.items).length}`);
+        console.log(`  Exercises: ${dayPlan.workout.blocks.flatMap((b: any) => b.items).length}`);
         console.log(`  Meals: ${dayPlan.nutrition.meals.length}`);
         console.log(`  Calories: ${dayPlan.nutrition.total_kcal} kcal`);
         console.log(`  Protein: ${dayPlan.nutrition.protein_g}g`);

@@ -117,15 +117,17 @@ export default function SupplementsScreen() {
 
       // Get AI-recommended add-ons from supplementCard if available
       if (dayData.recovery.supplementCard?.addOns) {
-        dayData.recovery.supplementCard.addOns.forEach((supp: string) => {
+        dayData.recovery.supplementCard.addOns.forEach((supp: string | { name: string; reason: string; timing: string }) => {
+          // Handle both string format and object format (legacy data)
+          const suppName = typeof supp === 'string' ? supp : supp.name;
           // Only add to recommended if not similar to user's profile supplements
           const isUserSupplement = userProfileSupplements.some((userSupp: string) => 
-            isSameSupplement(supp, userSupp)
+            isSameSupplement(suppName, userSupp)
           );
           if (!isUserSupplement) {
-            recommendedSuppsList.push(supp);
+            recommendedSuppsList.push(suppName);
           }
-          allSuppsList.push(supp);
+          allSuppsList.push(suppName);
         });
       }
     });
@@ -199,7 +201,11 @@ export default function SupplementsScreen() {
           }
 
           const currentList = updatedDays[day].recovery.supplementCard!.current || [];
-          if (!currentList.includes(supplementName)) {
+          // Check if supplement exists (handle both string and object formats)
+          const suppExists = currentList.some((s: string | { name: string; timing: string }) => 
+            (typeof s === 'string' ? s : s.name) === supplementName
+          );
+          if (!suppExists) {
             updatedDays[day].recovery.supplementCard!.current = [...currentList, supplementName];
             hasChanges = true;
 
@@ -248,11 +254,17 @@ export default function SupplementsScreen() {
 
               DAY_ORDER.forEach(day => {
                 if (updatedDays[day]?.recovery) {
-                  // Update supplementCard.current
+                  // Update supplementCard.current (handle both string and object formats)
                   if (updatedDays[day].recovery.supplementCard?.current) {
                     const currentList = updatedDays[day].recovery.supplementCard!.current;
-                    if (currentList.includes(supplementName)) {
-                      updatedDays[day].recovery.supplementCard!.current = currentList.filter(s => s !== supplementName);
+                    const suppExists = currentList.some((s: string | { name: string; timing: string }) => 
+                      (typeof s === 'string' ? s : s.name) === supplementName
+                    );
+                    if (suppExists) {
+                      updatedDays[day].recovery.supplementCard!.current = currentList.filter(
+                        (s: string | { name: string; timing: string }) => 
+                          (typeof s === 'string' ? s : s.name) !== supplementName
+                      );
                       hasChanges = true;
                     }
                   }

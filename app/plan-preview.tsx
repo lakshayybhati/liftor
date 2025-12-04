@@ -1,19 +1,20 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert, BackHandler, Keyboard, TouchableWithoutFeedback, Dimensions } from 'react-native';
+import React, { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, Animated, TextInput, Alert, BackHandler, Keyboard, TouchableWithoutFeedback, Dimensions, Modal } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { KeyboardDismissView } from '@/components/ui/KeyboardDismissView';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
-import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send, ChevronLeft, Play } from 'lucide-react-native';
+import { Calendar, Dumbbell, Apple, Heart, Lock, Unlock, Edit3, Send, ChevronLeft, Play, RefreshCw, X } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useUserStore } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
-import { hasActiveSubscription } from '@/utils/subscription-helpers';
+import { hasActiveSubscription, checkAppAccess, clearSessionStatusCache } from '@/utils/subscription-helpers';
 import { useNavigation } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import { verifyBasePlan, getBasePlanJobState } from '@/services/backgroundPlanGeneration';
+import { createAndTriggerServerPlanJob } from '@/utils/server-plan-generation';
 // 10s paywall logic removed per request
 
 const DAYS_OF_WEEK = [
@@ -33,7 +34,7 @@ export default function PlanPreviewScreen() {
   const params = useLocalSearchParams<{ planId?: string }>();
   const viewingPlanId = params.planId;
   const [isSavingProfile, setIsSavingProfile] = useState(false);
-  
+
   const [selectedDay, setSelectedDay] = useState<string>('monday');
   const [isLocked, setIsLocked] = useState(false);
   const [confettiAnim] = useState(new Animated.Value(0));
@@ -47,7 +48,100 @@ export default function PlanPreviewScreen() {
   const navigation = useNavigation();
   const [isActivatingPlan, setIsActivatingPlan] = useState(false);
 
+  // Redo modal state
+  const [showRedoModal, setShowRedoModal] = useState(false);
+  const [redoReason, setRedoReason] = useState('');
+  const [redoType, setRedoType] = useState<'workout' | 'nutrition' | 'both'>('both');
+  const [isSubmittingRedo, setIsSubmittingRedo] = useState(false);
+
   const MAX_EDITS_PER_DAY = 2;
+  const MAX_REDO_WORDS = 50;
+
+  // Check if redo is allowed for this plan
+  // Redo is only allowed if:
+  // 1. Plan status is 'generated' (not yet activated)
+  // 2. redo_used is false (hasn't been redone before)
+  // 3. Not a historical view
+
+
+  // Count words in redo reason
+  const redoWordCount = useMemo(() => {
+    return redoReason.trim() ? redoReason.trim().split(/\s+/).length : 0;
+  }, [redoReason]);
+
+  // Handle redo submission
+  const handleRedoSubmit = async () => {
+    if (!redoReason.trim() || redoWordCount > MAX_REDO_WORDS) {
+      Alert.alert('Error', 'Please enter your feedback (max 50 words).');
+      return;
+    }
+
+    if (!user || !basePlan?.id) {
+      Alert.alert('Error', 'Unable to process redo request.');
+      return;
+    }
+
+    setIsSubmittingRedo(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    try {
+      // Call the server with redo parameters
+      const result = await createAndTriggerServerPlanJob(user, {
+        redo: true,
+        redoReason: redoReason.trim(),
+        redoType: redoType, // 'workout' | 'nutrition' | 'both'
+        sourcePlanId: basePlan.id,
+      });
+
+      if (!result.success) {
+        // Handle specific error cases
+        if (result.status === 'redo_limit_reached') {
+          Alert.alert(
+            'Daily Redo Limit Reached',
+            'You can only redo your plan twice per day. Please try again tomorrow or use day edits to make specific changes.',
+            [{ text: 'OK', onPress: () => setShowRedoModal(false) }]
+          );
+          return;
+        }
+        if (result.status === 'redo_already_used') {
+          Alert.alert(
+            'Redo Not Available',
+            'You can only redo a plan once before starting your journey. Use day edits to make changes.',
+            [{ text: 'OK', onPress: () => setShowRedoModal(false) }]
+          );
+          return;
+        }
+        if (result.status === 'redo_blocked_activated') {
+          Alert.alert(
+            'Plan Already Active',
+            'You cannot redo an activated plan. Use day edits to make changes.',
+            [{ text: 'OK', onPress: () => setShowRedoModal(false) }]
+          );
+          return;
+        }
+        throw new Error(result.error || 'Failed to start redo');
+      }
+
+      console.log('[PlanPreview] Redo request started, job ID:', result.jobId);
+      setShowRedoModal(false);
+      setRedoReason('');
+
+      // Navigate to plan-building screen with redo context
+      router.replace({
+        pathname: '/plan-building',
+        params: { redoReason: redoReason.trim() } as any,
+      });
+    } catch (error) {
+      console.error('[PlanPreview] Redo error:', error);
+      Alert.alert(
+        'Redo Failed',
+        'We couldn\'t regenerate your plan. Please try using the "Edit Day" option below to make specific changes to individual days.',
+        [{ text: 'OK', onPress: () => setShowRedoModal(false) }]
+      );
+    } finally {
+      setIsSubmittingRedo(false);
+    }
+  };
 
   const getDayEditCount = (dayKey: string) => {
     // Optional per-day edit tracking stored on the base plan
@@ -100,14 +194,14 @@ export default function PlanPreviewScreen() {
   const basePlan = useMemo(() => {
     console.log('[PlanPreview] useMemo triggered, basePlans length:', basePlans?.length ?? 0);
     console.log('[PlanPreview] viewingPlanId:', viewingPlanId || 'none (current plan)');
-    
+
     // If viewing a specific plan by ID (historical view)
     if (viewingPlanId && basePlans) {
       const specificPlan = basePlans.find(p => p.id === viewingPlanId);
       console.log('[PlanPreview] Found specific plan:', specificPlan ? `Plan ID: ${specificPlan.id}` : 'NOT FOUND');
       return specificPlan;
     }
-    
+
     // Default: Get the current active plan
     console.log('[PlanPreview] basePlans array:', basePlans?.map(p => ({ id: p.id, locked: p.isLocked, isActive: p.isActive })));
     const plan = getCurrentBasePlan();
@@ -130,12 +224,67 @@ export default function PlanPreviewScreen() {
     return !basePlan.isActive;
   }, [viewingPlanId, basePlan]);
 
+  // Check if redo is allowed for this plan
+  // PRODUCTION: Redo is only allowed if:
+  // 1. Plan status is 'generated' (not yet activated)
+  // 2. Daily redo limit not reached (max 2 redos per day)
+  // 3. Not a historical view
+  const canRedoPlan = useMemo(() => {
+    if (!basePlan || isHistoricalView) {
+      console.log('[PlanPreview] canRedoPlan: false (no basePlan or historical view)');
+      return false;
+    }
+    const status = basePlan.status;
+
+    // Check daily redo limit
+    const todayStr = new Date().toISOString().split('T')[0];
+    const lastRedoDate = (basePlan as any).lastRedoDate ?? null;
+    const redoCountToday = (basePlan as any).redoCountToday ?? 0;
+
+    // Reset count if it's a new day
+    const effectiveRedoCount = (lastRedoDate === todayStr) ? redoCountToday : 0;
+    const dailyLimitReached = effectiveRedoCount >= 2;
+
+    // Allow redo only for 'generated' plans that haven't hit daily limit
+    const canRedo = status === 'generated' && !dailyLimitReached;
+    console.log('[PlanPreview] canRedoPlan check:', {
+      status,
+      lastRedoDate,
+      redoCountToday: effectiveRedoCount,
+      dailyLimitReached,
+      isActive: basePlan.isActive,
+      isLocked: basePlan.isLocked,
+      canRedo,
+    });
+    return canRedo;
+  }, [basePlan, isHistoricalView]);
+
+  // Dynamically update header options when canRedoPlan changes
+  // This is necessary because Stack.Screen options don't update reactively
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => canRedoPlan ? (
+        <TouchableOpacity
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setShowRedoModal(true);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Redo Plan"
+          style={{ paddingHorizontal: 12 }}
+        >
+          <RefreshCw size={20} color={theme.color.accent.primary} />
+        </TouchableOpacity>
+      ) : undefined,
+    });
+  }, [canRedoPlan, navigation]);
+
   // Handle activating this historical plan
   const handleActivateThisPlan = async () => {
     if (!basePlan?.id) return;
-    
+
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    
+
     Alert.alert(
       'Activate This Plan?',
       'This will set this plan as your active base plan for daily workouts and nutrition.',
@@ -147,7 +296,7 @@ export default function PlanPreviewScreen() {
             setIsActivatingPlan(true);
             const success = await activateBasePlan(basePlan.id);
             setIsActivatingPlan(false);
-            
+
             if (success) {
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
               Alert.alert('Plan Activated', 'This plan is now your active base plan.', [
@@ -174,7 +323,6 @@ export default function PlanPreviewScreen() {
       };
     }
 
-    const allSuppsSet = new Set<string>();
     const dailySupps: Record<string, string[]> = {};
     const userSuppsSet = new Set<string>();
     const recommendedSuppsSet = new Set<string>();
@@ -191,23 +339,28 @@ export default function PlanPreviewScreen() {
         dailySupps[day] = daySupplements;
       }
 
-      // Add to overall set
-      daySupplements.forEach((supp: string) => allSuppsSet.add(supp));
-
       // Get user's current supplements (only need to check once)
       if (dayData.recovery.supplementCard?.current) {
-        dayData.recovery.supplementCard.current.forEach((supp: string) => {
-          userSuppsSet.add(supp);
+        dayData.recovery.supplementCard.current.forEach((supp: string | { name: string; timing: string }) => {
+          // Handle both string format and object format
+          const suppName = typeof supp === 'string' ? supp : supp.name;
+          userSuppsSet.add(suppName);
         });
       }
 
       // Get recommended add-ons
       if (dayData.recovery.supplementCard?.addOns) {
-        dayData.recovery.supplementCard.addOns.forEach((supp: string) => {
-          recommendedSuppsSet.add(supp);
+        dayData.recovery.supplementCard.addOns.forEach((supp: string | { name: string; reason: string; timing: string }) => {
+          // Handle both string format and object format (legacy data)
+          const suppName = typeof supp === 'string' ? supp : supp.name;
+          recommendedSuppsSet.add(suppName);
         });
       }
     });
+
+    // Calculate total unique supplements from the categorized sets
+    // This ensures the Total count matches Current + Recommended
+    const allSuppsSet = new Set([...userSuppsSet, ...recommendedSuppsSet]);
 
     return {
       allSupplements: Array.from(allSuppsSet),
@@ -315,8 +468,29 @@ export default function PlanPreviewScreen() {
     console.error('[PlanPreview] No data for selected day:', selectedDay);
     console.error('[PlanPreview] Available days:', Object.keys(basePlan.days || {}));
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.color.bg }}>
-        <Text style={{ color: theme.color.ink }}>Loading day data...</Text>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.color.bg, padding: 20 }}>
+        <Text style={{ color: theme.color.ink, marginBottom: 20 }}>Loading day data...</Text>
+        <Text style={{ color: theme.color.ink, opacity: 0.6, marginBottom: 30, textAlign: 'center' }}>
+          If this persists, try logging out and back in.
+        </Text>
+        <TouchableOpacity
+          style={{
+            backgroundColor: theme.color.accent.primary,
+            paddingHorizontal: 24,
+            paddingVertical: 12,
+            borderRadius: 8,
+          }}
+          onPress={async () => {
+            try {
+              await auth.signOut();
+              router.replace('/auth/login');
+            } catch (e) {
+              console.error('[PlanPreview] Logout error:', e);
+            }
+          }}
+        >
+          <Text style={{ color: '#fff', fontWeight: '600' }}>Log Out</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -340,7 +514,7 @@ export default function PlanPreviewScreen() {
       // This ensures user data is persisted only after they commit to starting
       if (user && auth?.session?.user?.email) {
         console.log('[PlanPreview] Saving user profile to backend...');
-        
+
         const userEmail = auth.session.user.email;
         const sessionUserName = auth.session.user.user_metadata?.name as string | undefined;
         const emailLocalPart = userEmail.split('@')[0] || '';
@@ -393,19 +567,27 @@ export default function PlanPreviewScreen() {
 
       setIsSavingProfile(false);
 
-      // Check subscription status
-      const entitled = await hasActiveSubscription();
-      console.log('[PlanPreview] Subscription check result:', entitled);
+      if (basePlan?.id) {
+        const activated = await activateBasePlan(basePlan.id);
+        if (!activated) {
+          throw new Error('Failed to activate plan');
+        }
+      }
 
-      if (entitled) {
-        console.log('[PlanPreview] ✅ User has active subscription, navigating to home');
+      // Check access status using server-side session status
+      // This checks both subscription AND local trial status
+      const accessResult = await checkAppAccess();
+      console.log('[PlanPreview] Access check result:', accessResult);
+
+      if (accessResult.canUseApp) {
+        console.log('[PlanPreview] ✅ User has access (subscription or trial), navigating to home');
         router.replace('/(tabs)/home');
         return;
       }
 
-      console.log('[PlanPreview] ❌ No active subscription, showing paywall');
-      // Not entitled → show paywall in blocking mode
-      // After subscription, user will be navigated to home
+      console.log('[PlanPreview] ❌ No access, showing paywall');
+      // No access → show paywall in blocking mode
+      // After subscription or trial start, user will be navigated to home
       router.push({
         pathname: '/paywall',
         params: {
@@ -931,6 +1113,7 @@ Please modify the plan based on their request and return ONLY the updated day da
               <ChevronLeft size={20} color={theme.color.accent.primary} />
             </TouchableOpacity>
           ),
+          // headerRight is set dynamically via useLayoutEffect based on canRedoPlan
         }}
       />
 
@@ -969,9 +1152,24 @@ Please modify the plan based on their request and return ONLY the updated day da
                 <Text style={styles.headerWelcome}>Welcome</Text>
                 <Text style={styles.headerTitle}>Your Weekly Plan</Text>
               </View>
-              <View style={styles.headerIconContainer}>
-                <Calendar size={24} color={theme.color.accent.primary} />
-              </View>
+              {/* Show Redo button when available, otherwise show Calendar */}
+              {canRedoPlan ? (
+                <TouchableOpacity
+                  style={styles.headerIconContainer}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setShowRedoModal(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Redo Plan"
+                >
+                  <RefreshCw size={24} color={theme.color.accent.primary} />
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.headerIconContainer}>
+                  <Calendar size={24} color={theme.color.accent.primary} />
+                </View>
+              )}
             </View>
 
             <Text style={styles.headerSubtitle}>
@@ -1207,6 +1405,145 @@ Please modify the plan based on their request and return ONLY the updated day da
           )}
         </View>
       </SafeAreaView>
+
+      {/* Redo Plan Modal */}
+      <Modal
+        visible={showRedoModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !isSubmittingRedo && setShowRedoModal(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => !isSubmittingRedo && setShowRedoModal(false)}>
+          <View style={styles.redoModalOverlay}>
+            <TouchableWithoutFeedback onPress={() => { }}>
+              <View style={styles.redoModalContent}>
+                <View style={styles.redoModalHeader}>
+                  <Text style={styles.redoModalTitle}>🔄 Redo Your Plan</Text>
+                  <TouchableOpacity
+                    onPress={() => !isSubmittingRedo && setShowRedoModal(false)}
+                    style={styles.redoModalCloseBtn}
+                    disabled={isSubmittingRedo}
+                  >
+                    <X size={20} color={theme.color.muted} />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.redoModalDescription}>
+                  What would you like to change?
+                </Text>
+
+                {/* Redo Type Selection */}
+                <View style={styles.redoTypeContainer}>
+                  <TouchableOpacity
+                    style={[
+                      styles.redoTypeOption,
+                      redoType === 'workout' && styles.redoTypeOptionSelected
+                    ]}
+                    onPress={() => setRedoType('workout')}
+                    disabled={isSubmittingRedo}
+                  >
+                    <Dumbbell size={18} color={redoType === 'workout' ? '#FFFFFF' : theme.color.muted} />
+                    <Text style={[
+                      styles.redoTypeText,
+                      redoType === 'workout' && styles.redoTypeTextSelected
+                    ]}>Workout</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.redoTypeOption,
+                      redoType === 'nutrition' && styles.redoTypeOptionSelected
+                    ]}
+                    onPress={() => setRedoType('nutrition')}
+                    disabled={isSubmittingRedo}
+                  >
+                    <Apple size={18} color={redoType === 'nutrition' ? '#FFFFFF' : theme.color.muted} />
+                    <Text style={[
+                      styles.redoTypeText,
+                      redoType === 'nutrition' && styles.redoTypeTextSelected
+                    ]}>Nutrition</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.redoTypeOption,
+                      redoType === 'both' && styles.redoTypeOptionSelected
+                    ]}
+                    onPress={() => setRedoType('both')}
+                    disabled={isSubmittingRedo}
+                  >
+                    <RefreshCw size={18} color={redoType === 'both' ? '#FFFFFF' : theme.color.muted} />
+                    <Text style={[
+                      styles.redoTypeText,
+                      redoType === 'both' && styles.redoTypeTextSelected
+                    ]}>Both</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TextInput
+                  style={styles.redoInput}
+                  placeholder={
+                    redoType === 'workout'
+                      ? "e.g., More HIIT, less leg days, add supersets..."
+                      : redoType === 'nutrition'
+                        ? "e.g., More protein, vegetarian options, fewer carbs..."
+                        : "e.g., More HIIT workouts, add vegetarian meal options..."
+                  }
+                  placeholderTextColor={theme.color.muted}
+                  value={redoReason}
+                  onChangeText={(text) => {
+                    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+                    if (words <= MAX_REDO_WORDS) {
+                      setRedoReason(text);
+                    } else {
+                      const limited = text.trim().split(/\s+/).slice(0, MAX_REDO_WORDS).join(' ');
+                      setRedoReason(limited);
+                    }
+                  }}
+                  multiline
+                  numberOfLines={4}
+                  textAlignVertical="top"
+                  editable={!isSubmittingRedo}
+                />
+
+                <Text style={[
+                  styles.redoWordCount,
+                  redoWordCount >= MAX_REDO_WORDS && { color: theme.color.accent.primary }
+                ]}>
+                  {redoWordCount}/{MAX_REDO_WORDS} words
+                </Text>
+
+                <View style={styles.redoModalActions}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowRedoModal(false);
+                      setRedoReason('');
+                      setRedoType('both');
+                    }}
+                    disabled={isSubmittingRedo}
+                    style={[styles.redoButton, styles.redoCancelButton, isSubmittingRedo && { opacity: 0.5 }]}
+                  >
+                    <Text style={styles.redoCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={handleRedoSubmit}
+                    disabled={!redoReason.trim() || isSubmittingRedo}
+                    style={[
+                      styles.redoButton,
+                      styles.redoSubmitButton,
+                      (!redoReason.trim() || isSubmittingRedo) && { opacity: 0.5 }
+                    ]}
+                  >
+                    <Text style={styles.redoSubmitText}>
+                      {isSubmittingRedo ? 'Redoing...' : 'Redo Plan'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
     </KeyboardDismissView>
   );
 }
@@ -1625,24 +1962,25 @@ const styles = StyleSheet.create({
   },
   editCard: {
     margin: theme.space.lg,
-    alignItems: 'center',
+    // Removed alignItems: 'center' to allow full width children and better spacing control
   },
   editHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: theme.space.sm,
+    justifyContent: 'center',
+    marginBottom: theme.space.md,
   },
   editTitle: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 18,
+    fontWeight: '700',
     color: theme.color.ink,
     marginLeft: theme.space.sm,
   },
   editDescription: {
-    fontSize: 14,
+    fontSize: 15,
     color: theme.color.muted,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 22,
     marginBottom: theme.space.lg,
   },
   editInputContainer: {
@@ -1676,12 +2014,14 @@ const styles = StyleSheet.create({
   editButton: {
     alignSelf: 'center',
     paddingHorizontal: theme.space.xl,
+    marginTop: theme.space.xs,
   },
   editLimitText: {
-    fontSize: 12,
+    fontSize: 13,
     color: theme.color.muted,
     textAlign: 'center',
     marginTop: theme.space.sm,
+    marginBottom: theme.space.md,
     fontStyle: 'italic',
   },
   progressContainer: {
@@ -1783,5 +2123,130 @@ const styles = StyleSheet.create({
   activateThisPlanButton: {
     width: '100%',
     backgroundColor: theme.color.accent.green,
+  },
+  // Redo Modal Styles
+  redoModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: theme.space.lg,
+  },
+  redoModalContent: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: theme.color.card,
+    borderRadius: theme.radius.lg,
+    padding: theme.space.lg,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+  },
+  redoModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.space.md,
+  },
+  redoModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: theme.color.ink,
+  },
+  redoModalCloseBtn: {
+    padding: 4,
+  },
+  redoModalDescription: {
+    fontSize: 14,
+    color: theme.color.muted,
+    lineHeight: 20,
+    marginBottom: theme.space.sm,
+  },
+  redoModalNote: {
+    fontSize: 12,
+    color: theme.color.accent.primary,
+    backgroundColor: theme.color.accent.primary + '15',
+    padding: theme.space.sm,
+    borderRadius: theme.radius.md,
+    marginBottom: theme.space.md,
+    textAlign: 'center',
+  },
+  redoInput: {
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+    fontSize: 14,
+    color: theme.color.ink,
+    backgroundColor: theme.color.bg,
+    minHeight: 100,
+    marginBottom: theme.space.xs,
+  },
+  redoWordCount: {
+    fontSize: 12,
+    color: theme.color.muted,
+    textAlign: 'right',
+    marginBottom: theme.space.md,
+  },
+  redoModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  redoButton: {
+    flex: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 50,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  redoCancelButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderColor: theme.color.accent.primary,
+  },
+  redoSubmitButton: {
+    backgroundColor: theme.color.accent.primary,
+  },
+  redoCancelText: {
+    color: theme.color.accent.primary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  redoSubmitText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  redoTypeContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: theme.space.md,
+    gap: 8,
+  },
+  redoTypeOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    backgroundColor: theme.color.bg,
+    gap: 6,
+  },
+  redoTypeOptionSelected: {
+    borderColor: theme.color.accent.primary,
+    backgroundColor: theme.color.accent.primary,
+  },
+  redoTypeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.color.muted,
+  },
+  redoTypeTextSelected: {
+    color: '#FFFFFF',
   },
 });

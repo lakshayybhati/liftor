@@ -466,6 +466,42 @@ do $$ begin
   end if;
 end $$;
 
+-- Weekly plan status pipeline + cycle enforcement
+do $$ begin
+  if not exists (select 1 from pg_type where typname = 'weekly_plan_status') then
+    create type public.weekly_plan_status as enum (
+      'pending',
+      'generating',
+      'generated',
+      'active',
+      'archived'
+    );
+  end if;
+end $$;
+
+alter table public.weekly_base_plans
+  add column if not exists status public.weekly_plan_status not null default 'pending',
+  add column if not exists week_start_date date not null default (date_trunc('week', timezone('utc', now()))::date),
+  add column if not exists generated_at timestamptz,
+  add column if not exists activated_at timestamptz,
+  add column if not exists generation_job_id uuid references public.plan_generation_jobs(id) on delete set null;
+
+alter table public.plan_generation_jobs
+  add column if not exists cycle_week_start_date date default (date_trunc('week', timezone('utc', now()))::date),
+  add column if not exists target_plan_id uuid references public.weekly_base_plans(id) on delete set null;
+
+create unique index if not exists uniq_weekly_plan_per_user_week
+  on public.weekly_base_plans(user_id, week_start_date)
+  where status <> 'archived'::public.weekly_plan_status;
+
+create unique index if not exists uniq_active_plan_per_user
+  on public.weekly_base_plans(user_id)
+  where status = 'active';
+
+create unique index if not exists uniq_pending_plan_job_per_cycle
+  on public.plan_generation_jobs(user_id, cycle_week_start_date)
+  where status in ('pending', 'processing');
+
 create or replace function public.get_todays_nutrition_plan(user_uuid uuid)
 returns uuid
 language plpgsql
@@ -586,6 +622,32 @@ alter table public.profiles
   add column if not exists subscription_expiration_at timestamptz null,
   add column if not exists subscription_renewal_at timestamptz null,
   add column if not exists last_rc_event jsonb null;
+
+-- Local trial and discount eligibility fields (server-managed 3-day trial)
+alter table public.profiles
+  add column if not exists trial_type text null default 'none',
+  add column if not exists trial_active boolean not null default false,
+  add column if not exists trial_started_at timestamptz null,
+  add column if not exists trial_ends_at timestamptz null,
+  add column if not exists has_had_local_trial boolean not null default false,
+  add column if not exists discount_eligible_immediate boolean not null default true,
+  add column if not exists discount_used_at timestamptz null;
+
+-- Check constraint for trial_type
+do $$ begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'profiles_trial_type_check'
+  ) then
+    alter table public.profiles
+      add constraint profiles_trial_type_check
+      check (trial_type is null or trial_type in ('none', 'local', 'storekit'));
+  end if;
+end $$;
+
+-- Index for trial expiration cron job
+create index if not exists idx_profiles_trial_expiration
+  on public.profiles(trial_active, trial_ends_at)
+  where trial_type = 'local' and trial_active = true;
 
 
 

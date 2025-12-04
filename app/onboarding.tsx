@@ -48,7 +48,7 @@ import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { Power, Info } from 'lucide-react-native';
 import { confirmNumericWithinRange, NumberSpecs, confirmCaloriesWithBaseline } from '@/utils/number-guards';
-import { startBasePlanGeneration } from '@/services/backgroundPlanGeneration';
+import { createAndTriggerServerPlanJob } from '@/utils/server-plan-generation';
 
 
 
@@ -197,14 +197,14 @@ export default function OnboardingScreen() {
       if (user.workoutIntensityLevel) setIntensityLevel(user.workoutIntensityLevel);
       if (user.injuries) setInjuries(user.injuries);
       if (user.stepTarget) {
-          setStepTarget(user.stepTarget);
-          setStepTargetInput(String(user.stepTarget));
+        setStepTarget(user.stepTarget);
+        setStepTargetInput(String(user.stepTarget));
       }
       if (user.specialRequests) setSpecialRequests(user.specialRequests);
       if (user.goalWeight) setGoalWeight(String(user.goalWeight));
       if (user.workoutIntensity) setWorkoutIntensity(user.workoutIntensity);
       if (user.trainingLevel) setTrainingLevel(user.trainingLevel);
-      
+
       // If we have data, jump to the last step (Review/Specifics)
       if (user.onboardingComplete) {
         setStep(6); // Specifics step
@@ -444,22 +444,53 @@ export default function OnboardingScreen() {
       console.log('[Onboarding] 📱 Saving user data locally...');
       await updateUser(userData);
       console.log('[Onboarding] ✅ Local store updated successfully');
-      
-      // Start background plan generation
-      console.log('[Onboarding] 🚀 Starting background plan generation...');
-      const jobId = await startBasePlanGeneration(userData, auth?.session?.user?.id ?? null, addBasePlan);
-      console.log('[Onboarding] ✅ Background generation started, job ID:', jobId);
-      
-      // Navigate to plan building screen (shows progress + mini-game option)
-      console.log('[Onboarding] ✅ Onboarding complete, navigating to plan building screen');
-      router.replace('/plan-building');
+
+      // Start SERVER-SIDE plan generation (works even if app is closed!)
+      // ALL plan generation happens on the server - no client-side AI calls
+      console.log('[Onboarding] 🚀 Starting server-side plan generation...');
+      console.log('[Onboarding] ℹ️ Plan will generate on server - you can close the app');
+
+      const serverResult = await createAndTriggerServerPlanJob(userData);
+
+      if (serverResult.success) {
+        if (serverResult.status === 'plan_exists') {
+          console.log('[Onboarding] ✅ Plan already exists for this cycle, skipping generation screen');
+          router.replace('/plan-preview');
+          return;
+        }
+
+        const jobId = serverResult.jobId || serverResult.existingJobId;
+        console.log('[Onboarding] ✅ Server generation started, job ID:', jobId);
+
+        console.log('[Onboarding] ✅ Onboarding complete, navigating to plan building screen');
+        router.replace('/plan-building');
+      } else {
+        // Server-side failed - show error to user
+        console.error('[Onboarding] ❌ Server generation failed:', serverResult.error);
+        setIsSaving(false);
+        setSaveError(serverResult.error || 'Failed to start plan generation');
+        Alert.alert(
+          'Generation Failed',
+          'We couldn\'t start generating your plan. Please check your internet connection and try again.',
+          [
+            {
+              text: 'Retry',
+              onPress: () => handleComplete(),
+            },
+            {
+              text: 'Cancel',
+              style: 'cancel',
+            },
+          ]
+        );
+      }
     } catch (error: any) {
-      console.error('[Onboarding] ❌ Failed to save locally:', error);
+      console.error('[Onboarding] ❌ Failed:', error);
       setIsSaving(false);
       setSaveError(`Failed to save your data: ${error?.message || 'Unknown error'}`);
       Alert.alert(
-        'Save Failed',
-        'We couldn\'t save your data. Please try again.',
+        'Error',
+        'Something went wrong. Please try again.',
         [
           {
             text: 'Retry',
@@ -1261,7 +1292,7 @@ export default function OnboardingScreen() {
                 <View style={styles.toggleRow}>
                   <View style={styles.toggleLabelContainer}>
                     <Text style={styles.toggleLabel}>Quality Boost</Text>
-                    <Text style={styles.toggleSubLabel}>(Extra checks for smarter choices and sequencing.)</Text>
+                    <Text style={styles.toggleSubLabel}>This may take a little longer to generate, but it improves the accuracy and personalization of your plan.</Text>
                   </View>
                   <Switch
                     value={includeReasoning}

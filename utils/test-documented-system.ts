@@ -305,8 +305,10 @@ class DocumentedSystemTest {
         }
 
         // Check required fields
-        if (dayPlan.nutrition.total_kcal !== comprehensiveTestUser.dailyCalorieTarget) {
-          structureErrors.push(`Incorrect calories for ${day}: ${dayPlan.nutrition.total_kcal} vs ${comprehensiveTestUser.dailyCalorieTarget}`);
+        if (Math.abs(dayPlan.nutrition.total_kcal - comprehensiveTestUser.dailyCalorieTarget) > 100) {
+          structureErrors.push(
+            `Incorrect calories for ${day}: ${dayPlan.nutrition.total_kcal} vs ≈${comprehensiveTestUser.dailyCalorieTarget} ±100`,
+          );
         }
       }
 
@@ -513,7 +515,7 @@ class DocumentedSystemTest {
 
     // Check calorie targets
     Object.entries(basePlan.days).forEach(([day, dayPlan]: [string, any]) => {
-      if (dayPlan.nutrition.total_kcal === user.dailyCalorieTarget) {
+      if (Math.abs(dayPlan.nutrition.total_kcal - user.dailyCalorieTarget) <= 100) {
         compliantItems.push(`${day} calories correct`);
       } else {
         violations.push(`${day} has incorrect calories: ${dayPlan.nutrition.total_kcal} vs ${user.dailyCalorieTarget}`);

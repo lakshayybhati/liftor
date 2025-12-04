@@ -7,3 +7,4 @@ ALTER TABLE public.plan_generation_jobs
 COMMENT ON COLUMN public.plan_generation_jobs.redo_type IS 'Type of redo: workout, nutrition, or both';
 
 
+

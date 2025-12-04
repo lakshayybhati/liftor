@@ -7,15 +7,25 @@ import { theme } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { useProfile } from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
+import { useSessionStatus } from '@/hooks/useSessionStatus';
 import * as ImagePicker from 'expo-image-picker';
 import { Image as ExpoImage } from 'expo-image';
-import { Camera, Image as ImageIcon, Save, UserCog, ChevronRight, ArrowLeft } from 'lucide-react-native';
+import { Camera, Image as ImageIcon, Save, UserCog, ChevronRight, ArrowLeft, Lock } from 'lucide-react-native';
+import { UserAvatar } from '@/components/UserAvatar';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const { data: profile, isLoading, updateProfile, uploadAvatar, updateAvatarUrl } = useProfile();
   const auth = useAuth();
+  const { canEditPreferences: sessionCanEditPreferences, isTrial: sessionIsTrial } = useSessionStatus();
   const insets = useSafeAreaInsets();
+  
+  // Check profile.subscription_active as fallback for premium features
+  // This ensures features work even when edge function isn't deployed
+  const profileSubscribed = Boolean(profile?.subscription_active);
+  const profileTrial = Boolean(profile?.trial_active);
+  const canEditPreferences = sessionCanEditPreferences || profileSubscribed;
+  const isTrial = sessionIsTrial || (profileTrial && !profileSubscribed);
 
   // Handle case where auth context isn't ready yet
   if (!auth) {
@@ -46,7 +56,7 @@ export default function ProfileScreen() {
   const [avatar, setAvatar] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  
+
 
   useEffect(() => {
     setName(derivedName ?? '');
@@ -56,7 +66,7 @@ export default function ProfileScreen() {
     setEmail(session?.user?.email ?? '');
   }, [session?.user?.email]);
 
-  
+
 
   const canSave = useMemo(() => {
     const baselineName = (derivedName || '').trim();
@@ -140,7 +150,7 @@ export default function ProfileScreen() {
         await updateProfile({ name: trimmedName });
         try {
           await supabase.auth.updateUser({ data: { name: trimmedName } });
-        } catch {}
+        } catch { }
       }
       if (avatar) {
         const publicUrl = await uploadAvatar(avatar);
@@ -167,7 +177,7 @@ export default function ProfileScreen() {
         if (newPassword !== confirmPassword) throw new Error('Passwords do not match');
         try {
           await supabase.auth.refreshSession();
-        } catch {}
+        } catch { }
         // For password change, require OTP before update to add protection
         const emailForOtp = (session?.user?.email ?? '').trim();
         if (emailForOtp) {
@@ -191,7 +201,7 @@ export default function ProfileScreen() {
     <KeyboardDismissView style={[styles.container, { paddingBottom: insets.bottom }]}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.header, { paddingTop: insets.top }]}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.backButton}
           onPress={() => router.back()}
           accessibilityRole="button"
@@ -208,20 +218,11 @@ export default function ProfileScreen() {
         <View style={styles.form}>
           {!!error && <Text style={styles.errorText}>{error}</Text>}
           {!!success && <Text style={styles.successText}>{success}</Text>}
-          
+
+
+
           <TouchableOpacity style={styles.avatarBtn} onPress={pickImage} testID="pick-avatar">
-            {(() => {
-              const existing = (session?.user?.user_metadata as any)?.avatar_url as string | undefined;
-              const displayUri = avatar || existing || null;
-              if (displayUri) {
-                return <ExpoImage source={{ uri: displayUri }} style={styles.avatar} contentFit="cover" />;
-              }
-              return (
-                <View style={styles.avatarPlaceholder}>
-                  <ImageIcon color={theme.color.muted} size={20} />
-                </View>
-              );
-            })()}
+            <UserAvatar uri={avatar} size={48} />
             <Text style={styles.avatarText}>Change Photo</Text>
           </TouchableOpacity>
 
@@ -286,27 +287,62 @@ export default function ProfileScreen() {
           </View>
 
           {/* Edit Preferences Button */}
-          <TouchableOpacity 
-            style={styles.preferencesButton}
-            onPress={() => router.push('/program-settings')}
+          <TouchableOpacity
+            style={[styles.preferencesButton, !canEditPreferences && styles.lockedButton]}
+            onPress={() => {
+              if (!canEditPreferences) {
+                Alert.alert(
+                  'Subscribe to Edit Preferences',
+                  'Editing your fitness preferences is available with an active subscription. Subscribe to unlock this feature.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Subscribe', onPress: () => router.push('/paywall') },
+                  ]
+                );
+                return;
+              }
+              router.push('/program-settings');
+            }}
             testID="edit-preferences"
           >
             <View style={styles.preferencesLeft}>
-              <UserCog color={theme.color.accent.green} size={20} />
-              <Text style={styles.preferencesText}>Edit Preferences</Text>
+              <UserCog color={canEditPreferences ? theme.color.accent.green : theme.color.muted} size={20} />
+              <Text style={[styles.preferencesText, !canEditPreferences && styles.lockedText]}>Edit Preferences</Text>
             </View>
-            <ChevronRight color={theme.color.muted} size={16} />
+            {canEditPreferences ? (
+              <ChevronRight color={theme.color.muted} size={16} />
+            ) : (
+              <View style={styles.lockBadge}>
+                <Lock size={12} color={theme.color.muted} />
+                <Text style={styles.lockBadgeText}>Pro</Text>
+              </View>
+            )}
           </TouchableOpacity>
 
           <Button title={saving ? 'Saving…' : 'Save'} onPress={onSave} disabled={!canSave || saving} icon={<Save color="#fff" size={18} />} />
 
           {/* Manage Subscription Entry Point */}
           <TouchableOpacity
-            onPress={() => router.push('/manage-subscription')}
+            onPress={() => {
+              if (isTrial) {
+                Alert.alert(
+                  'Subscribe First',
+                  'You are currently on a free trial. Subscribe to manage your subscription.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Subscribe', onPress: () => router.push('/paywall') },
+                  ]
+                );
+                return;
+              }
+              router.push('/manage-subscription');
+            }}
             accessibilityRole="button"
             style={{ alignSelf: 'center', marginTop: 8 }}
           >
-            <Text style={{ color: theme.color.muted, fontSize: 13 }}>Subscription</Text>
+            <Text style={[styles.subscriptionText, isTrial && styles.disabledSubscriptionText]}>
+              Subscription
+            </Text>
           </TouchableOpacity>
         </View>
       )}
@@ -366,5 +402,33 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '500',
     color: theme.color.ink,
+  },
+  lockedButton: {
+    opacity: 0.8,
+  },
+  lockedText: {
+    color: theme.color.muted,
+  },
+  lockBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.color.accent.primary + '15',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
+  },
+  lockBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: theme.color.muted,
+    textTransform: 'uppercase',
+  },
+  subscriptionText: {
+    color: theme.color.muted,
+    fontSize: 13,
+  },
+  disabledSubscriptionText: {
+    opacity: 0.4,
   },
 });

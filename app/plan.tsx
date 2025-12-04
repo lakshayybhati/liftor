@@ -831,8 +831,15 @@ export default function PlanScreen() {
         {(() => {
           // Combine supplements from both sources
           const directSupplements = plan?.recovery?.supplements || [];
-          const cardCurrent = plan?.recovery?.supplementCard?.current || [];
-          const cardAddOns = plan?.recovery?.supplementCard?.addOns || [];
+          // Handle both string and object formats for current supplements
+          const cardCurrent = (plan?.recovery?.supplementCard?.current || []).map(
+            (supp: string | { name: string; timing: string }) => 
+              typeof supp === 'string' ? supp : supp.name
+          );
+          const cardAddOns = (plan?.recovery?.supplementCard?.addOns || []).map(
+            (supp: string | { name: string; reason: string; timing: string }) => 
+              typeof supp === 'string' ? supp : supp.name
+          );
 
           // Merge and dedupe all supplements
           const allSupplements = [...new Set([...directSupplements, ...cardCurrent, ...cardAddOns])];

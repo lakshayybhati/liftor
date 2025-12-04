@@ -8,11 +8,11 @@ import { Card } from '@/components/ui/Card';
 import { Slider } from '@/components/ui/Slider';
 import { Chip } from '@/components/ui/Chip';
 import { useUserStore, REDO_CHECKIN_LIMIT, CHECKIN_LIMIT_ERROR } from '@/hooks/useUserStore';
-import { 
+import {
   MOOD_CHARACTERS,
-  SORENESS_AREAS, 
-  DIGESTION_OPTIONS, 
-  WOKE_FEELING_OPTIONS 
+  SORENESS_AREAS,
+  DIGESTION_OPTIONS,
+  WOKE_FEELING_OPTIONS
 } from '@/constants/fitness';
 import { MoodCharacter } from '@/components/ui/MoodCharacter';
 import type { CheckinMode, CheckinData } from '@/types/user';
@@ -28,7 +28,7 @@ export default function CheckinScreen() {
   const mode: CheckinMode = 'PRO';
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAllMoods, setShowAllMoods] = useState(false);
-  
+
   const [checkinData, setCheckinData] = useState<Partial<CheckinData>>({
     bodyWeight: undefined,
     mood: '🙂',
@@ -108,7 +108,7 @@ export default function CheckinScreen() {
       return;
     }
     setIsSubmitting(true);
-    
+
     // Validate required fields
     const missing: string[] = [];
     if (!checkinData.moodCharacter) missing.push('Mood');
@@ -129,7 +129,7 @@ export default function CheckinScreen() {
       setIsSubmitting(false); // Re-enable on validation failure
       return;
     }
-    
+
     try {
       const checkin: CheckinData = {
         id: Date.now().toString(),
@@ -139,14 +139,14 @@ export default function CheckinScreen() {
       };
 
       await addCheckin(checkin);
-      
+
       // Always force regeneration when submitting a new check-in
       // This ensures the plan is regenerated with the new check-in data
       // NOTE: Don't reset isSubmitting here - let the navigation happen
       // The button stays disabled until we leave the screen
       router.push({
         pathname: '/generating-plan',
-        params: { 
+        params: {
           force: 'true',
           isRedo: isRedo ? 'true' : 'false'
         }
@@ -197,7 +197,7 @@ export default function CheckinScreen() {
     <View style={styles.sectionContainer}>
       <Card style={[styles.sectionCard, styles.moodCard]} gradient gradientColors={['#1A1A20', '#0C0C0D']}>
         <Text style={styles.sectionTitle}>How are you feeling?</Text>
-        
+
         <View style={styles.moodContainer}>
           <View style={styles.labelRow}>
             <Text style={styles.fieldLabel}>Select your mood <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
@@ -221,9 +221,9 @@ export default function CheckinScreen() {
               />
             ))}
           </View>
-          
-          <TouchableOpacity 
-            onPress={() => setShowAllMoods(!showAllMoods)} 
+
+          <TouchableOpacity
+            onPress={() => setShowAllMoods(!showAllMoods)}
             style={styles.showMoreButton}
             accessibilityRole="button"
             accessibilityLabel={showAllMoods ? "Show less mood options" : "Show more mood options"}
@@ -235,7 +235,7 @@ export default function CheckinScreen() {
 
       <Card style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>Mental State</Text>
-        
+
         <View style={styles.sliderGroup}>
           <Slider
             label="Motivation Level"
@@ -306,7 +306,7 @@ export default function CheckinScreen() {
   const renderSleepMetrics = () => (
     <Card style={styles.sectionCard}>
       <Text style={styles.sectionTitle}>Sleep & Recovery</Text>
-      
+
       <Slider
         label="Hours of Sleep"
         required
@@ -353,7 +353,7 @@ export default function CheckinScreen() {
   const renderPhysicalMetrics = () => (
     <Card style={styles.sectionCard}>
       <Text style={styles.sectionTitle}>Physical State</Text>
-      
+
       <View style={styles.fieldContainer}>
         <View style={styles.labelRow}>
           <Text style={styles.fieldLabel}>Any soreness?</Text>
@@ -413,7 +413,7 @@ export default function CheckinScreen() {
       <>
         <Card style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Weight Tracking</Text>
-          
+
           <View style={styles.inputWrapper}>
             <View style={styles.labelRow}>
               <Text style={styles.fieldLabel}>Today's Weight <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
@@ -427,9 +427,9 @@ export default function CheckinScreen() {
               </TouchableOpacity>
             </View>
             <View style={[
-                styles.weightInputContainer,
-                !checkinData.currentWeight && styles.requiredField
-              ]}>
+              styles.weightInputContainer,
+              !checkinData.currentWeight && styles.requiredField
+            ]}>
               <TextInput
                 style={styles.weightInput}
                 value={currentWeightInput}
@@ -438,7 +438,7 @@ export default function CheckinScreen() {
                   const decimalPattern = /^\d*\.?\d{0,2}$/;
                   if (text === '' || decimalPattern.test(text)) {
                     const numeric = parseFloat(text);
-                    
+
                     // Just accept the input while typing - no validation yet
                     setCurrentWeightInput(text);
                     setCheckinData(prev => ({
@@ -462,7 +462,7 @@ export default function CheckinScreen() {
                     setCurrentWeightInput('');
                     return;
                   }
-                  
+
                   // Validate weight range on blur (after user finishes typing)
                   const v = await confirmNumericWithinRange(numeric, NumberSpecs.weightKg);
                   if (v === null) {
@@ -470,11 +470,11 @@ export default function CheckinScreen() {
                     setCurrentWeightInput('');
                     return;
                   }
-                  
+
                   const rounded = Math.round(v * 100) / 100;
                   setCheckinData(prev => ({ ...prev, currentWeight: rounded }));
                   setCurrentWeightInput(String(rounded));
-                  
+
                   // Check for large weight change warning (only on blur, after typing is complete)
                   const weights = getWeightData?.() || [];
                   const last = weights.length > 0 ? weights[weights.length - 1] : undefined;
@@ -538,8 +538,8 @@ export default function CheckinScreen() {
         </Card>
 
         <Card style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Yesterday's Intake</Text>
-          
+          <Text style={styles.sectionTitle}>Yesterday's Data</Text>
+
           <View style={styles.inputWrapper}>
             <View style={styles.labelRow}>
               <Text style={styles.fieldLabel}>Water Intake <Text style={{ color: theme.color.accent.primary }}>*</Text></Text>
@@ -550,9 +550,9 @@ export default function CheckinScreen() {
                 value={checkinData.waterL?.toString() || ''}
                 onChangeText={(text) => {
                   const water = parseFloat(text);
-                  setCheckinData(prev => ({ 
-                    ...prev, 
-                    waterL: isNaN(water) ? undefined : water 
+                  setCheckinData(prev => ({
+                    ...prev,
+                    waterL: isNaN(water) ? undefined : water
                   }));
                 }}
                 placeholder="0.0"
@@ -602,7 +602,7 @@ export default function CheckinScreen() {
                 <Info color={theme.color.muted} size={16} />
               </TouchableOpacity>
             </View>
-            
+
             <View style={styles.togglesRow}>
               <TouchableOpacity
                 style={[
@@ -627,8 +627,8 @@ export default function CheckinScreen() {
 
   return (
     <KeyboardDismissView style={styles.container}>
-      <Stack.Screen 
-        options={{ 
+      <Stack.Screen
+        options={{
           title: 'Check-in time',
           headerStyle: { backgroundColor: theme.color.bg },
           headerTintColor: theme.color.ink,
@@ -641,11 +641,11 @@ export default function CheckinScreen() {
               <ChevronLeft color={theme.color.ink} size={22} />
             </TouchableOpacity>
           ),
-        }} 
+        }}
       />
-      
+
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView 
+        <ScrollView
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           bounces={true}
@@ -677,8 +677,8 @@ export default function CheckinScreen() {
             title={
               checkinLimitReached
                 ? "Redo Limit Reached"
-                : isSubmitting 
-                  ? "Generating Plan..." 
+                : isSubmitting
+                  ? "Generating Plan..."
                   : (mode === 'PRO') && !checkinData.currentWeight
                     ? "Enter Weight to Continue"
                     : "Generate My Plan"

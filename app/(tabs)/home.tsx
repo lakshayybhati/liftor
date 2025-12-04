@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useCallback, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator, Animated, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, ActivityIndicator, Animated, Alert, Modal } from 'react-native';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { Activity, TrendingUp, Dumbbell, Plus, ChevronRight, RefreshCw, Flame, Gamepad2 } from 'lucide-react-native';
+import { Activity, TrendingUp, Dumbbell, Plus, ChevronRight, RefreshCw, Flame, Gamepad2, Clock } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { CircularProgress } from '@/components/ui/CircularProgress';
@@ -14,7 +14,7 @@ import { useUserStore, REDO_CHECKIN_LIMIT } from '@/hooks/useUserStore';
 import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
-import { getSubscriptionTier, hasActiveSubscription } from '@/utils/subscription-helpers';
+import { useSessionStatus, formatTrialTimeRemaining } from '@/hooks/useSessionStatus';
 import { getGameStats, GameStats } from '@/utils/game-storage';
 import { isGenerationInProgress } from '@/services/plan-generation';
 import { getBasePlanJobState, BasePlanStatus, validatePendingJobState, isBackgroundGenerationInProgress } from '@/services/backgroundPlanGeneration';
@@ -23,9 +23,27 @@ export default function HomeScreen() {
   const { user, isLoading, getTodayCheckin, getTodayPlan, getStreak, getRecentCheckins, getNutritionProgress, getCompletedExercisesForDate, getCurrentBasePlan, basePlans, getCheckinCountForDate } = useUserStore();
   const auth = useAuth();
   const { data: profile, isLoading: isProfileLoading } = useProfile();
-  const [subscriptionBadge, setSubscriptionBadge] = useState<'Trial' | 'Elite' | null>(null);
+  // SINGLE SOURCE OF TRUTH: useSessionStatus handles all subscription logic
+  // It checks profile.subscription_active (from webhook) and falls back to edge function
+  const {
+    isTrial,
+    isSubscribed,
+    canUseApp,
+    trialEndsAt,
+    isLoading: isSessionLoading,
+  } = useSessionStatus();
+  
   const [gameStats, setGameStats] = useState<GameStats | null>(null);
+  const [showEveningWarning, setShowEveningWarning] = useState(false);
   const insets = useSafeAreaInsets();
+
+  // Compute subscription badge from single source of truth
+  // No separate state, no async calls - just derive from useSessionStatus
+  const subscriptionBadge = useMemo(() => {
+    if (isSubscribed) return 'Elite';
+    if (isTrial) return 'Trial';
+    return null;
+  }, [isSubscribed, isTrial]);
 
   useFocusEffect(
     useCallback(() => {
@@ -47,17 +65,6 @@ export default function HomeScreen() {
   const todayPlan = getTodayPlan();
   const streak = getStreak();
   const recentCheckins = getRecentCheckins(7);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const tier = await getSubscriptionTier();
-        setSubscriptionBadge(tier.tier === 'trial' ? 'Trial' : tier.tier === 'elite' ? 'Elite' : null);
-      } catch {
-        setSubscriptionBadge(null);
-      }
-    })();
-  }, []);
 
   // Remove paywall enforcement on Home screen
   // Paywall will only appear 10 seconds after base plan generation
@@ -144,89 +151,97 @@ export default function HomeScreen() {
     return !!currentPlan && basePlans.length > 0;
   }, [getCurrentBasePlan, basePlans]);
 
-  useEffect(() => {
-    // Wait for both local store and profile to hydrate before deciding
-    if (isLoading || isProfileLoading) {
-      console.log('[Home] Still loading data...');
-      return;
-    }
-
-    console.log('[Home] Onboarding check:', {
-      localOnboarded: user?.onboardingComplete,
-      profileOnboarded: profile?.onboarding_complete,
-      finalOnboarded: onboardingCompleteFlag,
-      subscriptionActive,
-      hasBasePlan,
-      basePlansCount: basePlans.length,
-    });
-
-    // First check: if not onboarded, go to onboarding
-    if (!onboardingCompleteFlag && !subscriptionActive) {
-      console.log('[Home] User not onboarded, redirecting to onboarding');
-      router.replace('/onboarding');
-      return;
-    }
-
-    // Check background job state for plan verification flow
-    const checkJobState = async () => {
-      const userId = auth?.session?.user?.id ?? null;
-      const jobState = await getBasePlanJobState(userId);
-      
-      console.log('[Home] Background job state:', {
-        status: jobState.status,
-        verified: jobState.verified,
-        hasBasePlan,
-        isGenerationRunning: isBackgroundGenerationInProgress(),
-      });
-      
-      // If plan is ready but not verified, show plan preview first
-      if (jobState.status === 'ready' && !jobState.verified && hasBasePlan) {
-        console.log('[Home] Plan ready but not verified - redirecting to plan preview');
-        router.replace('/plan-preview');
-        return true;
-      }
-      
-      // If plan is pending, VALIDATE that generation is actually running
-      // This prevents being stuck on plan-building screen due to stale state
-      if (jobState.status === 'pending' && onboardingCompleteFlag) {
-        const isPendingValid = await validatePendingJobState(userId);
-        
-        if (isPendingValid) {
-          console.log('[Home] Plan generation pending AND valid - redirecting to plan building');
-          router.replace('/plan-building');
-          return true;
-        } else {
-          console.log('[Home] Pending state was invalid/stale - staying on home');
-          // The validatePendingJobState function already reset the state
-          // User can now proceed normally
-          return false;
-        }
-      }
-      
-      return false;
-    };
-    
-    // Run the async check
-    checkJobState().then(redirected => {
-      if (redirected) return;
-      
-      // Second check: if onboarded but no base plan, redirect to onboarding
-      // to let them start fresh (the old plan-building state might be corrupted)
-      // BUT: Don't redirect if generation is already in progress (prevents duplicate calls)
-      if (onboardingCompleteFlag && !hasBasePlan) {
-        if (isGenerationInProgress() || isBackgroundGenerationInProgress()) {
-          console.log('[Home] User has no base plan, but generation is already in progress - redirecting to plan building');
-          router.replace('/plan-building');
-          return;
-        }
-        // No base plan and no generation running - something went wrong
-        // Redirect to onboarding to start fresh
-        console.log('[Home] User has no base plan and no generation running - redirecting to onboarding');
-        router.replace('/onboarding');
+  // Use useFocusEffect instead of useEffect to only run redirect logic when Home tab is focused
+  // This prevents redirects from firing when user is on other tabs (Settings, History)
+  useFocusEffect(
+    useCallback(() => {
+      // Wait for both local store and profile to hydrate before deciding
+      if (isLoading || isProfileLoading) {
+        console.log('[Home] Still loading data...');
         return;
       }
-    });
-  }, [isLoading, isProfileLoading, onboardingCompleteFlag, subscriptionActive, hasBasePlan, basePlans.length, auth?.session?.user?.id]);
+
+      console.log('[Home] Onboarding check:', {
+        localOnboarded: user?.onboardingComplete,
+        profileOnboarded: profile?.onboarding_complete,
+        finalOnboarded: onboardingCompleteFlag,
+        subscriptionActive,
+        hasBasePlan,
+        basePlansCount: basePlans.length,
+      });
+
+      // Check background job state for plan verification flow
+      const checkJobState = async () => {
+        const userId = auth?.session?.user?.id ?? null;
+        const jobState = await getBasePlanJobState(userId);
+
+        console.log('[Home] Background job state:', {
+          status: jobState.status,
+          verified: jobState.verified,
+          hasBasePlan,
+          isGenerationRunning: isBackgroundGenerationInProgress(),
+        });
+
+        // If user has any base plan that hasn't been verified yet,
+        // always show the weekly plan preview BEFORE allowing Home.
+        if (hasBasePlan && !jobState.verified) {
+          console.log('[Home] Unverified base plan detected - redirecting to plan preview');
+          router.replace('/plan-preview');
+          return true;
+        }
+
+        // If plan is pending, VALIDATE that generation is actually running
+        // This prevents being stuck on plan-building screen due to stale state
+        if (jobState.status === 'pending' && onboardingCompleteFlag) {
+          const isPendingValid = await validatePendingJobState(userId);
+
+          if (isPendingValid) {
+            console.log('[Home] Plan generation pending AND valid - redirecting to plan building');
+            router.replace('/plan-building');
+            return true;
+          } else {
+            console.log('[Home] Pending state was invalid/stale - staying on home');
+            // The validatePendingJobState function already reset the state
+            // User can now proceed normally
+            return false;
+          }
+        }
+
+        return false;
+      };
+
+      // Run the async check
+      checkJobState().then(redirected => {
+        if (redirected) return;
+
+        // If we didn't redirect to plan-preview or plan-building based on job state,
+        // fall back to existing onboarding/base-plan routing rules.
+
+        // First check: if not onboarded, go to onboarding
+        if (!onboardingCompleteFlag && !subscriptionActive) {
+          console.log('[Home] User not onboarded, redirecting to onboarding');
+          router.replace('/onboarding');
+          return;
+        }
+
+        // Second check: if onboarded but no base plan, redirect to onboarding
+        // to let them start fresh (the old plan-building state might be corrupted)
+        // BUT: Don't redirect if generation is already in progress (prevents duplicate calls)
+        if (onboardingCompleteFlag && !hasBasePlan) {
+          if (isGenerationInProgress() || isBackgroundGenerationInProgress()) {
+            console.log('[Home] User has no base plan, but generation is already in progress - redirecting to plan building');
+            router.replace('/plan-building');
+            return;
+          }
+          // No base plan and no generation running - something went wrong
+          // Redirect to onboarding to start fresh
+          console.log('[Home] User has no base plan and no generation running - redirecting to onboarding');
+          router.replace('/onboarding');
+          return;
+        }
+      });
+    }, [isLoading, isProfileLoading, onboardingCompleteFlag, subscriptionActive, hasBasePlan, basePlans.length, auth?.session?.user?.id, user?.onboardingComplete, profile?.onboarding_complete])
+  );
 
   // Delayed paywall gate after Home is opened (5s), run only once per session in the background
   const paywallCheckedRef = useRef(false);
@@ -256,7 +271,18 @@ export default function HomeScreen() {
 
   useEffect(() => {
     // Wait until auth/profile are done hydrating and we have a user
-    if (isLoading || isProfileLoading || !auth?.session?.user?.id) {
+    // IMPORTANT: Also wait for profile to be available to avoid false-negative checks
+    if (isLoading || isProfileLoading || !auth?.session?.user?.id || profile === undefined) {
+      return;
+    }
+
+    // Skip paywall check entirely if profile shows subscription or trial
+    // This prevents the paywall from ever showing for subscribed users
+    const profileHasSubscription = Boolean(profile?.subscription_active);
+    const profileHasTrial = Boolean(profile?.trial_active);
+    if (profileHasSubscription || profileHasTrial) {
+      console.log('[Home] Subscription/trial detected via profile, skipping paywall check entirely');
+      paywallCheckedRef.current = true;
       return;
     }
 
@@ -266,16 +292,54 @@ export default function HomeScreen() {
     }
     paywallCheckedRef.current = true;
 
-    // Schedule background entitlement check; UI stays responsive
+    // Schedule background entitlement check
+    // IMPORTANT: Check profile.subscription_active FIRST as it's the most reliable source
+    // (updated by RevenueCat webhook). Only call edge function as secondary check.
     paywallCheckTimerRef.current = setTimeout(async () => {
       try {
-        const entitled = await hasActiveSubscription();
-        if (!entitled) {
-          router.replace({
-            pathname: '/paywall',
-            params: { next: '/(tabs)/home', blocking: 'true' } as any,
-          });
+        // Re-check profile status (may have updated since mount)
+        const currentProfileHasSubscription = Boolean(profile?.subscription_active);
+        const currentProfileHasTrial = Boolean(profile?.trial_active);
+
+        // If profile shows subscription or trial, user has access - no need for edge function
+        if (currentProfileHasSubscription || currentProfileHasTrial) {
+          console.log('[Home] User has access via profile check, skipping paywall');
+          return;
         }
+
+        // Second check: Use canUseApp from session status hook (already loaded)
+        if (canUseApp) {
+          console.log('[Home] User has access via session status, skipping paywall');
+          return;
+        }
+
+        // Third check: Call RevenueCat SDK directly as final fallback
+        // This handles cases where webhook hasn't synced profile.subscription_active yet
+        try {
+          const hasRevenueCatSubscription = await hasActiveSubscription();
+          if (hasRevenueCatSubscription) {
+            console.log('[Home] User has access via RevenueCat SDK, skipping paywall');
+            return;
+          }
+        } catch (rcError) {
+          console.warn('[Home] RevenueCat SDK check failed:', rcError);
+          // Continue to show paywall if RC check fails
+        }
+
+        // If all checks fail, show paywall
+        const hasHadTrial = Boolean(profile?.has_had_local_trial);
+        const trialEnded = hasHadTrial && !currentProfileHasTrial && !currentProfileHasSubscription;
+
+        console.log('[Home] No access detected, showing paywall', { currentProfileHasSubscription, currentProfileHasTrial, canUseApp, trialEnded });
+
+        router.replace({
+          pathname: '/paywall',
+          params: {
+            next: '/(tabs)/home',
+            blocking: 'true',
+            trialEnded: trialEnded ? 'true' : 'false',
+          } as any,
+        });
       } catch {
         // On error, fail open to avoid interrupting the session unnecessarily
       }
@@ -289,7 +353,7 @@ export default function HomeScreen() {
         paywallCheckTimerRef.current = null;
       }
     };
-  }, [isLoading, isProfileLoading, auth?.session?.user?.id]);
+  }, [isLoading, isProfileLoading, auth?.session?.user?.id, profile, canUseApp]);
 
   // Flags for UI states; do not early-return to keep hook order consistent
   const isHydrating = isLoading || isProfileLoading || !auth;
@@ -298,6 +362,12 @@ export default function HomeScreen() {
   const shouldHoldForBasePlanRedirect = !isHydrating && onboardingCompleteFlag && !hasBasePlan;
 
   const handleCheckin = () => {
+    const hour = new Date().getHours();
+    // Check if it's evening (after 18:00)
+    if (hour >= 18) {
+      setShowEveningWarning(true);
+      return;
+    }
     router.push('/checkin');
   };
 
@@ -403,6 +473,15 @@ export default function HomeScreen() {
                     </View>
                   )}
                 </View>
+                {/* Trial countdown badge */}
+                {isTrial && trialEndsAt && (
+                  <View style={styles.trialCountdownBadge}>
+                    <Clock size={12} color={theme.color.accent.blue} />
+                    <Text style={styles.trialCountdownText}>
+                      {formatTrialTimeRemaining(trialEndsAt)}
+                    </Text>
+                  </View>
+                )}
               </View>
 
               {streak > 0 && (
@@ -628,6 +707,41 @@ export default function HomeScreen() {
           </ScrollView>
         )}
       </View>
+
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={showEveningWarning}
+        onRequestClose={() => setShowEveningWarning(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <Card style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Evening Check-in Warning</Text>
+              <Text style={styles.modalBody}>
+                Check-in is meant to happen in the morning for proper plan execution. Do you still want to continue?
+              </Text>
+              <View style={styles.modalButtons}>
+                <Button
+                  title="Cancel"
+                  variant="secondary"
+                  onPress={() => setShowEveningWarning(false)}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  title="Continue"
+                  variant="primary"
+                  onPress={() => {
+                    setShowEveningWarning(false);
+                    router.push('/checkin');
+                  }}
+                  style={{ flex: 1 }}
+                />
+              </View>
+            </Card>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -725,6 +839,21 @@ const styles = StyleSheet.create({
     color: '#000',
   },
   trialText: {
+    color: theme.color.accent.blue,
+  },
+  trialCountdownBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.color.accent.blue + '15',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 6,
+    gap: 4,
+  },
+  trialCountdownText: {
+    fontSize: 11,
+    fontWeight: '600',
     color: theme.color.accent.blue,
   },
   content: {
@@ -982,5 +1111,39 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.9)',
     fontWeight: '900',
     marginTop: 19,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: theme.space.lg,
+  },
+  modalContainer: {
+    width: '100%',
+    maxWidth: 400,
+  },
+  modalCard: {
+    padding: theme.space.xl,
+    gap: theme.space.lg,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: theme.color.ink,
+    fontFamily: theme.font.display,
+    textAlign: 'center',
+  },
+  modalBody: {
+    fontSize: 16,
+    color: theme.color.muted,
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: theme.space.md,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: theme.space.md,
+    marginTop: theme.space.sm,
   },
 });

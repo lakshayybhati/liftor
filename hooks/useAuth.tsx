@@ -371,9 +371,10 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
   }
 
   const requestOtp = useCallback(async (params: { identifier: string; method?: 'email' | 'phone'; mode?: 'login' | 'signup' | 'reset' }) => {
-    const { identifier, method = 'email' } = params;
+    const { identifier, method = 'email', mode = 'login' } = params;
     try {
       setIsAuthLoading(true);
+      console.log('[Auth] requestOtp start', { identifier, method, mode });
       try { await supabase.auth.signOut(); } catch {}
       if (!identifier) return { success: false, error: 'Enter your email or phone.' };
 
@@ -388,18 +389,30 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
       }
 
       const redirectTo = Linking.createURL('/auth/callback');
-      const shouldCreateUser = params.mode === 'signup' ? true : true; // allow auto-create by default
+      // For signup mode, we allow user creation; for login/reset, we don't create new users
+      const shouldCreateUser = mode === 'signup';
       const { error } = await supabase.auth.signInWithOtp({
         email: identifier,
         options: { shouldCreateUser, emailRedirectTo: redirectTo },
       });
       if (error) {
-        const msg = error.message || 'Failed to send code.';
-        const isRate = /rate/i.test(msg) || (error as any).status === 429;
-        return { success: false, error: msg, cooldownSeconds: isRate ? 60 : undefined };
+        console.error('[Auth] requestOtp error', error);
+        const errorMsg = error.message?.toLowerCase() || '';
+        const isRate = /rate/i.test(errorMsg) || (error as any).status === 429;
+        
+        // Handle specific error cases
+        if (errorMsg.includes('user not found') || errorMsg.includes('no user found')) {
+          return { success: false, error: 'No account found with this email. Please sign up first.' };
+        }
+        if (isRate) {
+          return { success: false, error: 'Too many requests. Please wait a moment.', cooldownSeconds: 60 };
+        }
+        return { success: false, error: error.message || 'Failed to send code.' };
       }
+      console.log('[Auth] requestOtp success');
       return { success: true };
     } catch (e: any) {
+      console.error('[Auth] requestOtp exception', e);
       const msg = e?.message || 'Unable to send code. Try again.';
       return { success: false, error: msg };
     } finally {
@@ -408,41 +421,90 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
   }, [supabase]);
 
   const verifyOtp = useCallback(async (params: { identifier: string; code: string; method?: 'email' | 'phone'; mode?: 'login' | 'signup' | 'reset' }) => {
-    const { identifier, code, method = 'email' } = params;
+    const { identifier, code, method = 'email', mode = 'login' } = params;
     try {
       setIsAuthLoading(true);
+      console.log('[Auth] verifyOtp start', { identifier, method, mode });
       if (!identifier || !code) return { success: false, error: 'Enter the 6-digit code.' };
 
       if (method === 'phone') {
         const { error } = await supabase.auth.verifyOtp({ phone: identifier, token: code, type: 'sms' });
-        if (error) return { success: false, error: error.message };
+        if (error) {
+          console.error('[Auth] verifyOtp phone error', error);
+          return { success: false, error: getOtpErrorMessage(error) };
+        }
         await seedProfileIfMissing();
         return { success: true };
       }
 
       const { error } = await supabase.auth.verifyOtp({ email: identifier, token: code, type: 'email' });
-      if (error) return { success: false, error: error.message };
+      if (error) {
+        console.error('[Auth] verifyOtp email error', error);
+        return { success: false, error: getOtpErrorMessage(error) };
+      }
+      console.log('[Auth] verifyOtp success');
       await seedProfileIfMissing();
       return { success: true };
     } catch (e: any) {
+      console.error('[Auth] verifyOtp exception', e);
       const msg = e?.message || 'Verification failed. Try again.';
       return { success: false, error: msg };
     } finally {
       setIsAuthLoading(false);
     }
   }, [supabase]);
+  
+  // Helper function to get user-friendly OTP error messages
+  function getOtpErrorMessage(error: any): string {
+    const msg = error?.message?.toLowerCase() || '';
+    if (msg.includes('invalid') || msg.includes('incorrect')) {
+      return 'Invalid code. Please check and try again.';
+    }
+    if (msg.includes('expired')) {
+      return 'Code has expired. Please request a new one.';
+    }
+    if (msg.includes('rate') || msg.includes('too many')) {
+      return 'Too many attempts. Please wait a moment.';
+    }
+    return error?.message || 'Verification failed. Try again.';
+  }
 
   const signIn = useCallback(async (email: string, password: string) => {
     try {
       setIsAuthLoading(true);
+      console.log('[Auth] signIn start', { email });
       // Clear any existing session before attempting new sign-in to avoid leaks
       try { await supabase.auth.signOut(); } catch {}
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      
       if (error) {
         console.error('[Auth] signIn error', error);
         logProductionMetric('error', 'signin_failed', { error: error.message });
+        
+        // Handle specific error cases with user-friendly messages
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (errorMsg.includes('invalid login credentials') || 
+            errorMsg.includes('invalid credentials') ||
+            errorMsg.includes('wrong password')) {
+          return { success: false, error: 'Invalid email or password. Please check your credentials and try again.' };
+        }
+        if (errorMsg.includes('email not confirmed') || 
+            errorMsg.includes('not confirmed')) {
+          return { success: false, error: 'Email not confirmed. Please check your inbox for the confirmation link.' };
+        }
+        if (errorMsg.includes('user not found') || 
+            errorMsg.includes('no user found')) {
+          return { success: false, error: 'No account found with this email. Please sign up first.' };
+        }
+        if (errorMsg.includes('rate') || errorMsg.includes('too many')) {
+          return { success: false, error: 'Too many login attempts. Please wait a moment and try again.' };
+        }
+        if (errorMsg.includes('network') || errorMsg.includes('fetch')) {
+          return { success: false, error: 'Network error. Please check your connection and try again.' };
+        }
         return { success: false, error: error.message };
       }
+      
       const uid = data?.user?.id ?? null;
       const uemail = data?.user?.email ?? email;
       const uname = (data?.user?.user_metadata as any)?.name ?? undefined;
@@ -487,11 +549,41 @@ export const [AuthProvider, useAuth] = createContextHook<AuthState>(() => {
         password,
         options: { data: { name: (name ?? '').trim() || undefined } },
       });
+      
       if (error) {
         console.error('[Auth] signUp error', error);
         logProductionMetric('error', 'signup_failed', { error: error.message });
+        
+        // Handle specific error cases with user-friendly messages
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (errorMsg.includes('user already registered') || 
+            errorMsg.includes('already exists') ||
+            errorMsg.includes('duplicate') ||
+            error.message?.includes('User already registered')) {
+          return { success: false, error: 'An account with this email already exists. Please sign in instead.' };
+        }
+        if (errorMsg.includes('password') && errorMsg.includes('weak')) {
+          return { success: false, error: 'Password is too weak. Please use a stronger password.' };
+        }
+        if (errorMsg.includes('rate') || errorMsg.includes('too many')) {
+          return { success: false, error: 'Too many attempts. Please wait a moment and try again.' };
+        }
         return { success: false, error: error.message };
       }
+      
+      // CRITICAL: Supabase returns a "fake success" for existing users when email confirmation is enabled
+      // The user object will have an empty identities array if the email already exists
+      // This is to prevent email enumeration attacks
+      const userIdentities = data.user?.identities ?? [];
+      if (data.user && userIdentities.length === 0) {
+        console.warn('[Auth] signUp detected existing user (empty identities array)');
+        logProductionMetric('auth', 'signup_existing_user_detected', { email });
+        return { 
+          success: false, 
+          error: 'An account with this email already exists. Please sign in instead.' 
+        };
+      }
+      
       const createdUserId = data.user?.id ?? null;
       const createdEmail = data.user?.email ?? email;
       const createdName = (name ?? '').trim();

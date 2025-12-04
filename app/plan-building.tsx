@@ -20,7 +20,7 @@ import {
   Dimensions,
   Easing
 } from 'react-native';
-import { router, Stack, useFocusEffect } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Dumbbell, Apple, Brain, Sparkles, RefreshCw, Clock, Lightbulb, Gamepad2, ArrowRight, Check, X } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -31,18 +31,25 @@ import { BasePlanSkeleton } from '@/components/BasePlanSkeleton';
 import PlanLoadingMiniGameOverlay from '@/components/PlanLoadingMiniGameOverlay';
 import { saveGameScore } from '@/utils/game-storage';
 import {
-  getBasePlanJobState,
-  BasePlanStatus,
-  retryBasePlanGeneration,
-  validatePendingJobState,
-  cancelBasePlanGeneration,
-} from '@/services/backgroundPlanGeneration';
-import {
   getSmartEstimate,
   formatTimeEstimate,
   getProgressMessage,
   getRemainingTimeMessage,
 } from '@/utils/plan-time-estimator';
+import {
+  getActiveJob,
+  getMostRecentJob,
+  getJobStatus,
+  createAndTriggerServerPlanJob,
+  triggerQueueProcessing,
+  resetStuckJob,
+  cancelJob,
+  isJobStuck,
+  ServerPlanJob,
+} from '@/utils/server-plan-generation';
+
+// Status type for display (simplified from server status)
+type BasePlanStatus = 'pending' | 'ready' | 'error' | 'idle';
 
 // ============================================================================
 // CONFIGURATION
@@ -52,10 +59,21 @@ import {
 const DEFAULT_ESTIMATED_TIME_SECONDS = 360; // 6 minutes based on real testing (5-7 min typical)
 const GAME_SHOW_DELAY_SECONDS = 30; // Show game option after 30 seconds
 
+// Error codes that should trigger auto-retry on client
+// These match server-side retry behavior
+const RECOVERABLE_ERROR_CODES = new Set([
+  'AI_TIMEOUT',
+  'RATE_LIMITED',
+  'JSON_PARSE_ERROR',
+  'UNEXPECTED_ERROR',
+  'VALIDATION_FAILED',
+  'AI_ERROR',
+]);
+
 const GENERATION_PHASES = [
-  { id: 0, text: "Analyzing your profile & goals", icon: Brain },
-  { id: 1, text: "Structuring workout splits", icon: Dumbbell },
-  { id: 2, text: "Verifying plan accuracy", icon: Apple },
+  { id: 0, text: "Designing your weekly split", icon: Brain },
+  { id: 1, text: "Building daily workouts", icon: Dumbbell },
+  { id: 2, text: "Tuning nutrition to match training", icon: Apple },
   { id: 3, text: "Finalizing your custom plan", icon: Sparkles },
 ];
 
@@ -82,7 +100,12 @@ export default function PlanBuildingScreen() {
   const { user, addBasePlan } = useUserStore();
   const { session } = useAuth();
   const userId = session?.user?.id ?? null;
-  
+
+  // Get redo reason from params (if this is a redo request)
+  const params = useLocalSearchParams<{ redoReason?: string }>();
+  const redoReason = params.redoReason;
+  const isRedoRequest = !!redoReason;
+
   // State
   const [planStatus, setPlanStatus] = useState<BasePlanStatus>('pending');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -91,24 +114,36 @@ export default function PlanBuildingScreen() {
   const [showMiniGame, setShowMiniGame] = useState(false);
   const [showLongWaitMessage, setShowLongWaitMessage] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
-  
+
+  // Server-side job tracking
+  const [serverJobId, setServerJobId] = useState<string | null>(null);
+  const [useServerGeneration, setUseServerGeneration] = useState(false);
+
   // Intelligent time estimation state
   const [estimatedTime, setEstimatedTime] = useState(DEFAULT_ESTIMATED_TIME_SECONDS);
   const [minTime, setMinTime] = useState(180); // 3 min minimum
   const [maxTime, setMaxTime] = useState(480); // 8 min max
   const [estimateConfidence, setEstimateConfidence] = useState<'low' | 'medium' | 'high'>('low');
   const [progressMessage, setProgressMessage] = useState('Analyzing your profile...');
-  
+  const [errorDetails, setErrorDetails] = useState<{ code?: string | null; message?: string | null } | null>(null);
+
   // Cancel button state
   const [canCancel, setCanCancel] = useState(true);
   const [cancelTimer, setCancelTimer] = useState(10);
   const cancelButtonFade = useRef(new Animated.Value(1)).current;
-  
+
   // Animations
   const tipFadeAnim = useRef(new Animated.Value(1)).current;
   const gameOptionFadeAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
+  const autoRetryJobIdsRef = useRef<Set<string>>(new Set());
+  const errorDetailsRef = useRef<{ code?: string | null; message?: string | null } | null>(null);
+  const hasNavigatedRef = useRef(false);
+
+  useEffect(() => {
+    errorDetailsRef.current = errorDetails;
+  }, [errorDetails]);
 
   // Start pulse animation
   useEffect(() => {
@@ -128,7 +163,7 @@ export default function PlanBuildingScreen() {
         }),
       ])
     );
-    
+
     if (planStatus === 'pending') {
       pulse.start();
     } else {
@@ -138,7 +173,7 @@ export default function PlanBuildingScreen() {
 
     return () => pulse.stop();
   }, [planStatus]);
-  
+
   // --------------------------------------------------------------------------
   // 1. Lifecycle & Status Polling
   // --------------------------------------------------------------------------
@@ -160,7 +195,7 @@ export default function PlanBuildingScreen() {
         return prev - 1;
       });
     }, 1000);
-    
+
     return () => clearInterval(interval);
   }, []);
 
@@ -168,14 +203,14 @@ export default function PlanBuildingScreen() {
   useEffect(() => {
     const fetchEstimate = async () => {
       if (!user) return;
-      
+
       try {
         const estimate = await getSmartEstimate(user);
         setEstimatedTime(estimate.estimatedSeconds);
         setMinTime(estimate.minSeconds);
         setMaxTime(estimate.maxSeconds);
         setEstimateConfidence(estimate.confidence);
-        
+
         console.log('[PlanBuilding] Smart estimate loaded:', {
           estimated: estimate.estimatedSeconds,
           min: estimate.minSeconds,
@@ -188,72 +223,272 @@ export default function PlanBuildingScreen() {
         console.warn('[PlanBuilding] Failed to get smart estimate, using defaults');
       }
     };
-    
+
     fetchEstimate();
   }, [user]);
 
-  // Validate job state on mount
+  // Validate job state on mount - SERVER ONLY
   useEffect(() => {
     const validateOnMount = async () => {
-      const state = await getBasePlanJobState(userId);
-      
-      if (state.status === 'idle') {
-        console.log('[PlanBuilding] Job state is idle on mount, redirecting to home');
-        router.replace('/(tabs)/home');
+      // Check for active server-side job
+      console.log('[PlanBuilding] Checking for server-side job...');
+      const serverJob = await getActiveJob();
+
+      if (serverJob && (serverJob.status === 'pending' || serverJob.status === 'processing')) {
+        console.log('[PlanBuilding] Found active server job:', serverJob.id, 'status:', serverJob.status);
+        setServerJobId(serverJob.id);
+        setUseServerGeneration(true);
+        setPlanStatus('pending');
+
+        // Ensure the processor is triggered for pending jobs
+        if (serverJob.status === 'pending') {
+          console.log('[PlanBuilding] Job is pending, triggering queue processor...');
+          triggerQueueProcessing().catch((err) => {
+            console.warn('[PlanBuilding] Failed to trigger processing:', err);
+          });
+        }
         return;
       }
-      
-      if (state.status === 'pending') {
-        const isValid = await validatePendingJobState(userId);
-        if (!isValid) {
-          console.log('[PlanBuilding] Pending state was invalid, redirecting to home');
-          router.replace('/(tabs)/home');
+
+      // Check if server job recently completed
+      if (serverJob && serverJob.status === 'completed') {
+        console.log('[PlanBuilding] Server job already completed, fetching plan...');
+        const result = await getJobStatus(serverJob.id);
+        if (result.success && result.plan) {
+          await addBasePlan(result.plan);
+          if (!hasNavigatedRef.current) {
+            hasNavigatedRef.current = true;
+            router.replace('/plan-preview');
+          }
           return;
         }
       }
-      
-      setPlanStatus(state.status);
-    };
-    
-    validateOnMount();
-  }, [userId]);
 
-  // Poll for status updates
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    
-    const checkStatus = async () => {
-      const state = await getBasePlanJobState(userId);
-      setPlanStatus(state.status);
-      
-      if (state.status === 'ready') {
-        console.log('[PlanBuilding] Plan ready! Navigating to preview...');
-        router.replace('/plan-preview');
+      // No active job found - check for recently completed job
+      // This handles the case where the job completed very quickly before the screen mounted
+      console.log('[PlanBuilding] No active server job found, checking for recent completed job...');
+      const recentJob = await getMostRecentJob();
+
+      if (recentJob) {
+        console.log('[PlanBuilding] Found recent job:', recentJob.id, 'status:', recentJob.status);
+
+        if (recentJob.status === 'completed' && recentJob.result_plan_id) {
+          console.log('[PlanBuilding] Recent job completed, fetching plan...');
+          const result = await getJobStatus(recentJob.id);
+          if (result.success && result.plan) {
+            await addBasePlan(result.plan);
+            if (!hasNavigatedRef.current) {
+              hasNavigatedRef.current = true;
+              router.replace('/plan-preview');
+            }
+            return;
+          }
+        }
+
+        // If recent job is still pending/processing, track it
+        if (recentJob.status === 'pending' || recentJob.status === 'processing') {
+          console.log('[PlanBuilding] Recent job still in progress, tracking...');
+          setServerJobId(recentJob.id);
+          setUseServerGeneration(true);
+          setPlanStatus('pending');
+
+          if (recentJob.status === 'pending') {
+            triggerQueueProcessing().catch((err) => {
+              console.warn('[PlanBuilding] Failed to trigger processing:', err);
+            });
+          }
+          return;
+        }
       }
-      
-      if (state.status === 'idle') {
+
+      // No active or recent job found - redirect to home
+      console.log('[PlanBuilding] No active or recent server job found, redirecting to home');
+      if (!hasNavigatedRef.current) {
+        hasNavigatedRef.current = true;
         router.replace('/(tabs)/home');
       }
     };
-    
+
+    validateOnMount();
+  }, [userId, addBasePlan]);
+
+  // Poll for status updates - SERVER ONLY
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+    let lastStuckResetAttempt = 0;
+    let lastFallbackCheck = 0;
+
+    const checkStatus = async () => {
+      // If no serverJobId, try to find any active job as fallback
+      if (!serverJobId) {
+        const now = Date.now();
+        // Only check fallback every 5 seconds to avoid spam
+        if (now - lastFallbackCheck > 5000) {
+          lastFallbackCheck = now;
+          console.log('[PlanBuilding] No server job ID, checking for any active job...');
+          const fallbackJob = await getActiveJob();
+          if (fallbackJob) {
+            console.log('[PlanBuilding] Found fallback job:', fallbackJob.id, 'status:', fallbackJob.status);
+            if (fallbackJob.status === 'completed') {
+              const result = await getJobStatus(fallbackJob.id);
+              if (result.success && result.plan) {
+                console.log('[PlanBuilding] 🎉 Fallback: Plan ready! Navigating...');
+                await addBasePlan(result.plan);
+                setPlanStatus('ready');
+                if (!hasNavigatedRef.current) {
+                  hasNavigatedRef.current = true;
+                  router.replace('/plan-preview');
+                }
+                return;
+              }
+            } else if (fallbackJob.status === 'pending' || fallbackJob.status === 'processing') {
+              // Found an active job, update state to track it
+              console.log('[PlanBuilding] Found active job, updating state to track:', fallbackJob.id);
+              setServerJobId(fallbackJob.id);
+            }
+          }
+        }
+        return;
+      }
+
+      const result = await getJobStatus(serverJobId);
+
+      if (result.success && result.job) {
+        const serverStatus = result.job.status;
+        console.log('[PlanBuilding] Server job status:', serverStatus, 'hasPlan:', !!result.plan);
+
+        if (serverStatus === 'completed') {
+          if (result.plan) {
+            console.log('[PlanBuilding] 🎉 Server plan ready! Saving and navigating...');
+            setErrorDetails(null);
+            // Save the plan from server to local store
+            await addBasePlan(result.plan);
+            setPlanStatus('ready');
+            if (!hasNavigatedRef.current) {
+              hasNavigatedRef.current = true;
+              router.replace('/plan-preview');
+            }
+            return;
+          } else {
+            // Job completed but plan not returned - this can happen with RLS or timing issues
+            // Try fetching the latest plan from the store directly
+            console.warn('[PlanBuilding] ⚠️ Job completed but plan not returned, trying fallback fetch...');
+            console.log('[PlanBuilding] result_plan_id:', result.job.result_plan_id);
+
+            // Navigate anyway - the plan should be in the database
+            // The plan-preview screen will fetch it
+            setErrorDetails(null);
+            setPlanStatus('ready');
+            if (!hasNavigatedRef.current) {
+              hasNavigatedRef.current = true;
+              router.replace('/plan-preview');
+            }
+            return;
+          }
+        }
+
+        if (serverStatus === 'failed') {
+          console.log('[PlanBuilding] Server job failed:', result.job.error_message);
+          const jobError = {
+            code: result.job.error_code,
+            message: result.job.error_message,
+          };
+          if (
+            serverJobId &&
+            jobError.code &&
+            RECOVERABLE_ERROR_CODES.has(jobError.code) &&
+            !autoRetryJobIdsRef.current.has(serverJobId)
+          ) {
+            console.log('[PlanBuilding] Recoverable error detected, auto-retrying...');
+            autoRetryJobIdsRef.current.add(serverJobId);
+            setProgressMessage('We hit a hiccup, retrying automatically...');
+            await handleRetry();
+            return;
+          }
+          setErrorDetails(jobError);
+          setPlanStatus('error');
+          return;
+        }
+
+        // Still processing
+        if (serverStatus === 'pending' || serverStatus === 'processing') {
+          if (errorDetailsRef.current) {
+            setErrorDetails(null);
+          }
+          setPlanStatus('pending');
+
+          // Check if job appears stuck (processing for too long)
+          if (serverStatus === 'processing' && isJobStuck(result.job)) {
+            const now = Date.now();
+            // Only attempt reset once per minute to avoid spam
+            if (now - lastStuckResetAttempt > 60000) {
+              lastStuckResetAttempt = now;
+              console.log('[PlanBuilding] ⚠️ Job appears stuck, attempting reset...');
+              const resetSuccess = await resetStuckJob(serverJobId);
+              if (resetSuccess) {
+                console.log('[PlanBuilding] ✅ Job reset, triggering processor...');
+                triggerQueueProcessing().catch(() => { });
+              }
+            }
+          }
+
+          // Re-trigger processor periodically for pending jobs (every 30 seconds)
+          if (serverStatus === 'pending' && elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
+            console.log('[PlanBuilding] Re-triggering queue processor for pending job...');
+            triggerQueueProcessing().catch(() => { });
+          }
+        }
+      } else {
+        console.warn('[PlanBuilding] getJobStatus failed:', result.error);
+      }
+    };
+
     // Poll every 2 seconds
     interval = setInterval(checkStatus, 2000);
+    // Also check immediately on mount
+    checkStatus();
     return () => clearInterval(interval);
-  }, [userId]);
+  }, [serverJobId, addBasePlan]); // Removed elapsedSeconds to prevent re-running effect on every tick
 
-  // Check on app resume
+  // Check on app resume - SERVER ONLY
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextState: AppStateStatus) => {
       if (nextState === 'active') {
-        const state = await getBasePlanJobState(userId);
-        setPlanStatus(state.status);
-        if (state.status === 'ready') {
-          router.replace('/plan-preview');
+        console.log('[PlanBuilding] App resumed, checking server job status...');
+
+        // Check for active server job
+        const serverJob = await getActiveJob();
+
+        if (serverJob) {
+          if (serverJob.status === 'completed') {
+            console.log('[PlanBuilding] Server plan ready on resume!');
+            const result = await getJobStatus(serverJob.id);
+            if (result.success && result.plan) {
+              await addBasePlan(result.plan);
+              setPlanStatus('ready');
+              if (!hasNavigatedRef.current) {
+                hasNavigatedRef.current = true;
+                router.replace('/plan-preview');
+              }
+              return;
+            }
+          }
+          if (serverJob.status === 'failed') {
+            console.log('[PlanBuilding] Server job failed');
+            setPlanStatus('error');
+            return;
+          }
+          // Update job ID if we found one
+          if (serverJob.status === 'pending' || serverJob.status === 'processing') {
+            setServerJobId(serverJob.id);
+            setUseServerGeneration(true);
+            setPlanStatus('pending');
+          }
         }
       }
     });
     return () => subscription.remove();
-  }, [userId]);
+  }, [addBasePlan]);
 
   // --------------------------------------------------------------------------
   // 2. UI Logic (Timers, Phases, Tips)
@@ -262,11 +497,11 @@ export default function PlanBuildingScreen() {
   // Elapsed time counter & Dynamic progress updates
   useEffect(() => {
     if (planStatus !== 'pending') return;
-    
+
     const interval = setInterval(() => {
       setElapsedSeconds(prev => {
         const newTime = prev + 1;
-        
+
         // Update progress bar based on intelligent estimate
         // Cap at 95% until actually complete
         const progress = Math.min(newTime / estimatedTime, 0.95);
@@ -275,7 +510,7 @@ export default function PlanBuildingScreen() {
           duration: 1000,
           useNativeDriver: false,
         }).start();
-        
+
         // Get dynamic progress message
         const { message, isDelayed, showGame } = getProgressMessage(newTime, estimatedTime, maxTime);
         setProgressMessage(message);
@@ -289,11 +524,11 @@ export default function PlanBuildingScreen() {
             useNativeDriver: true,
           }).start();
         }
-        
+
         return newTime;
       });
     }, 1000);
-    
+
     return () => clearInterval(interval);
   }, [planStatus, showLongWaitMessage, estimatedTime, maxTime]);
 
@@ -301,7 +536,7 @@ export default function PlanBuildingScreen() {
   // Phases are distributed across the estimated time
   useEffect(() => {
     if (planStatus !== 'pending') return;
-    
+
     // Distribute phases across 90% of estimated time
     // Phase 0: 0-25% (Analyzing profile)
     // Phase 1: 25-50% (Structuring workouts)
@@ -309,13 +544,13 @@ export default function PlanBuildingScreen() {
     // Phase 3: 75-90% (Finalizing)
     const phasePercentages = [0.25, 0.50, 0.75];
     const phaseTimings = phasePercentages.map(p => Math.round(estimatedTime * p * 1000));
-    
+
     const timeouts = phaseTimings.map((time, index) => {
       return setTimeout(() => {
         setCurrentPhase(index + 1);
       }, time);
     });
-    
+
     return () => timeouts.forEach(clearTimeout);
   }, [planStatus, estimatedTime]);
 
@@ -327,13 +562,13 @@ export default function PlanBuildingScreen() {
           Animated.timing(tipFadeAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
           Animated.timing(tipFadeAnim, { toValue: 1, duration: 300, useNativeDriver: true })
         ]).start();
-        
+
         setTimeout(() => {
           setCurrentTipIndex(prev => (prev + 1) % HEALTH_TIPS.length);
         }, 300);
       }
-    }, 5000);
-    
+    }, 7000);
+
     return () => clearInterval(tipInterval);
   }, [planStatus]);
 
@@ -357,10 +592,11 @@ export default function PlanBuildingScreen() {
   // 3. Handlers
   // --------------------------------------------------------------------------
 
-  const handleRetry = async () => {
+  async function handleRetry() {
     if (!user || isRetrying) return;
-    
+
     setIsRetrying(true);
+    setErrorDetails(null);
     setPlanStatus('pending');
     setElapsedSeconds(0);
     setCurrentPhase(0);
@@ -370,7 +606,7 @@ export default function PlanBuildingScreen() {
     cancelButtonFade.setValue(1);
     progressAnim.setValue(0);
     setProgressMessage('Retrying plan generation...');
-    
+
     // Refresh estimate for retry (slightly increase expected time)
     try {
       const estimate = await getSmartEstimate(user);
@@ -381,20 +617,48 @@ export default function PlanBuildingScreen() {
     } catch (e) {
       // Keep existing estimate
     }
-    
+
     try {
-      await retryBasePlanGeneration(user, userId, addBasePlan);
+      // Retry via server-side generation ONLY
+      console.log('[PlanBuilding] Retrying via server-side generation...');
+      const serverResult = await createAndTriggerServerPlanJob(user);
+
+      if (serverResult.success) {
+        const jobId = serverResult.jobId || serverResult.existingJobId;
+        console.log('[PlanBuilding] Server retry started, job ID:', jobId);
+        setServerJobId(jobId || null);
+        setUseServerGeneration(true);
+        if (jobId) {
+          autoRetryJobIdsRef.current.delete(jobId);
+        }
+      } else {
+        console.error('[PlanBuilding] Server retry failed:', serverResult.error);
+        setPlanStatus('error');
+      }
     } catch (error) {
       console.error('[PlanBuilding] Retry failed:', error);
+      setPlanStatus('error');
     } finally {
       setIsRetrying(false);
     }
-  };
+  }
 
   const handleCancel = async () => {
     console.log('[PlanBuilding] User cancelling generation');
-    await cancelBasePlanGeneration(userId);
-    router.replace('/onboarding'); // Or home, depending on flow. Onboarding seems safer to restart.
+
+    // Cancel the server-side job if one exists
+    if (serverJobId) {
+      try {
+        await cancelJob(serverJobId);
+        console.log('[PlanBuilding] Server job cancelled');
+      } catch (e) {
+        console.warn('[PlanBuilding] Failed to cancel server job:', e);
+      }
+    }
+
+    setErrorDetails(null);
+
+    router.replace('/onboarding'); // Redirect to onboarding to restart
   };
 
   const handleGameEnd = async (score: number) => {
@@ -417,14 +681,14 @@ export default function PlanBuildingScreen() {
     const isCompleted = index < currentPhase && planStatus === 'pending';
     const isPending = index > currentPhase || planStatus === 'error';
     const isLast = index === GENERATION_PHASES.length - 1;
-    
+
     return (
       <View key={phase.id} style={styles.phaseWrapper}>
         <View style={styles.phaseRow}>
           {/* Icon / Indicator */}
           <View style={styles.indicatorColumn}>
             <View style={[
-              styles.phaseIconContainer, 
+              styles.phaseIconContainer,
               isActive && styles.phaseIconActive,
               isCompleted && styles.phaseIconCompleted,
               planStatus === 'error' && styles.phaseIconError
@@ -439,7 +703,7 @@ export default function PlanBuildingScreen() {
                 <View style={styles.phaseDot} />
               )}
             </View>
-            
+
             {/* Vertical Line */}
             {!isLast && (
               <View style={[
@@ -448,11 +712,11 @@ export default function PlanBuildingScreen() {
               ]} />
             )}
           </View>
-          
+
           {/* Text */}
           <View style={styles.phaseContent}>
             <Text style={[
-              styles.phaseText, 
+              styles.phaseText,
               isActive && styles.phaseTextActive,
               isCompleted && styles.phaseTextCompleted,
               isPending && styles.phaseTextPending
@@ -468,7 +732,7 @@ export default function PlanBuildingScreen() {
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false, gestureEnabled: false }} />
-      
+
       {/* Deep Background Gradient */}
       <LinearGradient
         colors={[theme.color.bg, '#1F0A0A', '#2A0F0F']} // Subtle deep red shift
@@ -482,17 +746,17 @@ export default function PlanBuildingScreen() {
 
       {/* Premium Overlay */}
       <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-      
+
       <SafeAreaView style={styles.overlayContainer} pointerEvents="box-none">
-        
+
         {/* Top Right: Cancel Button (Fades out) */}
         {canCancel && (
-          <Animated.View 
+          <Animated.View
             style={[styles.cancelButtonContainer, { opacity: cancelButtonFade }]}
             pointerEvents="box-none"
           >
-            <TouchableOpacity 
-              style={styles.cancelButton} 
+            <TouchableOpacity
+              style={styles.cancelButton}
               onPress={handleCancel}
               activeOpacity={0.7}
               hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
@@ -505,15 +769,21 @@ export default function PlanBuildingScreen() {
 
         {/* Main Content Centered */}
         <View style={styles.centerContent}>
-          
+
           {/* Header */}
           <View style={styles.headerContainer}>
             <Text style={styles.progressTitle}>
-              {planStatus === 'error' ? 'Generation Paused' : 'Creating Your Plan'}
+              {planStatus === 'error' ? 'Generation Paused' : isRedoRequest ? 'Regenerating Your Plan' : 'Creating Your Plan'}
             </Text>
             <Text style={styles.progressSubtitle}>
-              Crafting your perfect plan
+              {isRedoRequest ? 'Applying your feedback' : 'Crafting your perfect plan'}
             </Text>
+            {isRedoRequest && redoReason && (
+              <View style={styles.redoReasonBadge}>
+                <Text style={styles.redoReasonLabel}>Your request:</Text>
+                <Text style={styles.redoReasonText} numberOfLines={2}>"{redoReason}"</Text>
+              </View>
+            )}
           </View>
 
           {/* Main Progress Card */}
@@ -526,16 +796,16 @@ export default function PlanBuildingScreen() {
             {/* Progress Bar (Top Border) */}
             {planStatus === 'pending' && (
               <View style={styles.progressBarBg}>
-                <Animated.View 
+                <Animated.View
                   style={[
-                    styles.progressBarFill, 
-                    { 
+                    styles.progressBarFill,
+                    {
                       width: progressAnim.interpolate({
                         inputRange: [0, 1],
                         outputRange: ['0%', '100%']
-                      }) 
+                      })
                     }
-                  ]} 
+                  ]}
                 />
               </View>
             )}
@@ -543,52 +813,74 @@ export default function PlanBuildingScreen() {
             <View style={styles.phasesContainer}>
               {GENERATION_PHASES.map((phase, index) => renderPhaseItem(phase, index))}
             </View>
-            
+
             {/* Error State */}
             {planStatus === 'error' && (
               <View style={styles.errorContainer}>
                 <Text style={styles.errorText}>
-                  We encountered an issue generating your plan.
+                  {errorDetails?.code === 'RATE_LIMITED' ? 'Our AI service is busy right now.' :
+                    errorDetails?.code === 'AI_TIMEOUT' ? 'This is taking longer than expected.' :
+                      errorDetails?.code === 'VALIDATION_FAILED' ? 'We need to adjust your plan details.' :
+                        errorDetails?.code?.includes('REDO') ? 'We couldn\'t apply your changes.' :
+                          'We encountered an issue generating your plan.'}
                 </Text>
-                <TouchableOpacity 
-                  style={styles.retryButton} 
-                  onPress={handleRetry}
-                  disabled={isRetrying}
-                  activeOpacity={0.7}
-                >
-                  <RefreshCw size={18} color="#FFFFFF" />
-                  <Text style={styles.retryButtonText}>
-                    {isRetrying ? 'Retrying...' : 'Try Again'}
+                {errorDetails && (
+                  <Text style={styles.errorDetailText}>
+                    {errorDetails.code?.includes('REDO')
+                      ? 'Try using the "Edit Day" option to make specific changes to individual days.'
+                      : (errorDetails.message || 'Please try again in a moment.')}
                   </Text>
-                </TouchableOpacity>
+                )}
+                <View style={styles.errorButtonRow}>
+                  <TouchableOpacity
+                    style={styles.retryButton}
+                    onPress={handleRetry}
+                    disabled={isRetrying}
+                    activeOpacity={0.7}
+                  >
+                    <RefreshCw size={18} color="#FFFFFF" />
+                    <Text style={styles.retryButtonText}>
+                      {isRetrying ? 'Retrying...' : 'Try Again'}
+                    </Text>
+                  </TouchableOpacity>
+                  {errorDetails?.code?.includes('REDO') && (
+                    <TouchableOpacity
+                      style={[styles.retryButton, styles.secondaryButton]}
+                      onPress={() => router.replace('/plan-preview')}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.retryButtonText}>Edit Days Instead</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
             )}
           </LinearGradient>
 
           {/* Timer / Status */}
           {planStatus === 'pending' && (
-             <View style={styles.timerContainer}>
-               <Clock size={14} color="rgba(255,255,255,0.5)" />
-               <Text style={styles.timerText}>
-                 {getRemainingTimeMessage(elapsedSeconds, estimatedTime)}
-               </Text>
-               {estimateConfidence === 'high' && (
-                 <View style={styles.confidenceBadge}>
-                   <Text style={styles.confidenceText}>●</Text>
-                 </View>
-               )}
-             </View>
+            <View style={styles.timerContainer}>
+              <Clock size={14} color="rgba(255,255,255,0.5)" />
+              <Text style={styles.timerText}>
+                {getRemainingTimeMessage(elapsedSeconds, estimatedTime)}
+              </Text>
+              {estimateConfidence === 'high' && (
+                <View style={styles.confidenceBadge}>
+                  <Text style={styles.confidenceText}>●</Text>
+                </View>
+              )}
+            </View>
           )}
 
           {/* Game Option */}
           {showLongWaitMessage && planStatus === 'pending' && (
             <Animated.View style={[styles.gameOptionContainer, { opacity: gameOptionFadeAnim }]}>
               <Text style={styles.gameOptionText}>
-                {elapsedSeconds > estimatedTime 
+                {elapsedSeconds > estimatedTime
                   ? 'Taking a bit longer than expected...'
                   : 'Want to play while you wait?'}
               </Text>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.miniGameButton}
                 onPress={() => setShowMiniGame(true)}
               >
@@ -656,7 +948,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flex: 1,
   },
-  
+
   // Header
   headerContainer: {
     alignItems: 'center',
@@ -675,6 +967,27 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: 'rgba(255,255,255,0.6)',
     textAlign: 'center',
+  },
+  redoReasonBadge: {
+    marginTop: 16,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    padding: 12,
+    maxWidth: '90%',
+  },
+  redoReasonLabel: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.5)',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  redoReasonText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.85)',
+    fontStyle: 'italic',
+    lineHeight: 20,
   },
 
   // Cancel Button
@@ -809,7 +1122,7 @@ const styles = StyleSheet.create({
   phaseTextPending: {
     color: 'rgba(255,255,255,0.3)',
   },
-  
+
   // Timer
   timerContainer: {
     flexDirection: 'row',
@@ -848,6 +1161,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 8,
   },
+  errorDetailText: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    textAlign: 'center',
+    marginBottom: 8,
+    lineHeight: 16,
+  },
   retryButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -867,6 +1187,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#FFFFFF',
+  },
+  errorButtonRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 4,
+  },
+  secondaryButton: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
 
   // Game Option

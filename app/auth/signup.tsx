@@ -88,7 +88,20 @@ export default function SignupScreen() {
         />
         <Text style={styles.title}>Create account</Text>
         <Text style={styles.subtitle}>We’ll send a confirmation if needed</Text>
-        {error && <Text style={styles.errorText}>{error}</Text>}
+        {error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorText}>{error}</Text>
+            {error.toLowerCase().includes('already exists') && (
+              <TouchableOpacity
+                onPress={() => router.replace({ pathname: '/auth/login' })}
+                style={styles.errorLinkBtn}
+                accessibilityRole="button"
+              >
+                <Text style={styles.errorLinkText}>Sign in instead</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
         <View style={styles.field}>
           <Text style={styles.label}>Name</Text>
           <TextInput
@@ -234,7 +247,10 @@ const styles = StyleSheet.create({
   passwordRow: { flexDirection: 'row', alignItems: 'center' },
   passwordInput: { flex: 1 },
   eyeBtn: { paddingHorizontal: 10, height: 48, justifyContent: 'center' },
-  errorText: { color: '#e5484d', marginBottom: 4 },
+  errorContainer: { gap: 8, marginBottom: 4 },
+  errorText: { color: '#e5484d' },
+  errorLinkBtn: { alignSelf: 'flex-start', paddingVertical: 4 },
+  errorLinkText: { color: theme.color.accent.primary, fontWeight: '600', textDecorationLine: 'underline' },
   bottomRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },
   bottomText: { color: theme.color.muted },
   link: { },

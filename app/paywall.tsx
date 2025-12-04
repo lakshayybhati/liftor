@@ -5,29 +5,64 @@ import Purchases, { PurchasesOffering, PurchasesPackage } from 'react-native-pur
 import Constants from 'expo-constants';
 import { theme } from '@/constants/colors';
 import { Card } from '@/components/ui/Card';
-import { hasActiveSubscription, isSubscriptionBypassEnabled, enableSubscriptionBypass } from '@/utils/subscription-helpers';
+import { hasActiveSubscription, isSubscriptionBypassEnabled, enableSubscriptionBypass, clearSessionStatusCache } from '@/utils/subscription-helpers';
 import { restorePurchases } from '@/utils/subscription-helpers';
-import { Sparkles, Gauge, Camera, HeartPulse, X } from 'lucide-react-native';
+import { Sparkles, Gauge, Camera, HeartPulse, X, Clock } from 'lucide-react-native';
 import { useProfile } from '@/hooks/useProfile';
 import type { Profile } from '@/hooks/useProfile';
+import { useSessionStatus } from '@/hooks/useSessionStatus';
+import {
+  formatCurrency,
+  formatMonthlyFromAnnual,
+  getCurrencyForRegion,
+  fetchStorefrontInfo,
+  getDeviceLocale,
+} from '@/utils/currency';
 
-type Params = { next?: string; offering?: string; blocking?: string };
+type Params = { next?: string; offering?: string; blocking?: string; trialEnded?: string };
 
 export default function PaywallScreen() {
-  const { next, offering: offeringParam, blocking } = useLocalSearchParams<Params>();
+  const { next, offering: offeringParam, blocking, trialEnded } = useLocalSearchParams<Params>();
   const isBlockingMode = blocking === 'true';
+  const isTrialEndedMode = trialEnded === 'true';
   const [offering, setOffering] = useState<PurchasesOffering | null>(null);
   const [selected, setSelected] = useState<PurchasesPackage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isPurchasing, setIsPurchasing] = useState<boolean>(false);
+  const [isStartingTrial, setIsStartingTrial] = useState<boolean>(false);
   const [bypassEnabled, setBypassEnabled] = useState<boolean>(false);
-  // USD hints and debug panel removed for production-ready paywall
+  const [isCheckingSubscription, setIsCheckingSubscription] = useState<boolean>(true);
+  const [subscriptionCheckComplete, setSubscriptionCheckComplete] = useState<boolean>(false);
 
   const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
   const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'elite';
 
-  const { data: profile } = useProfile();
+  const { data: profile, isLoading: isProfileLoading } = useProfile();
+  const {
+    data: sessionStatus,
+    startTrial,
+    refetch: refetchSessionStatus,
+    hasHadLocalTrial,
+    discountEligibleImmediate,
+    isTrial,
+    isLoading: isSessionLoading,
+  } = useSessionStatus();
+
   const goalPhrase = useMemo(() => prettyGoal(profile?.goal ?? null), [profile?.goal]);
+
+  // Determine if we should show the trial CTA
+  // Only show if user hasn't had a local trial and doesn't have an active trial
+  const showTrialCTA = !hasHadLocalTrial && !isTrial && !isTrialEndedMode;
+
+  // Show discount messaging only for eligible users
+  const showDiscountMessaging = discountEligibleImmediate && !isTrialEndedMode;
+
+  // Pre-fetch storefront info for accurate currency detection
+  useEffect(() => {
+    fetchStorefrontInfo().catch((e) => {
+      console.log('[Paywall] Could not pre-fetch storefront info:', e);
+    });
+  }, []);
 
   const loadOfferings = useCallback(async () => {
     setIsLoading(true);
@@ -79,7 +114,7 @@ export default function PaywallScreen() {
       try {
         const on = await isSubscriptionBypassEnabled();
         setBypassEnabled(on);
-      } catch {}
+      } catch { }
     })();
   }, []);
 
@@ -100,28 +135,71 @@ export default function PaywallScreen() {
   }, [isBlockingMode]);
 
   // Check entitlements on mount - if already subscribed, navigate away
+  // IMPORTANT: Wait for profile to load before checking to prevent flash
   useEffect(() => {
     let isMounted = true;
-    
+
+    // Don't check until profile and session data are loaded
+    // This prevents the paywall from flashing before we know subscription status
+    if (isProfileLoading || isSessionLoading) {
+      console.log('[Paywall] Waiting for profile/session to load...');
+      return;
+    }
+
     (async () => {
       try {
-        const entitled = await hasActiveSubscription();
-        if (entitled && isMounted) {
-          console.log('[Paywall] User already has elite entitlement, navigating to next');
-          // Navigate directly
-          if (isMounted) {
+        console.log('[Paywall] Checking subscription status...', {
+          profileSubscription: profile?.subscription_active,
+          profileTrial: profile?.trial_active,
+        });
+
+        // First check: profile.subscription_active (most reliable, updated by RevenueCat webhook)
+        if (profile?.subscription_active && isMounted) {
+          console.log('[Paywall] User has subscription via profile, navigating to next');
+          navigateNext();
+          return;
+        }
+
+        // Second check: profile.trial_active (active trial grants access)
+        if (profile?.trial_active && isMounted) {
+          console.log('[Paywall] User has active trial via profile, navigating to next');
+          navigateNext();
+          return;
+        }
+
+        // Third check: RevenueCat SDK (for edge cases where profile not synced yet)
+        try {
+          const entitled = await hasActiveSubscription();
+          if (entitled && isMounted) {
+            console.log('[Paywall] User already has elite entitlement via SDK, navigating to next');
             navigateNext();
+            return;
           }
+        } catch (sdkErr) {
+          console.warn('[Paywall] SDK check failed (might be in Expo Go):', sdkErr);
+          // Continue to show paywall if SDK check fails
+        }
+
+        // User doesn't have subscription - show the paywall
+        console.log('[Paywall] No subscription found, showing paywall');
+        if (isMounted) {
+          setSubscriptionCheckComplete(true);
+          setIsCheckingSubscription(false);
         }
       } catch (err) {
         console.warn('[Paywall] Could not check initial entitlement:', err);
+        // On error, show paywall anyway
+        if (isMounted) {
+          setSubscriptionCheckComplete(true);
+          setIsCheckingSubscription(false);
+        }
       }
     })();
-    
+
     return () => {
       isMounted = false;
     };
-  }, [navigateNext]);
+  }, [navigateNext, profile?.subscription_active, profile?.trial_active, isProfileLoading, isSessionLoading]);
 
   // Removed USD hint fetch; rely solely on localized store pricing
 
@@ -145,13 +223,23 @@ export default function PaywallScreen() {
       setIsPurchasing(true);
       const { customerInfo } = await Purchases.purchasePackage(selected);
       const entitled = !!customerInfo.entitlements.active[requiredEntitlement];
+
+      // Clear session status cache so next check gets fresh data
+      clearSessionStatusCache();
+
       if (entitled) {
+        // Refresh session status to update backend
+        await refetchSessionStatus();
         navigateNext();
       } else {
         // Double-check from cache/network
         const ok = await hasActiveSubscription();
-        if (ok) navigateNext();
-        else Alert.alert('Subscription', 'Purchase did not activate yet. Please try Restore Purchases or try again.');
+        if (ok) {
+          await refetchSessionStatus();
+          navigateNext();
+        } else {
+          Alert.alert('Subscription', 'Purchase did not activate yet. Please try Restore Purchases or try again.');
+        }
       }
     } catch (e: any) {
       if (e?.userCancelled) return; // silent
@@ -159,6 +247,27 @@ export default function PaywallScreen() {
       Alert.alert('Purchase Error', e?.message || 'Unable to complete purchase.');
     } finally {
       setIsPurchasing(false);
+    }
+  };
+
+  const onStartLocalTrial = async () => {
+    try {
+      setIsStartingTrial(true);
+      console.log('[Paywall] Starting local trial...');
+
+      await startTrial();
+
+      console.log('[Paywall] Local trial started successfully');
+      navigateNext();
+    } catch (e: any) {
+      console.error('[Paywall] Trial start error:', e);
+      Alert.alert(
+        'Unable to Start Trial',
+        e?.message || 'Could not start your free trial. Please try again or subscribe.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      setIsStartingTrial(false);
     }
   };
 
@@ -170,8 +279,19 @@ export default function PaywallScreen() {
   const selectedIsAnnual = selected && annualPkg ? selected.identifier === annualPkg.identifier : false;
   const selectedIsMonthly = selected && monthlyPkg ? selected.identifier === monthlyPkg.identifier : false;
 
+  // While checking subscription status, render nothing (invisible)
+  // This keeps the previous screen visible while the check happens in background
+  // Only show paywall AFTER we confirm user doesn't have subscription
+  const shouldHidePaywall = isProfileLoading || isSessionLoading || isCheckingSubscription;
+
+  if (shouldHidePaywall) {
+    // Return null to keep this screen invisible - previous screen remains visible
+    // The check will either navigate away (subscribed) or reveal paywall (not subscribed)
+    return null;
+  }
+
   return (
-    <View style={[styles.container, { backgroundColor: theme.color.bg }]}> 
+    <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
       <Stack.Screen options={{ headerShown: false }} />
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardDismissMode="on-drag">
@@ -186,12 +306,24 @@ export default function PaywallScreen() {
         <View style={styles.headerIconWrap}>
           <Image source={require('../assets/images/liftorlogo.png')} style={styles.headerImage} resizeMode="contain" />
         </View>
-        <Text style={styles.title}>We Will Transform{"\n"}Every Day</Text>
-        <Text style={styles.subtitle}>With You <Text style={styles.emoji}>🫵</Text></Text>
+        <Text style={styles.title}>
+          {isTrialEndedMode ? 'Your Trial Has Ended' : 'We will transform'}
+        </Text>
+        <Text style={styles.subtitle}>
+          {isTrialEndedMode ? 'Subscribe to continue' : 'With You'} <Text style={styles.emoji}>🫵</Text>
+        </Text>
 
-        {profile && (
-          <Text style={styles.personalizedIntro}>{`We reviewed your goal to ${goalPhrase}. Join free to unlock your plan.`}</Text>
-        )}
+        {/* Dynamic subtext based on discount eligibility */}
+        <Text style={styles.personalizedIntro}>
+          {isTrialEndedMode
+            ? 'Subscribe now to keep your personalized plans and AI coaching.'
+            : showDiscountMessaging
+              ? 'Start now and get 30% off your first subscription period.'
+              : profile
+                ? `We reviewed your goal to ${goalPhrase}. Subscribe to keep your plan evolving every day.`
+                : 'Subscribe to keep your plan evolving every day.'
+          }
+        </Text>
 
         {/* Feature list */}
         <Card style={styles.featuresCard}>
@@ -209,8 +341,8 @@ export default function PaywallScreen() {
               selected={!!selectedIsAnnual || (!selected && !!annualPkg)}
               onPress={() => setSelected(annualPkg)}
               highlight={typeof discountPct === 'number' && discountPct > 0 ? `${discountPct}% OFF` : undefined}
-              priceTop={monthlyFromAnnualText || (annualPkg.product.priceString || formatLocalPrice(Number(annualPkg.product.price || 0), annualPkg.product.currencyCode as string | undefined))}
-              priceBottom={`Billed at ${(annualPkg.product.priceString || formatLocalPrice(Number(annualPkg.product.price || 0), annualPkg.product.currencyCode as string | undefined))}/yr`}
+              priceTop={monthlyFromAnnualText || getPackageDisplayPrice(annualPkg)}
+              priceBottom={`Billed at ${getPackageDisplayPrice(annualPkg)}/yr`}
             />
           )}
           {monthlyPkg && (
@@ -218,18 +350,18 @@ export default function PaywallScreen() {
               label="Monthly"
               selected={!!selectedIsMonthly || (!selected && !annualPkg)}
               onPress={() => setSelected(monthlyPkg)}
-              priceTop={(monthlyPkg.product.priceString || formatLocalPrice(Number(monthlyPkg.product.price || 0), monthlyPkg.product.currencyCode as string | undefined)) + '/mo'}
-              priceBottom={`Billed at ${(monthlyPkg.product.priceString || formatLocalPrice(Number(monthlyPkg.product.price || 0), monthlyPkg.product.currencyCode as string | undefined))}/mo`}
+              priceTop={`${getPackageDisplayPrice(monthlyPkg)}/mo`}
+              priceBottom={`Billed at ${getPackageDisplayPrice(monthlyPkg)}/mo`}
             />
           )}
           {!annualPkg && !monthlyPkg && (
-            <View style={[styles.fallbackPackage, { borderColor: theme.color.line, backgroundColor: theme.color.card }]}> 
+            <View style={[styles.fallbackPackage, { borderColor: theme.color.line, backgroundColor: theme.color.card }]}>
               {isLoading ? (
                 <ActivityIndicator color={theme.color.accent.primary} />
               ) : (
                 <>
                   <Text style={styles.fallbackText}>No plans available. Check your RevenueCat Offering is marked Current, or try again.</Text>
-                  <TouchableOpacity onPress={loadOfferings} style={[styles.retryBtn, { borderColor: theme.color.line }]}> 
+                  <TouchableOpacity onPress={loadOfferings} style={[styles.retryBtn, { borderColor: theme.color.line }]}>
                     <Text style={styles.retryText}>Retry</Text>
                   </TouchableOpacity>
                 </>
@@ -240,36 +372,46 @@ export default function PaywallScreen() {
 
         <FunFactBadge />
 
-        <Text style={styles.freeTrial}>
-          {selectedIsAnnual ? 'Free for 7 days. Cancel anytime.' : selectedIsMonthly ? 'Free for 3 days. Cancel anytime.' : 'Free trial. Cancel anytime.'}
-        </Text>
+        {/* Free trial text removed */}
 
-        {/* Primary button */}
+        {/* Primary button - Subscribe with optional discount */}
         <TouchableOpacity
-          style={[styles.primaryButton, (!selected || isPurchasing) && styles.disabledButton]}
+          style={[styles.primaryButton, (!selected || isPurchasing || isStartingTrial) && styles.disabledButton]}
           onPress={onPurchase}
-          disabled={!selected || isPurchasing}
+          disabled={!selected || isPurchasing || isStartingTrial}
           accessibilityRole="button"
           accessibilityLabel={
             isPurchasing
               ? 'Processing purchase'
-              : selectedIsAnnual
-                ? 'Start your 7-day free trial'
-                : selectedIsMonthly
-                  ? 'Start your 3-day free trial'
-                  : 'Start free trial'
+              : showDiscountMessaging
+                ? 'Start subscription with 30% off'
+                : 'Start subscription'
           }
         >
           <Text style={styles.primaryButtonText}>
             {isPurchasing
               ? 'Processing…'
-              : selectedIsAnnual
-                ? 'Start your 7-day free trial'
-                : selectedIsMonthly
-                  ? 'Start your 3-day free trial'
-                  : 'Start Free Trial'}
+              : showDiscountMessaging
+                ? 'Start Transformation • 30% OFF'
+                : 'Start Transformation'}
           </Text>
         </TouchableOpacity>
+
+        {/* Secondary Trial CTA - only show if eligible */}
+        {showTrialCTA && (
+          <TouchableOpacity
+            style={[styles.trialCTA, isStartingTrial && styles.disabledButton]}
+            onPress={onStartLocalTrial}
+            disabled={isStartingTrial || isPurchasing}
+            accessibilityRole="button"
+            accessibilityLabel="Try the app for 3 days without payment"
+          >
+            <Clock size={18} color={theme.color.accent.blue} />
+            <Text style={styles.trialCTAText}>
+              {isStartingTrial ? 'Starting trial...' : 'Not ready? Try for 3 days'}
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* Secondary actions */}
         <View style={styles.secondaryRow}>
@@ -286,7 +428,7 @@ export default function PaywallScreen() {
           <TouchableOpacity onPress={onRestore}>
             <Text style={styles.utilityLink}>Restore Purchases</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => Purchases.showManageSubscriptions().catch(() => {})}>
+          <TouchableOpacity onPress={() => Purchases.showManageSubscriptions().catch(() => { })}>
             <Text style={styles.utilityLink}>Manage Subscription</Text>
           </TouchableOpacity>
         </View>
@@ -300,7 +442,7 @@ export default function PaywallScreen() {
                   await enableSubscriptionBypass();
                   setBypassEnabled(true);
                   navigateNext();
-                } catch {}
+                } catch { }
               }}
               accessibilityRole="button"
               accessibilityLabel="Unlock in Expo"
@@ -342,59 +484,48 @@ function computeAnnualDiscountPercent(monthly: PurchasesPackage | null, annual: 
   return pct > 0 ? pct : 0;
 }
 
+/**
+ * Calculate and format monthly equivalent price from annual package
+ * Uses the product's currency code for accurate locale-aware formatting
+ */
 function perMonthPriceText(annual: PurchasesPackage): string | null {
   const total = Number(annual.product.price || 0);
   if (!total) return null;
-  const per = total / 12;
-  const code = (annual.product.currencyCode as string | undefined) || undefined;
-  try {
-    // Locale-aware currency formatting for the device's locale
-    const formatted = new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: code || 'USD',
-      maximumFractionDigits: 2,
-    }).format(per);
-    return `${formatted}/mo`;
-  } catch {
-    const symbol = extractCurrencySymbol(annual.product.priceString);
-    return `${symbol}${per.toFixed(2)}/mo`;
-  }
+
+  const currencyCode = annual.product.currencyCode || getCurrencyForRegion();
+  const locale = getDeviceLocale();
+
+  return formatMonthlyFromAnnual(total, currencyCode, locale);
 }
 
-function extractCurrencySymbol(priceString: string): string {
-  // Try both prefix and suffix, to handle locales like 9,99 €
-  const prefix = priceString?.match(/^[^\d]+/);
-  const suffix = priceString?.match(/[^\d]+$/);
-  return (prefix?.[0] || suffix?.[0] || '$').trim();
-}
-
-// Formats a numeric amount using the user's locale and the storefront's currency code
+/**
+ * Formats a numeric amount using the device's locale and storefront currency
+ * Falls back to region-based currency if not provided
+ */
 function formatLocalPrice(amount: number, currencyCode?: string): string {
   if (!amount || isNaN(amount)) return '';
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: (currencyCode as string | undefined) || 'USD',
-      maximumFractionDigits: 2,
-    }).format(amount);
-  } catch {
-    // Fallback if Intl formatter doesn't support provided currency
-    return `$${amount.toFixed(2)}`;
-  }
+
+  const effectiveCurrency = currencyCode || getCurrencyForRegion();
+  const locale = getDeviceLocale();
+
+  return formatCurrency(amount, effectiveCurrency, locale);
 }
 
-// Returns an approximate USD string (e.g., "$2.99") for a local amount using USD base FX rates
-function approxUSD(amountLocal: number, currencyCode?: string, rates?: Record<string, number> | null): string | null {
-  if (!amountLocal || !currencyCode || !rates) return null;
-  if (currencyCode.toUpperCase() === 'USD') return null;
-  const r = rates[currencyCode.toUpperCase()];
-  if (!r || r <= 0) return null; // r = units of currency per 1 USD
-  const usd = amountLocal / r;   // convert local → USD
-  try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(usd);
-  } catch {
-    return `$${usd.toFixed(2)}`;
+/**
+ * Get the display price from a package, preferring the localized priceString
+ * Falls back to formatted numeric price if priceString is unavailable
+ */
+function getPackageDisplayPrice(pkg: PurchasesPackage): string {
+  // Prefer the store-provided localized price string (most accurate)
+  if (pkg.product.priceString) {
+    return pkg.product.priceString;
   }
+
+  // Fallback to formatted numeric price
+  const amount = Number(pkg.product.price || 0);
+  const currencyCode = pkg.product.currencyCode || getCurrencyForRegion();
+
+  return formatLocalPrice(amount, currencyCode);
 }
 
 function FeatureRow({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle: string }) {
@@ -637,8 +768,13 @@ const styles = StyleSheet.create({
     marginTop: theme.space.md,
     backgroundColor: theme.color.accent.primary,
     padding: theme.space.lg,
-    borderRadius: theme.radius.md,
+    borderRadius: 30,
     alignItems: 'center',
+    shadowColor: theme.color.accent.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   primaryButtonText: {
     color: theme.color.bg,
@@ -726,6 +862,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     fontWeight: '600',
+  },
+  trialCTA: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: theme.space.lg,
+    paddingVertical: theme.space.md,
+    paddingHorizontal: theme.space.lg,
+    backgroundColor: 'transparent',
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: theme.color.line,
+    gap: 8,
+  },
+  trialCTAText: {
+    color: theme.color.ink,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });
 

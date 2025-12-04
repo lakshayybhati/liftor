@@ -16,6 +16,7 @@ import { validateProductionConfig, getProductionConfig } from "@/utils/productio
 import * as Notifications from 'expo-notifications';
 import { NotificationService } from '@/services/NotificationService';
 import { getBasePlanJobState, cleanupStaleJobStates } from '@/services/backgroundPlanGeneration';
+import { clearStorefrontCache } from '@/utils/currency';
 
 // Prevent splash screen from hiding automatically
 SplashScreen.preventAutoHideAsync().catch((err) => {
@@ -58,14 +59,14 @@ function RCPurchasesInit() {
         const iosKey = extra.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY;
         const androidKey = extra.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY;
         const apiKey = Platform.OS === 'ios' ? iosKey : androidKey;
-        
+
         console.log('[RevenueCat] Initializing...');
         console.log('[RevenueCat] Platform:', Platform.OS);
         console.log('[RevenueCat] API Key present:', !!apiKey);
-        
+
         if (!apiKey) {
           console.warn('[RevenueCat] ❌ Missing API key in app.json → extra.');
-          console.warn('[RevenueCat] Keys checked:', { 
+          console.warn('[RevenueCat] Keys checked:', {
             iosKey: iosKey ? 'present' : 'missing',
             androidKey: androidKey ? 'present' : 'missing'
           });
@@ -82,9 +83,9 @@ function RCPurchasesInit() {
         await Purchases.configure({ apiKey });
         isConfiguredRef.current = true;
         console.log('[RevenueCat] ✅ SDK configured successfully');
-        
+
         // Warm up cache and log initial state
-        try { 
+        try {
           const customerInfo = await Purchases.getCustomerInfo();
           console.log('[RevenueCat] Initial customer info fetched');
           console.log('[RevenueCat] Active entitlements:', Object.keys(customerInfo.entitlements.active));
@@ -115,9 +116,11 @@ function RCPurchasesInit() {
           console.log('[RevenueCat] Original App User ID:', customerInfo.originalAppUserId);
         } else if (!current && lastUserIdRef.current) {
           console.log('[RevenueCat] Logging out user');
-          try { 
+          try {
             await Purchases.logOut();
-            console.log('[RevenueCat] ✅ User logged out');
+            // Clear storefront cache so new user gets fresh currency detection
+            clearStorefrontCache();
+            console.log('[RevenueCat] ✅ User logged out, storefront cache cleared');
           } catch (err) {
             console.warn('[RevenueCat] Logout error:', err);
           }
@@ -134,7 +137,7 @@ function RCPurchasesInit() {
       if (!isConfiguredRef.current) return;
       if (state === 'active') {
         console.log('[RevenueCat] App became active, refreshing customer info...');
-        try { 
+        try {
           const customerInfo = await Purchases.getCustomerInfo();
           console.log('[RevenueCat] ✅ Customer info refreshed');
           console.log('[RevenueCat] Active entitlements:', Object.keys(customerInfo.entitlements.active));
@@ -170,17 +173,33 @@ function NotificationsInit() {
   const initializedRef = useRef<string | null>(null);
 
   // Initialize NotificationService when user logs in
+  // CRITICAL: Register push token IMMEDIATELY on login/signup
+  // This ensures server can send "plan ready" notifications even during onboarding
   useEffect(() => {
     const userId = session?.user?.id ?? null;
-    
+
     // Only initialize once per user
     if (initializedRef.current === userId) return;
-    
+
     if (userId) {
       console.log('[NotificationsInit] Initializing for user:', userId.substring(0, 8));
       initializedRef.current = userId;
-      
-      // Initialize the centralized notification service
+
+      // ⚡ IMMEDIATE: Register push token first (even during onboarding)
+      // This is critical for "plan ready" notifications when app is closed
+      NotificationService.registerPushTokenEarly(userId, supabase)
+        .then((token) => {
+          if (token) {
+            console.log('[NotificationsInit] ✅ Push token registered early');
+          } else {
+            console.warn('[NotificationsInit] ⚠️ Early push token registration failed');
+          }
+        })
+        .catch((err) => {
+          console.error('[NotificationsInit] ❌ Push token error:', err);
+        });
+
+      // Then do full initialization (schedules, subscriptions, etc.)
       NotificationService.initialize(userId, supabase);
     } else if (initializedRef.current) {
       // User logged out, cleanup
@@ -202,15 +221,44 @@ function NotificationsInit() {
   useEffect(() => {
     if (!session?.user?.id) return;
 
-    // Log received notifications (for debugging)
+    // Handle notifications received while app is in foreground
     notificationListener.current = Notifications.addNotificationReceivedListener((notification: any) => {
-      console.log('[NotificationsInit] Notification received:', notification?.request?.content?.title);
+      const title = notification?.request?.content?.title || '';
+      const data = notification?.request?.content?.data || {};
+      console.log('[NotificationsInit] Notification received:', title);
+
+      // AUTO-NAVIGATE: If "plan ready" notification arrives while on plan-building screen
+      // This provides instant navigation without relying on polling
+      if (title.toLowerCase().includes('plan') && title.toLowerCase().includes('ready')) {
+        console.log('[NotificationsInit] 🎉 Plan ready notification detected! Auto-navigating...');
+        // Small delay to ensure any in-flight operations complete
+        setTimeout(() => {
+          router.replace('/plan-preview');
+        }, 500);
+      }
+
+      // Also check data.screen for server-sent navigation hints
+      if (data.screen === '/plan-preview' || data.type === 'plan_ready') {
+        console.log('[NotificationsInit] 🎉 Plan ready (from data)! Auto-navigating...');
+        setTimeout(() => {
+          router.replace('/plan-preview');
+        }, 500);
+      }
     });
 
     // Handle notification taps - navigate to the appropriate screen
     responseListener.current = Notifications.addNotificationResponseReceivedListener((response: any) => {
       try {
+        const title = response?.notification?.request?.content?.title || '';
         const screen = response?.notification?.request?.content?.data?.screen;
+
+        // Handle "plan ready" notification tap
+        if (title.toLowerCase().includes('plan') && title.toLowerCase().includes('ready')) {
+          console.log('[NotificationsInit] User tapped plan ready notification, navigating to plan-preview');
+          router.replace('/plan-preview');
+          return;
+        }
+
         if (screen) {
           console.log('[NotificationsInit] Navigating to:', screen);
           router.push(screen as any);
@@ -274,8 +322,8 @@ function RootLayoutNav() {
       <Stack.Screen name="checkin" options={{ headerShown: true }} />
       <Stack.Screen name="generating-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan-building" options={{ headerShown: false }} />
-      <Stack.Screen name="generating-base-plan" options={{ headerShown: false }} />
       <Stack.Screen name="plan" options={{ headerShown: true }} />
+      <Stack.Screen name="plan-preview" options={{ headerShown: false, gestureEnabled: false }} />
       <Stack.Screen name="history" options={{ headerShown: false }} />
       <Stack.Screen name="notifications" options={{ headerShown: false }} />
       <Stack.Screen name="auth/login" options={{ headerShown: false }} />
@@ -292,7 +340,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const { isAuthLoading, session } = useAuth();
-  
+
   // Import useUserStore inside the component
   const { isLoading: isUserLoading } = useUserStore();
 
@@ -305,10 +353,10 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
         console.log('🚀 App starting in production mode');
         validateProductionConfig();
       }
-      
+
       // Run detailed diagnostics
       runEnvironmentDiagnostics();
-      
+
       // Log production configuration status
       if (!isDev) {
         const config = getProductionConfig();
@@ -326,11 +374,11 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     // Wait for both auth AND user data to initialize before showing app
     // This ensures we have complete user state before rendering
     const bothLoaded = !isAuthLoading && !isUserLoading;
-    
+
     if (bothLoaded) {
       console.log('[App] Auth and user data loaded, preparing app');
       console.log('[App] Session exists:', !!session);
-      
+
       // Clean up any stale job states from previous sessions
       // This prevents users from being stuck on plan-building screen
       const userId = session?.user?.id ?? null;
@@ -339,7 +387,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       }).catch((err) => {
         console.warn('[App] Error cleaning up stale job states:', err);
       });
-      
+
       // Small delay to ensure everything is mounted and state is stable
       const timer = setTimeout(() => {
         console.log('[App] ✅ App ready, hiding splash screen');
@@ -354,7 +402,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       console.log('[App] Waiting for initialization... Auth loading:', isAuthLoading, 'User loading:', isUserLoading);
     }
   }, [isAuthLoading, isUserLoading, session]);
-  
+
   // Timeout safety net - if initialization takes too long, show app anyway
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -362,10 +410,10 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
         console.warn('[App] ⚠️ Initialization timeout - forcing app to show');
         setInitError('Initialization took longer than expected');
         setIsReady(true);
-        SplashScreen.hideAsync().catch(() => {});
+        SplashScreen.hideAsync().catch(() => { });
       }
     }, 10000); // 5 second timeout (reduced from 10s since we optimized loading)
-    
+
     return () => clearTimeout(timeout);
   }, [isReady]);
 
@@ -386,7 +434,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       </View>
     );
   }
-  
+
   // Don't show error banner in UI - just log to console
   // The app still works even if initialization was slow
   return <>{children}</>;

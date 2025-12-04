@@ -74,7 +74,7 @@ export default function LoginScreen() {
         )}
 
         {error && (
-          <View style={{ gap: 8 }}>
+          <View style={styles.errorContainer}>
             <Text style={styles.errorText}>{error}</Text>
             {error?.toLowerCase().includes('email not confirmed') && (
               <TouchableOpacity
@@ -90,6 +90,15 @@ export default function LoginScreen() {
                 }}
               >
                 <Text style={styles.resendText}>Resend confirmation email</Text>
+              </TouchableOpacity>
+            )}
+            {(error?.toLowerCase().includes('no account found') || error?.toLowerCase().includes('sign up first')) && (
+              <TouchableOpacity
+                onPress={() => router.replace({ pathname: '/auth/signup', params: { prefillEmail: email.trim() } })}
+                style={styles.errorLinkBtn}
+                accessibilityRole="button"
+              >
+                <Text style={styles.errorLinkText}>Create an account</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -200,7 +209,10 @@ const styles = StyleSheet.create({
   passwordRow: { flexDirection: 'row', alignItems: 'center' },
   passwordInput: { flex: 1 },
   eyeBtn: { paddingHorizontal: 10, height: 48, justifyContent: 'center' },
-  errorText: { color: '#e5484d', marginBottom: 4 },
+  errorContainer: { gap: 8, marginBottom: 4 },
+  errorText: { color: '#e5484d' },
+  errorLinkBtn: { alignSelf: 'flex-start', paddingVertical: 4 },
+  errorLinkText: { color: theme.color.accent.primary, fontWeight: '600', textDecorationLine: 'underline' },
   forgotBtn: { alignSelf: 'flex-end', marginTop: 6, paddingVertical: 4, paddingHorizontal: 6 },
   forgotText: { color: theme.color.accent.primary, fontWeight: '600' },
   bottomRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },

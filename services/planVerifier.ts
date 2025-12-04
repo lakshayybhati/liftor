@@ -263,11 +263,15 @@ function performLocalValidation(
     if (!dayPlan.nutrition) {
       issues.push(`${day}: Missing nutrition section`);
     } else {
-      if (dayPlan.nutrition.total_kcal !== calorieTarget) {
-        issues.push(`${day}: Calories mismatch (${dayPlan.nutrition.total_kcal} vs ${calorieTarget})`);
+      const kcal = dayPlan.nutrition.total_kcal;
+      const protein = dayPlan.nutrition.protein_g;
+      // Allow a small tolerance so plans can vary slightly while still
+      // matching the user's calorie target.
+      if (typeof kcal !== 'number' || Math.abs(kcal - calorieTarget) > 100) {
+        issues.push(`${day}: Calories mismatch (${kcal} vs ${calorieTarget})`);
       }
-      if (dayPlan.nutrition.protein_g !== proteinTarget) {
-        issues.push(`${day}: Protein mismatch (${dayPlan.nutrition.protein_g} vs ${proteinTarget})`);
+      if (typeof protein !== 'number' || Math.abs(protein - proteinTarget) > 20) {
+        issues.push(`${day}: Protein mismatch (${protein} vs ${proteinTarget})`);
       }
       if (!dayPlan.nutrition.meals || !Array.isArray(dayPlan.nutrition.meals)) {
         issues.push(`${day}: Missing or invalid nutrition.meals`);
@@ -419,7 +423,8 @@ export async function verifyAndFixPlan(
     );
   }
   
-  // Pre-fix nutrition targets before sending to AI
+  // Pre-fix nutrition targets before sending to AI (soft enforcement; server
+  // pipeline will further clamp values close to the target)
   const prefixedPlan = preFixNutritionTargets(plan, user);
   
   // Build verification prompt with pre-fixed plan
@@ -536,8 +541,24 @@ export async function verifyAndFixPlan(
       
       for (const day of dayNames) {
         if (verifiedPlan[day]?.nutrition) {
-          verifiedPlan[day].nutrition.total_kcal = calorieTarget;
-          verifiedPlan[day].nutrition.protein_g = proteinTarget;
+          const kcal = verifiedPlan[day].nutrition.total_kcal;
+          const protein = verifiedPlan[day].nutrition.protein_g;
+          const lowerKcal = Math.max(1000, calorieTarget - 100);
+          const upperKcal = Math.min(6000, calorieTarget + 100);
+
+          // Clamp calories into a narrow band around the user's target
+          if (typeof kcal !== 'number' || !Number.isFinite(kcal)) {
+            verifiedPlan[day].nutrition.total_kcal = calorieTarget;
+          } else if (kcal < lowerKcal || kcal > upperKcal) {
+            verifiedPlan[day].nutrition.total_kcal = Math.min(upperKcal, Math.max(lowerKcal, kcal));
+          }
+
+          // Keep protein close to target but allow small variation
+          if (typeof protein !== 'number' || !Number.isFinite(protein)) {
+            verifiedPlan[day].nutrition.protein_g = proteinTarget;
+          } else if (Math.abs(protein - proteinTarget) > 20) {
+            verifiedPlan[day].nutrition.protein_g = proteinTarget;
+          }
         }
         
         // Ensure supplementCard structure exists

@@ -39,12 +39,13 @@ export default function GeneratingPlanScreen() {
   const navigation = useNavigation();
   const [navLocked] = useState(true);
   const navLockedRef = useRef(true);
+  const hasNavigatedRef = useRef(false);
   const unlockNavigation = () => { navLockedRef.current = false; };
-  
+
   // Game State
   const [showMiniGame, setShowMiniGame] = useState(false);
   const [planStatus, setPlanStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('loading');
-  
+
   const forceRegen = params.force === 'true';
 
   // Check for mini-game eligibility
@@ -52,14 +53,14 @@ export default function GeneratingPlanScreen() {
     const checkGameEligibility = async () => {
       const isRedo = params.isRedo === 'true';
       const allowed = await canPlayGame(isRedo, user?.id);
-      
+
       if (allowed) {
         // Lock it immediately so they can't play again today if they crash/restart
         await markGamePlayedToday(user?.id);
         setShowMiniGame(true);
       }
     };
-    
+
     checkGameEligibility();
   }, [user?.id, params.isRedo]);
 
@@ -71,16 +72,19 @@ export default function GeneratingPlanScreen() {
   const generatePlan = useCallback(async () => {
     try {
       setPlanStatus('loading');
-      
+
       // If a plan for today already exists and NOT forced, skip regeneration
       const existing = getTodayPlan();
       if (existing && !forceRegen) {
         console.log('[GenerateDailyPlan] Plan already exists for today (and not forced), navigating...');
         setPlanStatus('success');
-        router.replace('/plan');
+        if (!hasNavigatedRef.current) {
+          hasNavigatedRef.current = true;
+          router.replace('/plan');
+        }
         return;
       }
-      
+
       if (forceRegen && existing) {
         console.log('[GenerateDailyPlan] 🔄 Force regeneration requested - will replace existing plan');
       }
@@ -88,11 +92,11 @@ export default function GeneratingPlanScreen() {
       // Validate configuration
       const config = getProductionConfig();
       const isDev = __DEV__;
-      
+
       console.log('[GenerateDailyPlan] Starting daily plan generation...');
       console.log('[GenerateDailyPlan] Environment:', isDev ? 'development' : 'production');
       console.log('[GenerateDailyPlan] Config valid:', config.isValid);
-      
+
       if (!config.isValid && !isDev) {
         console.warn('[GenerateDailyPlan] ⚠️ Configuration issues:', config.errors);
       }
@@ -113,7 +117,7 @@ export default function GeneratingPlanScreen() {
 
       // Get current base plan
       const basePlan = getCurrentBasePlan();
-      
+
       if (!basePlan) {
         console.error('[GenerateDailyPlan] No base plan available');
         setPlanStatus('error');
@@ -142,68 +146,55 @@ export default function GeneratingPlanScreen() {
       const planData = await generateDailyPlan(user, todayCheckin, recentCheckins, basePlan, yesterdaySupplements);
       const generationTime = Date.now() - startTime;
       // clearTimeout(slowTimer);
-      
+
       // Log successful generation
       await logPlanGenerationAttempt('daily', true, null, {
         generationTime,
         checkinEnergy: todayCheckin.energy,
         checkinStress: todayCheckin.stress
       });
-      
+
       // Add the plan to store
       await addPlan(planData);
-      
+
       console.log('[GenerateDailyPlan] ✅ Plan saved successfully');
-      
+
       // Set generating to false first
       setIsGenerating(false);
       // setPlanStatus('success');
-      
+
       // Wait for state to propagate before navigating
       // This prevents race condition where plan screen renders before state updates
       console.log('[GenerateDailyPlan] ⏳ Waiting for state propagation...');
-      
+
       setTimeout(() => {
         setPlanStatus('success');
         setTimeout(() => {
           try {
+            if (hasNavigatedRef.current) return;
+            hasNavigatedRef.current = true;
+
             unlockNavigation();
-            // Use push + replace combo for all environments (dev and production)
-            // This is more reliable than replace alone
-            console.log('[GenerateDailyPlan] 🚀 Using push + replace navigation');
-            router.push('/plan?celebrate=1');
-            
-            // Ensure navigation with replace after a delay (without celebrate param to avoid remount confetti)
-            setTimeout(() => {
-              console.log('[GenerateDailyPlan] 🔄 Confirming navigation with replace (no celebrate param)');
-              router.replace('/plan');
-            }, 500);
+            console.log('[GenerateDailyPlan] 🚀 Navigating to plan');
+            router.replace('/plan?celebrate=1');
           } catch (navError) {
             console.error('[GenerateDailyPlan] ❌ Navigation error:', navError);
-            // Fallback 1: Try without celebrate parameter
+            // Fallback: Navigate to home as last resort
             setTimeout(() => {
-              console.log('[GenerateDailyPlan] 🔄 Fallback: Trying without celebrate param');
-              try {
-                unlockNavigation();
-                router.push('/plan');
-                setTimeout(() => router.replace('/plan'), 300);
-              } catch (fallbackError) {
-                // Fallback 2: Navigate to home as last resort
-                console.log('[GenerateDailyPlan] 🏠 Final fallback: Navigating to home');
-                unlockNavigation();
-                router.replace('/(tabs)/home');
-              }
+              console.log('[GenerateDailyPlan] 🏠 Fallback: Navigating to home');
+              unlockNavigation();
+              router.replace('/(tabs)/home');
             }, 100);
           }
         }, 500);
-      }, 2000); // Increased from 1500ms to 2000ms for better reliability in production
+      }, 2000);
 
     } catch (error) {
       // Ensure slowTimer is cleared on error
-      try { /* no-op if not set */ } catch {}
+      try { /* no-op if not set */ } catch { }
       console.error('Error generating daily plan:', error);
       setPlanStatus('error');
-      
+
       // Log the failure
       const todayCheckinData = getTodayCheckin();
       await logPlanGenerationAttempt('daily', false, error, {
@@ -213,7 +204,7 @@ export default function GeneratingPlanScreen() {
         errorMessage: String(error),
         errorType: error instanceof Error ? error.name : 'Unknown'
       });
-      
+
       // NO FALLBACK - Show error to user
       // Daily plan generation should not fail since it just applies
       // check-in adjustments to the existing base plan (no AI call)
@@ -221,15 +212,15 @@ export default function GeneratingPlanScreen() {
         'Unable to Generate Plan',
         'There was an issue creating your daily plan. Please try again.',
         [
-          { 
-            text: 'Go Home', 
+          {
+            text: 'Go Home',
             onPress: () => {
               unlockNavigation();
               router.replace('/(tabs)/home');
             }
           },
-          { 
-            text: 'Try Again', 
+          {
+            text: 'Try Again',
             onPress: () => {
               startedRef.current = false;
               setPlanStatus('loading');
@@ -280,8 +271,8 @@ export default function GeneratingPlanScreen() {
       return navLockedRef.current; // Block while locked
     });
     return () => {
-      try { unsubBeforeRemove(); } catch {}
-      try { backSub.remove(); } catch {}
+      try { unsubBeforeRemove(); } catch { }
+      try { backSub.remove(); } catch { }
     };
   }, [navigation]);
 
@@ -290,30 +281,30 @@ export default function GeneratingPlanScreen() {
       colors={['#667eea', '#764ba2']}
       style={styles.container}
     >
-      <Stack.Screen 
-        options={{ 
+      <Stack.Screen
+        options={{
           headerShown: false,
           gestureEnabled: false,
-        }} 
+        }}
       />
-      
-      <PlanLoadingMiniGameOverlay 
-        visible={showMiniGame} 
-        planStatus={planStatus} 
+
+      <PlanLoadingMiniGameOverlay
+        visible={showMiniGame}
+        planStatus={planStatus}
         onGameEnd={handleGameEnd}
         loadingMessage={LOADING_MESSAGES[messageIndex]}
         onExit={() => setShowMiniGame(false)}
       />
-      
+
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
           <View style={styles.loadingContainer}>
             <View style={styles.spinner}>
               <View style={styles.spinnerInner} />
             </View>
-            
+
             <Text style={styles.title}>Creating Your Plan</Text>
-            
+
             <Animated.View style={[styles.messageContainer, { opacity: fadeAnim }]}>
               <Text style={styles.message}>
                 {LOADING_MESSAGES[messageIndex]}

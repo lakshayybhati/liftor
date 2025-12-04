@@ -4,15 +4,16 @@ import { Image as ExpoImage } from 'expo-image';
 // Dynamic import of print/sharing to avoid build errors when modules are unavailable
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp, Bell, Pill, Inbox } from 'lucide-react-native';
+import { User, Target, Dumbbell, Utensils, Trash2, Download, Settings as SettingsIcon, ChevronRight, LogOut, Pencil, UserCog, Phone, X, HelpCircle, ChevronDown, ChevronUp, Bell, Pill, Inbox, Lock } from 'lucide-react-native';
 import { Card } from '@/components/ui/Card';
+import { UserAvatar } from '@/components/UserAvatar';
 import { useUserStore } from '@/hooks/useUserStore';
 import { GOALS } from '@/constants/fitness';
 import { router } from 'expo-router';
 import { theme } from '@/constants/colors';
 import { useAuth } from '@/hooks/useAuth';
 import { useProfile } from '@/hooks/useProfile';
-import { getSubscriptionTier } from '@/utils/subscription-helpers';
+import { useSessionStatus } from '@/hooks/useSessionStatus';
 import { NotificationService } from '@/services/NotificationService';
 import { getBasePlanJobState } from '@/services/backgroundPlanGeneration';
 
@@ -20,6 +21,17 @@ export default function SettingsScreen() {
   const { user, checkins, plans, clearAllData, getRecentCheckins, getWeightData, getWeightProgress, syncLocalToBackend } = useUserStore();
   const auth = useAuth();
   const { data: profile, isLoading: isProfileLoading } = useProfile();
+  
+  // SINGLE SOURCE OF TRUTH: useSessionStatus handles all subscription logic
+  // It checks profile.subscription_active (from webhook) and falls back to edge function
+  const {
+    canExportData,
+    canEditPreferences,
+    isTrial,
+    isSubscribed,
+    isLoading: isSessionLoading,
+  } = useSessionStatus();
+
   const insets = useSafeAreaInsets();
   const [isClearing, setIsClearing] = useState(false);
   const [showWeeklyCallsModal, setShowWeeklyCallsModal] = useState(false);
@@ -80,11 +92,11 @@ export default function SettingsScreen() {
         const prefs = await NotificationService.getPreferences();
         const allOn = !!(prefs.workoutRemindersEnabled && prefs.checkInRemindersEnabled && prefs.milestonesEnabled);
         setAllNotificationsEnabled(allOn);
-      } catch {}
+      } catch { }
     })();
   }, []);
 
-  // Refresh unread notification count on focus
+  // Refresh notification count on focus (no subscription checks - useSessionStatus handles that)
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
@@ -92,27 +104,37 @@ export default function SettingsScreen() {
         try {
           const unreadCount = await NotificationService.getUnreadCount();
           if (isActive) setUnreadNotificationCount(unreadCount);
-        } catch {}
+        } catch { }
       })();
       return () => { isActive = false; };
     }, [])
   );
 
-  // Real subscription status via RevenueCat
-  const [subscriptionInfo, setSubscriptionInfo] = useState<{ status: 'trial' | 'elite' | 'none'; label: string }>({ status: 'trial', label: 'Trial' });
-  useEffect(() => {
-    (async () => {
-      try {
-        const tier = await getSubscriptionTier();
-        setSubscriptionInfo({ status: tier.tier, label: tier.label });
-      } catch (e) {
-        // Fallback to trial label if query fails
-        setSubscriptionInfo({ status: 'trial', label: 'Trial' });
-      }
-    })();
-  }, []);
+  // SINGLE SOURCE OF TRUTH: Derive subscription info from useSessionStatus
+  // No separate state, no async SDK calls - consistent with Home screen
+  const subscriptionInfo = useMemo(() => {
+    if (isSubscribed) {
+      return { status: 'elite' as const, label: 'Elite' };
+    } else if (isTrial) {
+      return { status: 'trial' as const, label: 'Trial' };
+    }
+    return { status: 'none' as const, label: 'Free' };
+  }, [isSubscribed, isTrial]);
 
   const handleExportData = async () => {
+    // Check if user can export data (subscription-only feature)
+    if (!canExportData) {
+      Alert.alert(
+        'Subscribe to Export',
+        'Data export is available with an active subscription. Subscribe to unlock this feature.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Subscribe', onPress: () => router.push('/paywall') },
+        ]
+      );
+      return;
+    }
+
     try {
       const exportDate = new Date();
       const recent = getRecentCheckins(30);
@@ -123,10 +145,10 @@ export default function SettingsScreen() {
       const hasCheckins = recent.length > 0;
       const avgEnergy = hasCheckins
         ? (() => {
-            const energies = recent.filter(c => typeof c.energy === 'number').map(c => c.energy as number);
-            if (energies.length === 0) return 0;
-            return Math.round((energies.reduce((a, b) => a + b, 0) / energies.length) * 10) / 10;
-          })()
+          const energies = recent.filter(c => typeof c.energy === 'number').map(c => c.energy as number);
+          if (energies.length === 0) return 0;
+          return Math.round((energies.reduce((a, b) => a + b, 0) / energies.length) * 10) / 10;
+        })()
         : 0;
 
       const plansWithAdh = plans.slice(-30).filter(p => typeof p.adherence === 'number');
@@ -156,13 +178,13 @@ export default function SettingsScreen() {
         stats: { avgEnergy, completion },
         exportDate,
       });
-      
+
       // Import print/sharing modules only when exporting
       const Print = await import('expo-print');
       const Sharing = await import('expo-sharing');
       const FileSystem = await import('expo-file-system');
 
-      const filename = `Liftor_Export_${exportDate.toISOString().slice(0,10)}.pdf`;
+      const filename = `Liftor_Export_${exportDate.toISOString().slice(0, 10)}.pdf`;
 
       // Web fallback: download HTML file (no native PDF/Sharing support)
       if (Platform.OS === 'web') {
@@ -188,7 +210,7 @@ export default function SettingsScreen() {
       const { uri } = await (Print as any).printToFileAsync({ html });
       const dest = (FileSystem as any).documentDirectory ? (FileSystem as any).documentDirectory + filename : uri;
       if ((FileSystem as any).documentDirectory) {
-        await (FileSystem as any).moveAsync({ from: uri, to: dest }).catch(() => {});
+        await (FileSystem as any).moveAsync({ from: uri, to: dest }).catch(() => { });
       }
 
       if (await (Sharing as any).isAvailableAsync()) {
@@ -207,7 +229,7 @@ export default function SettingsScreen() {
     const safe = (v: any) => (v === undefined || v === null ? '—' : String(v));
     const fmtDate = (d: string) => {
       const dt = new Date(d);
-      return `${dt.getDate()}/${dt.getMonth()+1}/${dt.getFullYear()}`;
+      return `${dt.getDate()}/${dt.getMonth() + 1}/${dt.getFullYear()}`;
     };
     const css = `
       body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial; background: #0C0C0D; color: #F7F7F8; padding: 24px; }
@@ -228,8 +250,8 @@ export default function SettingsScreen() {
         <div>Name: ${safe(user?.name)}</div>
         <div>Goal: ${safe(user?.goal)}</div>
         <div>Training Days: ${safe(user?.trainingDays)}</div>
-        <div>Equipment: ${safe((user?.equipment||[]).join(', '))}</div>
-        <div>Diet: ${safe((user?.dietaryPrefs||[]).join(', '))}</div>
+        <div>Equipment: ${safe((user?.equipment || []).join(', '))}</div>
+        <div>Diet: ${safe((user?.dietaryPrefs || []).join(', '))}</div>
       </div>
     `;
     const statsSection = `
@@ -246,7 +268,7 @@ export default function SettingsScreen() {
         <table>
           <thead><tr><th>Date</th><th>Weight (kg)</th></tr></thead>
           <tbody>
-            ${weightSeries.slice(-30).map((w:any) => `<tr><td>${fmtDate(w.date)}</td><td>${w.weight}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">No weight data</td></tr>'}
+            ${weightSeries.slice(-30).map((w: any) => `<tr><td>${fmtDate(w.date)}</td><td>${w.weight}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">No weight data</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -257,7 +279,7 @@ export default function SettingsScreen() {
         <table>
           <thead><tr><th>Date</th><th>Mode</th><th>Energy</th><th>Stress</th><th>Mood</th></tr></thead>
           <tbody>
-            ${recent.map((c:any) => `<tr><td>${fmtDate(c.date)}</td><td>${safe(c.mode)}</td><td>${safe(c.energy)}</td><td>${safe(c.stress)}</td><td>${safe(c.mood)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No check-ins</td></tr>'}
+            ${recent.map((c: any) => `<tr><td>${fmtDate(c.date)}</td><td>${safe(c.mode)}</td><td>${safe(c.energy)}</td><td>${safe(c.stress)}</td><td>${safe(c.mood)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No check-ins</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -268,7 +290,7 @@ export default function SettingsScreen() {
         <table>
           <thead><tr><th>Date</th><th>Workout Focus</th><th>Calories</th><th>Protein (g)</th></tr></thead>
           <tbody>
-            ${plans.map((p:any) => `<tr><td>${fmtDate(p.date)}</td><td>${safe((p.workout?.focus||[]).join(', '))}</td><td>${safe(p.nutrition?.total_kcal)}</td><td>${safe(p.nutrition?.protein_g)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No plans</td></tr>'}
+            ${plans.map((p: any) => `<tr><td>${fmtDate(p.date)}</td><td>${safe((p.workout?.focus || []).join(', '))}</td><td>${safe(p.nutrition?.total_kcal)}</td><td>${safe(p.nutrition?.protein_g)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No plans</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -299,15 +321,15 @@ export default function SettingsScreen() {
   const confirmClearData = async () => {
     try {
       setIsClearing(true);
-      
+
       // Clear data and navigate immediately
       await clearAllData();
-      
+
       // Small delay to ensure state is updated
       setTimeout(() => {
         router.replace('/onboarding');
       }, 100);
-      
+
     } catch (error) {
       console.error('Failed to clear data:', error);
       Alert.alert(
@@ -330,7 +352,7 @@ export default function SettingsScreen() {
   return (
     <View style={[styles.container, { backgroundColor: theme.color.bg }]}>
       <View style={[styles.safeArea, { paddingTop: insets.top }]}>
-        <ScrollView 
+        <ScrollView
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           bounces={true}
@@ -345,15 +367,7 @@ export default function SettingsScreen() {
 
           <Card style={styles.profileCard}>
             <View style={styles.profileHeader}>
-              {session?.user?.user_metadata?.avatar_url ? (
-                <ExpoImage
-                  source={{ uri: session.user.user_metadata.avatar_url as string }}
-                  style={styles.avatarSmall}
-                  contentFit="cover"
-                />
-              ) : (
-                <User color={theme.color.accent.primary} size={24} />
-              )}
+              <UserAvatar size={28} />
               <Text style={styles.profileTitle}>Profile</Text>
             </View>
             <View style={styles.profileInfo}>
@@ -387,7 +401,7 @@ export default function SettingsScreen() {
 
           <Card style={styles.quickManageCard}>
             <View style={styles.quickManageInner}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.actionButton}
                 onPress={() => router.push('/profile')}
                 testID="edit-profile"
@@ -402,7 +416,7 @@ export default function SettingsScreen() {
           </Card>
 
           <Card style={styles.weeklyCallsCard}>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.actionButton, styles.disabledActionButton]}
               onPress={() => setShowWeeklyCallsModal(true)}
               testID="weekly-calls"
@@ -483,16 +497,16 @@ export default function SettingsScreen() {
                 value={allNotificationsEnabled}
                 onValueChange={async (value) => {
                   setAllNotificationsEnabled(value);
-                  
+
                   // Use centralized NotificationService for all notification management
                   // This ensures preferences are user-scoped and properly persisted
                   await NotificationService.setAllNotificationsEnabled(value);
-                  
+
                   if (value && user) {
                     // Check if user has a verified base plan for workout reminders
                     const jobState = await getBasePlanJobState(session?.user?.id ?? null);
                     const hasVerifiedPlan = jobState.verified;
-                    
+
                     // Schedule reminders using user's configured times
                     // These are IDEMPOTENT - won't reschedule if already scheduled for same time
                     if (user.preferredTrainingTime) {
@@ -511,9 +525,9 @@ export default function SettingsScreen() {
                   }
                   // If disabling, NotificationService.setAllNotificationsEnabled already cancels reminders
                 }}
-                trackColor={{ 
-                  false: theme.color.line, 
-                  true: theme.color.accent.primary + '40' 
+                trackColor={{
+                  false: theme.color.line,
+                  true: theme.color.accent.primary + '40'
                 }}
                 thumbColor={allNotificationsEnabled ? theme.color.accent.primary : theme.color.muted}
               />
@@ -577,7 +591,7 @@ export default function SettingsScreen() {
 
           <Card style={styles.actionsCard}>
             <Text style={styles.actionsTitle}>Health & Nutrition</Text>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.actionButton}
               onPress={() => router.push('/supplements')}
             >
@@ -591,7 +605,7 @@ export default function SettingsScreen() {
 
           <Card style={styles.actionsCard}>
             <Text style={styles.actionsTitle}>Account</Text>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.actionButton}
               onPress={() => {
                 Alert.alert(
@@ -604,10 +618,10 @@ export default function SettingsScreen() {
                       onPress: async () => {
                         try {
                           // Persist local data to backend before signing out
-                          try { await syncLocalToBackend(); } catch {}
+                          try { await syncLocalToBackend(); } catch { }
                           await signOut();
                           // Clear any user-scoped local data so nothing leaks across accounts
-                          try { await clearAllData(); } catch {}
+                          try { await clearAllData(); } catch { }
                         } finally {
                           router.replace('/auth/login');
                         }
@@ -628,18 +642,26 @@ export default function SettingsScreen() {
 
           <Card style={styles.actionsCard}>
             <Text style={styles.actionsTitle}>Data Management</Text>
-            
-            <TouchableOpacity 
-              style={styles.actionButton}
+
+            <TouchableOpacity
+              style={[styles.actionButton, !canExportData && styles.lockedActionButton]}
               onPress={handleExportData}
             >
               <View style={styles.actionButtonLeft}>
-                <Download color={theme.color.accent.green} size={20} />
-                <Text style={styles.actionButtonText}>Export My Data</Text>
+                <Download color={canExportData ? theme.color.accent.green : theme.color.muted} size={20} />
+                <Text style={[styles.actionButtonText, !canExportData && styles.lockedActionButtonText]}>
+                  Export My Data
+                </Text>
               </View>
+              {!canExportData && (
+                <View style={styles.lockBadge}>
+                  <Lock size={12} color={theme.color.muted} />
+                  <Text style={styles.lockBadgeText}>Pro</Text>
+                </View>
+              )}
             </TouchableOpacity>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.actionButton, styles.dangerButton, isClearing && styles.disabledButton]}
               onPress={handleClearData}
               disabled={isClearing}
@@ -678,7 +700,7 @@ export default function SettingsScreen() {
                 <Phone color={theme.color.accent.primary} size={24} />
                 <Text style={styles.modalTitle}>Weekly Calls</Text>
               </View>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.modalCloseButton}
                 onPress={() => setShowWeeklyCallsModal(false)}
                 accessible={true}
@@ -688,19 +710,19 @@ export default function SettingsScreen() {
                 <X color={theme.color.muted} size={24} />
               </TouchableOpacity>
             </View>
-            
+
             <Text style={styles.modalDescription}>
               Weekly 1:1 calls to review your check-ins and adjust your plan. Feature is coming soon.
             </Text>
-            
+
             <View style={styles.notificationToggleContainer}>
               <Text style={styles.notificationToggleLabel}>Notify me when available</Text>
               <Switch
                 value={notifyWhenAvailable}
                 onValueChange={setNotifyWhenAvailable}
-                trackColor={{ 
-                  false: theme.color.line, 
-                  true: theme.color.accent.primary + '40' 
+                trackColor={{
+                  false: theme.color.line,
+                  true: theme.color.accent.primary + '40'
                 }}
                 thumbColor={notifyWhenAvailable ? theme.color.accent.primary : theme.color.muted}
                 accessible={true}
@@ -709,8 +731,8 @@ export default function SettingsScreen() {
                 accessibilityState={{ checked: notifyWhenAvailable }}
               />
             </View>
-            
-            <TouchableOpacity 
+
+            <TouchableOpacity
               style={styles.modalButton}
               onPress={() => setShowWeeklyCallsModal(false)}
               accessible={true}
@@ -1123,5 +1145,26 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: theme.color.muted,
     lineHeight: 20,
+  },
+  lockedActionButton: {
+    opacity: 0.8,
+  },
+  lockedActionButtonText: {
+    color: theme.color.muted,
+  },
+  lockBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.color.accent.primary + '15',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
+  },
+  lockBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: theme.color.muted,
+    textTransform: 'uppercase',
   },
 });

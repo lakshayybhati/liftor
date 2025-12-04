@@ -3,15 +3,164 @@
  * 
  * Helper functions for managing subscriptions in your app.
  * Use these in settings screens or wherever you need subscription info.
+ * 
+ * IMPORTANT: For access control, prefer using the useSessionStatus hook
+ * which fetches from the backend /session/status endpoint.
+ * This file provides RevenueCat-specific utilities and backward compatibility.
  */
 
 import Purchases from 'react-native-purchases';
 import { Alert, Platform } from 'react-native';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getDeviceLocale, clearStorefrontCache } from './currency';
 
 // Dev bypass storage key
 const BYPASS_KEY = 'Liftor_paywall_bypass';
+
+// Cache for session status to avoid redundant network calls
+let cachedSessionStatus: AppAccessResult | null = null;
+let cacheTimestamp: number = 0;
+const CACHE_DURATION_MS = 30 * 1000; // 30 seconds
+
+export interface AppAccessResult {
+  canUseApp: boolean;
+  isTrial: boolean;
+  isSubscribed: boolean;
+  trialEndsAt: string | null;
+  hasHadLocalTrial: boolean;
+  discountEligibleImmediate: boolean;
+}
+
+/**
+ * Check app access using the backend /session/status endpoint
+ * This is the preferred method for access control as it uses server time
+ */
+export async function checkAppAccess(): Promise<AppAccessResult> {
+  try {
+    // Check cache first
+    const now = Date.now();
+    if (cachedSessionStatus && (now - cacheTimestamp) < CACHE_DURATION_MS) {
+      return cachedSessionStatus;
+    }
+
+    // Respect dev bypass in Expo/Dev
+    if (await isSubscriptionBypassEnabled()) {
+      const bypassResult: AppAccessResult = {
+        canUseApp: true,
+        isTrial: false,
+        isSubscribed: true,
+        trialEndsAt: null,
+        hasHadLocalTrial: false,
+        discountEligibleImmediate: false,
+      };
+      cachedSessionStatus = bypassResult;
+      cacheTimestamp = now;
+      return bypassResult;
+    }
+
+    // Get Supabase URL and session
+    const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
+    const supabaseUrl = extra.EXPO_PUBLIC_SUPABASE_URL || '';
+    
+    if (!supabaseUrl) {
+      console.warn('[checkAppAccess] Missing Supabase URL');
+      return getDefaultAccessResult();
+    }
+
+    // Get access token from AsyncStorage (stored by auth provider)
+    const sessionStr = await AsyncStorage.getItem('supabase.auth.token');
+    if (!sessionStr) {
+      console.log('[checkAppAccess] No session token found');
+      return getDefaultAccessResult();
+    }
+
+    let accessToken: string;
+    try {
+      const sessionData = JSON.parse(sessionStr);
+      accessToken = sessionData?.currentSession?.access_token || sessionData?.access_token;
+    } catch {
+      console.warn('[checkAppAccess] Failed to parse session');
+      return getDefaultAccessResult();
+    }
+
+    if (!accessToken) {
+      console.log('[checkAppAccess] No access token in session');
+      return getDefaultAccessResult();
+    }
+
+    const url = `${supabaseUrl}/functions/v1/session-status`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      console.warn('[checkAppAccess] Session status fetch failed:', response.status);
+      // Fall back to RevenueCat check
+      return await fallbackToRevenueCat();
+    }
+
+    const data = await response.json();
+    
+    const result: AppAccessResult = {
+      canUseApp: data.access?.canUseApp ?? false,
+      isTrial: data.access?.trial ?? false,
+      isSubscribed: data.access?.full ?? false,
+      trialEndsAt: data.trial?.endsAt ?? null,
+      hasHadLocalTrial: data.hasHadLocalTrial ?? false,
+      discountEligibleImmediate: data.discountEligibleImmediate ?? true,
+    };
+
+    // Cache the result
+    cachedSessionStatus = result;
+    cacheTimestamp = now;
+
+    return result;
+  } catch (error) {
+    console.error('[checkAppAccess] Error:', error);
+    // Fall back to RevenueCat check
+    return await fallbackToRevenueCat();
+  }
+}
+
+function getDefaultAccessResult(): AppAccessResult {
+  return {
+    canUseApp: false,
+    isTrial: false,
+    isSubscribed: false,
+    trialEndsAt: null,
+    hasHadLocalTrial: false,
+    discountEligibleImmediate: true,
+  };
+}
+
+async function fallbackToRevenueCat(): Promise<AppAccessResult> {
+  try {
+    const hasSubscription = await hasActiveSubscription();
+    return {
+      canUseApp: hasSubscription,
+      isTrial: false,
+      isSubscribed: hasSubscription,
+      trialEndsAt: null,
+      hasHadLocalTrial: false,
+      discountEligibleImmediate: !hasSubscription,
+    };
+  } catch {
+    return getDefaultAccessResult();
+  }
+}
+
+/**
+ * Clear the cached session status (call after purchase or trial start)
+ */
+export function clearSessionStatusCache(): void {
+  cachedSessionStatus = null;
+  cacheTimestamp = 0;
+}
 
 /**
  * Enable subscription bypass in Expo (dev utility)
@@ -22,7 +171,7 @@ export async function enableSubscriptionBypass(): Promise<void> {
     if (Constants.appOwnership === 'expo' || __DEV__) {
       await AsyncStorage.setItem(BYPASS_KEY, 'true');
     }
-  } catch {}
+  } catch { }
 }
 
 /**
@@ -31,7 +180,7 @@ export async function enableSubscriptionBypass(): Promise<void> {
 export async function disableSubscriptionBypass(): Promise<void> {
   try {
     await AsyncStorage.removeItem(BYPASS_KEY);
-  } catch {}
+  } catch { }
 }
 
 /**
@@ -60,7 +209,7 @@ export async function hasActiveSubscription(): Promise<boolean> {
 
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
     const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
-    
+
     const customerInfo = await Purchases.getCustomerInfo();
     return !!customerInfo.entitlements.active[requiredEntitlement];
   } catch (error) {
@@ -99,10 +248,10 @@ export async function getSubscriptionDetails(): Promise<{
 
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
     const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
-    
+
     const customerInfo = await Purchases.getCustomerInfo();
     const entitlement = customerInfo.entitlements.active[requiredEntitlement];
-    
+
     if (entitlement) {
       const periodTypeRaw = (entitlement as any)?.periodType;
       const periodType = typeof periodTypeRaw === 'string' ? (periodTypeRaw.toUpperCase() as 'TRIAL' | 'INTRO' | 'NORMAL') : 'UNKNOWN';
@@ -119,7 +268,7 @@ export async function getSubscriptionDetails(): Promise<{
         isTrial,
       };
     }
-    
+
     return {
       isActive: false,
       entitlementId: null,
@@ -156,11 +305,11 @@ export async function restorePurchases(): Promise<boolean> {
       return false;
     }
     const customerInfo = await Purchases.restorePurchases();
-    
+
     const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
     const requiredEntitlement = extra.EXPO_PUBLIC_REVENUECAT_REQUIRED_ENTITLEMENT || 'pro';
     const hasEntitlement = !!customerInfo.entitlements.active[requiredEntitlement];
-    
+
     if (hasEntitlement) {
       Alert.alert(
         'Success',
@@ -189,14 +338,16 @@ export async function restorePurchases(): Promise<boolean> {
 }
 
 /**
- * Get formatted subscription expiration date
+ * Get formatted subscription expiration date using device locale
  */
 export function formatExpirationDate(isoDate: string | null): string {
   if (!isoDate) return 'Never';
-  
+
   try {
     const date = new Date(isoDate);
-    return date.toLocaleDateString('en-US', {
+    const locale = getDeviceLocale();
+    
+    return date.toLocaleDateString(locale, {
       year: 'numeric',
       month: 'long',
       day: 'numeric'
@@ -211,20 +362,20 @@ export function formatExpirationDate(isoDate: string | null): string {
  */
 export async function getSubscriptionStatusText(): Promise<string> {
   const details = await getSubscriptionDetails();
-  
+
   if (!details.isActive) {
     return 'No active subscription';
   }
-  
+
   if (details.expirationDate) {
     const expiration = formatExpirationDate(details.expirationDate);
     if (details.willRenew) {
-      return `Active • Renews ${expiration}`;
+      return `Active – renews on ${expiration}`;
     } else {
-      return `Active • Expires ${expiration}`;
+      return `Active – expires on ${expiration}`;
     }
   }
-  
+
   return 'Active';
 }
 
@@ -245,7 +396,7 @@ export async function openManageSubscription(): Promise<void> {
     }
     await Purchases.showManageSubscriptions();
   } catch (error: any) {
-    
+
     // Fallback: provide manual instructions
     if (Platform.OS === 'ios') {
       Alert.alert(

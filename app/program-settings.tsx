@@ -17,7 +17,7 @@ import Slider from '@react-native-community/slider';
 import { useAuth } from '@/hooks/useAuth';
 import { confirmNumericWithinRange, NumberSpecs } from '@/utils/number-guards';
 import * as Haptics from 'expo-haptics';
-import { startBasePlanGeneration } from '@/services/backgroundPlanGeneration';
+import { createAndTriggerServerPlanJob } from '@/utils/server-plan-generation';
 
 // Simple vertical wheel component (alarm-like) with snap-to-item behavior
 function ScrollWheel({ data, index, onChange }: { data: string[]; index: number; onChange: (i: number) => void }) {
@@ -28,7 +28,7 @@ function ScrollWheel({ data, index, onChange }: { data: string[]; index: number;
   useEffect(() => {
     try {
       scrollRef.current?.scrollTo({ y: index * ITEM_HEIGHT, animated: true });
-    } catch {}
+    } catch { }
   }, [index]);
 
   const onEnd = (e: any) => {
@@ -149,8 +149,8 @@ export default function ProgramSettingsScreen() {
         trainingDays: user.trainingDays,
         equipment: user.equipment,
         // Enforce single-select dietary preference like Onboarding
-        dietaryPrefs: (user.dietaryPrefs && user.dietaryPrefs.length > 0) 
-          ? [user.dietaryPrefs[0] as DietaryPref] 
+        dietaryPrefs: (user.dietaryPrefs && user.dietaryPrefs.length > 0)
+          ? [user.dietaryPrefs[0] as DietaryPref]
           : [],
         dietaryNotes: user.dietaryNotes || '',
         goalWeight: user.goalWeight,
@@ -181,8 +181,8 @@ export default function ProgramSettingsScreen() {
         goal: user.goal,
         trainingDays: user.trainingDays,
         equipment: [...(user.equipment || [])],
-        dietaryPrefs: (user.dietaryPrefs && user.dietaryPrefs.length > 0) 
-          ? [user.dietaryPrefs[0] as DietaryPref] 
+        dietaryPrefs: (user.dietaryPrefs && user.dietaryPrefs.length > 0)
+          ? [user.dietaryPrefs[0] as DietaryPref]
           : [],
         dietaryNotes: user.dietaryNotes || '',
         goalWeight: user.goalWeight,
@@ -214,7 +214,7 @@ export default function ProgramSettingsScreen() {
         setHourIndex(Math.max(0, HOURS.indexOf(String(parts.hour12))));
         setMinuteIndex(Math.max(0, MINUTES.indexOf(String(parts.minute).padStart(2, '0'))));
         setPeriodIndex(parts.period === 'PM' ? 1 : 0);
-      } catch {}
+      } catch { }
     }
   }, [user, parseTimeParts, HOURS, MINUTES]);
 
@@ -255,17 +255,17 @@ export default function ProgramSettingsScreen() {
       );
     });
     return () => {
-      try { unsub(); } catch {}
+      try { unsub(); } catch { }
     };
   }, [navigation, isDirty]);
 
   const handleSavePreferences = async () => {
     if (!user) return;
-    
+
     try {
       const updatedUser = { ...user, ...formData };
       await updateUser(updatedUser);
-      
+
       // Reschedule daily check-in reminder if time changed
       // This respects the global notification preferences - won't schedule if disabled
       try {
@@ -281,7 +281,7 @@ export default function ProgramSettingsScreen() {
         if (session?.user?.id) {
           await supabase
             .from('profiles')
-            .update({ 
+            .update({
               goal_weight: typeof formData.goalWeight === 'number' ? Math.round(formData.goalWeight) : formData.goalWeight ?? null,
               dietary_notes: formData.dietaryNotes || null,
               workout_intensity: formData.workoutIntensity || null,
@@ -290,7 +290,7 @@ export default function ProgramSettingsScreen() {
               // Store the chosen check-in reminder time (if column exists, otherwise ignored by PostgREST)
               checkin_reminder_time: updatedUser.checkInReminderTime || null,
               // Map new fields to DB columns
-              preferred_exercises: formData.trainingStylePreferences || [], 
+              preferred_exercises: formData.trainingStylePreferences || [],
               avoid_exercises: formData.avoidExercises || [],
               preferred_training_time: formData.preferredTrainingTime || null,
               session_length: formData.sessionLength || null,
@@ -305,7 +305,7 @@ export default function ProgramSettingsScreen() {
             })
             .eq('id', session.user.id);
         }
-      } catch {}
+      } catch { }
       Alert.alert('Success', 'Preferences saved successfully!');
       // Reset dirty state baseline
       setInitialSnapshot(JSON.parse(JSON.stringify(formData)));
@@ -332,14 +332,14 @@ export default function ProgramSettingsScreen() {
 
   const handleRegeneratePress = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    
+
     // Check with server time to prevent date manipulation
     const canRegenerate = await canRegenerateBasePlan();
-    
+
     if (!canRegenerate) {
       const timeRemaining = await getTimeUntilNextRegeneration();
       if (timeRemaining) {
-        const timeText = timeRemaining.days > 0 
+        const timeText = timeRemaining.days > 0
           ? `${timeRemaining.days} day${timeRemaining.days !== 1 ? 's' : ''} and ${timeRemaining.hours} hour${timeRemaining.hours !== 1 ? 's' : ''}`
           : `${timeRemaining.hours} hour${timeRemaining.hours !== 1 ? 's' : ''}`;
         Alert.alert(
@@ -350,13 +350,13 @@ export default function ProgramSettingsScreen() {
         return;
       }
     }
-    
+
     setShowRegenerateModal(true);
   };
 
   const handleConfirmRegenerate = async () => {
     setShowRegenerateModal(false);
-    
+
     // Save any pending preferences first
     let updatedUser = user;
     if (user && isDirty) {
@@ -367,13 +367,32 @@ export default function ProgramSettingsScreen() {
         console.error('Error saving preferences before regeneration:', error);
       }
     }
-    
-    // Start background generation and navigate to plan building screen
+
+    // Start SERVER-SIDE generation and navigate to plan building screen
+    // Use forceRegenerate: true since this is a 14-day cycle regeneration
     if (updatedUser) {
-      const userId = auth?.session?.user?.id ?? null;
-      await startBasePlanGeneration(updatedUser, userId, addBasePlan);
+      console.log('[ProgramSettings] Starting server-side plan regeneration with forceRegenerate...');
+      const result = await createAndTriggerServerPlanJob(updatedUser, { forceRegenerate: true });
+      if (!result.success) {
+        console.error('[ProgramSettings] Server generation failed:', result.error);
+        Alert.alert('Error', 'Failed to start plan regeneration. Please try again.');
+        return;
+      }
+
+      // With forceRegenerate, we should always get a new plan, not plan_exists
+      if (result.status === 'plan_exists') {
+        // This shouldn't happen with forceRegenerate, but handle it gracefully
+        console.warn('[ProgramSettings] Unexpected plan_exists with forceRegenerate');
+        Alert.alert('Plan Already Ready', 'Your latest plan is already available. Redirecting you now.', [
+          { text: 'OK', onPress: () => router.replace('/plan-preview') }
+        ]);
+        return;
+      }
+
+      console.log('[ProgramSettings] Server job created:', result.jobId || result.existingJobId);
+      router.push('/plan-building');
+      return;
     }
-    router.push('/plan-building');
   };
 
   const handleViewPlans = () => {
@@ -397,7 +416,7 @@ export default function ProgramSettingsScreen() {
     <KeyboardDismissView style={[styles.container, { backgroundColor: theme.color.bg }]}>
       <View style={[styles.safeArea, { paddingTop: insets.top }]}>
         <View style={styles.header}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.backButton}
             onPress={handleBackPress}
           >
@@ -416,7 +435,7 @@ export default function ProgramSettingsScreen() {
               <Settings color={theme.color.accent.primary} size={20} />
               <Text style={styles.sectionTitle}>Basic Settings</Text>
             </View>
-            
+
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Fitness Goal</Text>
               <View style={styles.chipContainer}>
@@ -500,7 +519,7 @@ export default function ProgramSettingsScreen() {
           {/* Training Preferences */}
           <Card style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Training Preferences</Text>
-            
+
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Training Style / Vibe</Text>
               <View style={styles.chipContainer}>
@@ -660,7 +679,7 @@ export default function ProgramSettingsScreen() {
           {/* Nutrition Preferences */}
           <Card style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Nutrition Preferences</Text>
-            
+
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Goal Weight (kg)</Text>
               <TextInput
@@ -755,7 +774,7 @@ export default function ProgramSettingsScreen() {
               <RefreshCw color={theme.color.accent.primary} size={20} />
               <Text style={styles.sectionTitle}>Base Plan Management</Text>
             </View>
-            
+
             <Text style={styles.planManagementDescription}>
               Your base plan is regenerated based on your preferences. You can regenerate it once every 2 weeks.
             </Text>
@@ -766,9 +785,9 @@ export default function ProgramSettingsScreen() {
                 onPress={handleRegeneratePress}
                 style={styles.regenerateButton}
                 textStyle={styles.regenerateButtonText}
-                icon={<RefreshCw color={theme.color.ink} size={18} />}
+                icon={<RefreshCw color={theme.color.accent.primary} size={18} />}
               />
-              
+
               {basePlans.length > 0 && (
                 <TouchableOpacity
                   style={styles.viewPlansButton}
@@ -794,15 +813,15 @@ export default function ProgramSettingsScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Regenerate Base Plan?</Text>
-            
+
             <Text style={styles.modalWarning}>
               ⚠️ New plans can only be generated once every 2 weeks.
             </Text>
-            
+
             <Text style={styles.modalDescription}>
               Your current settings will be used to create a new personalized plan. This will replace your current active plan.
             </Text>
-            
+
             <View style={styles.modalSettingsSummary}>
               <Text style={styles.modalSummaryTitle}>Current Settings:</Text>
               <Text style={styles.modalSummaryItem}>
@@ -823,7 +842,7 @@ export default function ProgramSettingsScreen() {
               >
                 <Text style={styles.modalCancelText}>No, Change Settings</Text>
               </TouchableOpacity>
-              
+
               <TouchableOpacity
                 style={styles.modalConfirmButton}
                 onPress={handleConfirmRegenerate}

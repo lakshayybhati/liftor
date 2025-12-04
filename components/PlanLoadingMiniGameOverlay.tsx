@@ -416,18 +416,8 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
       {gamePhase === 'gameover' && (
         <View style={styles.centerContainer}>
           <Text style={styles.gameOverTitle}>Oops!</Text>
-          <Text style={styles.gameOverScore}>Score: {score}</Text>
-          <Text style={styles.gameOverHighScore}>High score: {highScore}</Text>
-          <TouchableOpacity onPress={restartGame} style={styles.restartButton}>
-            <Text style={styles.restartButtonText}>Try Again</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Game Elements (Playing OR GameOver to keep background) */}
-      {(gamePhase === 'playing' || gamePhase === 'gameover') && (
-        <>
-          <View style={[styles.scoreContainer, { marginTop: insets.top + 60 }]}>
+          
+          <View style={styles.gameOverStatsContainer}>
             <View style={styles.scoreBlock}>
               <Text style={styles.scoreLabel}>SCORE</Text>
               <Text style={styles.scoreValue}>{score}</Text>
@@ -437,6 +427,28 @@ export default function PlanLoadingMiniGameOverlay({ visible, planStatus, onGame
               <Text style={styles.highScoreValue}>{highScore}</Text>
             </View>
           </View>
+
+          <TouchableOpacity onPress={restartGame} style={styles.restartButton}>
+            <Text style={styles.restartButtonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Game Elements (Playing OR GameOver to keep background) */}
+      {(gamePhase === 'playing' || gamePhase === 'gameover') && (
+        <>
+          {gamePhase === 'playing' && (
+            <View style={[styles.scoreContainer, { marginTop: insets.top + 60 }]}>
+              <View style={styles.scoreBlock}>
+                <Text style={styles.scoreLabel}>SCORE</Text>
+                <Text style={styles.scoreValue}>{score}</Text>
+              </View>
+              <View style={styles.scoreBlock}>
+                <Text style={styles.scoreLabel}>HIGH</Text>
+                <Text style={styles.highScoreValue}>{highScore}</Text>
+              </View>
+            </View>
+          )}
           
           <View style={styles.gameArea} {...panResponder.panHandlers}>
             {/* Only show ball if playing */}
@@ -593,6 +605,11 @@ const styles = StyleSheet.create({
   hintText: {
     color: 'rgba(255,255,255,0.5)',
     fontSize: 14,
+  },
+  gameOverStatsContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 32,
   },
   gameOverTitle: {
     color: '#FFFFFF',

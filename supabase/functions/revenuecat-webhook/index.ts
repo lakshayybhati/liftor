@@ -94,6 +94,7 @@ function computePlatformAndRenew(subs: Record<string, RCSubscriptionsEntry> | un
 
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
+    // Environment variables
     const webhookSecret = Deno.env.get('REVENUECAT_WEBHOOK_SECRET') || '';
     const rcSecretKey = Deno.env.get('REVENUECAT_SECRET_API_KEY') || '';
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
@@ -105,11 +106,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return new Response(JSON.stringify({ error: 'Server not configured' }), { status: 500 });
     }
 
-    // Simple bearer verification; configure the same secret in RevenueCat dashboard webhook settings
+    // Webhook authentication - verify the secret matches
+    // Set REVENUECAT_WEBHOOK_SECRET in Supabase and configure same value in RevenueCat
     const authHeader = req.headers.get('authorization') || req.headers.get('Authorization') || '';
-    if (!webhookSecret || authHeader !== `Bearer ${webhookSecret}`) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+    if (webhookSecret) {
+      // If secret is configured, require it
+      if (authHeader !== `Bearer ${webhookSecret}`) {
+        console.error('[revenuecat-webhook] ❌ Auth failed - invalid or missing Bearer token');
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+      }
+      console.log('[revenuecat-webhook] ✅ Auth verified');
+    } else {
+      // No secret configured - log warning but allow (for initial setup)
+      console.warn('[revenuecat-webhook] ⚠️ No REVENUECAT_WEBHOOK_SECRET configured - running without auth');
     }
+
+    console.log('[revenuecat-webhook] Received webhook request');
 
     const bodyText = await req.text();
     let payload: any = {};

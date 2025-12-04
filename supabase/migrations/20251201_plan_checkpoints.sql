@@ -64,3 +64,4 @@ GRANT EXECUTE ON FUNCTION public.get_plan_checkpoint(UUID) TO service_role;
 COMMENT ON COLUMN public.plan_generation_jobs.checkpoint_data IS 'Stores intermediate plan data so generation can resume from where it left off';
 COMMENT ON COLUMN public.plan_generation_jobs.checkpoint_phase IS 'Which phase completed: 0=none, 1=workout, 2=nutrition, 3=merged, 4=reasons, 5=supplements, 6=validated';
 
+
